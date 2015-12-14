@@ -1,0 +1,10 @@
+syntax: glob
+*~
+*.capnp.go
+*.log
+*.test
+*.swp
+
+syntax: regexp
+(^|/)([^/]+)/\2$
+(^|/)\#[^/]+\#
