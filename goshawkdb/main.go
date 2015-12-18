@@ -41,13 +41,20 @@ func main() {
 func newServer() (*server, error) {
 	var configFile, dataDir, password, passwordFile string
 	var port int
+	var version bool
 
-	flag.StringVar(&configFile, "config", "", "path to configuration file")
-	flag.StringVar(&dataDir, "dir", "", "path to data directory")
-	flag.StringVar(&password, "password", "", "cluster password")
-	flag.StringVar(&passwordFile, "passwordfile", "", "path to file containing cluster password")
-	flag.IntVar(&port, "port", common.DefaultPort, "port to listen on")
+	flag.StringVar(&configFile, "config", "", "`Path` to configuration file")
+	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory")
+	flag.StringVar(&password, "password", "", "Cluster password")
+	flag.StringVar(&passwordFile, "passwordfile", "", "`Path` to file containing cluster password")
+	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on")
+	flag.BoolVar(&version, "version", false, "Display version and exit")
 	flag.Parse()
+
+	if version {
+		log.Printf("%v version %v", common.ProductName, goshawk.ServerVersion)
+		os.Exit(0)
+	}
 
 	var err error
 	if dataDir == "" {

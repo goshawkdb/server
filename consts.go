@@ -5,6 +5,7 @@ import (
 )
 
 const (
+	ServerVersion                 = "0.1"
 	OneTB                         = 1099511627776
 	TwoToTheSixtyThree            = 9223372036854775808
 	SubmissionInitialAttempts     = 5
