@@ -3,7 +3,7 @@ package db
 import (
 	"encoding/binary"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
 	// "fmt"
 	capn "github.com/glycerine/go-capnproto"

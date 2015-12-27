@@ -4,7 +4,8 @@ import (
 	"encoding/binary"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/paxos"
 	"log"
@@ -78,7 +79,7 @@ func (lcmsq *localConnectionMsgSyncQuery) maybeClose() {
 
 type localConnectionMsgRunClientTxn struct {
 	localConnectionMsgSyncQuery
-	txn         *msgs.ClientTxn
+	txn         *cmsgs.ClientTxn
 	varPosMap   map[common.VarUUId]*common.Positions
 	assignTxnId bool
 	outcome     *msgs.Outcome
@@ -194,7 +195,7 @@ func (lc *LocalConnection) TopologyChange(topology *server.Topology, servers map
 	})
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *msgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error) {
 	query := &localConnectionMsgRunClientTxn{
 		txn:         txn,
 		varPosMap:   varPosMap,

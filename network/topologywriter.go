@@ -5,7 +5,8 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/paxos"
@@ -79,7 +80,7 @@ func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarD
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave non-write action")
 		}
 		write := updateAction.Write()
-		var rootPtr *msgs.VarIdPos
+		var rootPtr *cmsgs.VarIdPos
 		if refs := write.References(); refs.Len() == 1 {
 			root := refs.At(0)
 			rootPtr = &root
@@ -107,7 +108,7 @@ func CreateTopologyZero(cm *ConnectionManager, topology *server.Topology, lc *cl
 		positions.Set(idx, uint8(idx))
 	}
 	create.SetValue(topology.Serialize())
-	create.SetReferences(msgs.NewVarIdPosList(seg, 0))
+	create.SetReferences(cmsgs.NewVarIdPosList(seg, 0))
 	allocs := msgs.NewAllocationList(seg, 1)
 	txn.SetAllocations(allocs)
 	alloc := allocs.At(0)
@@ -147,9 +148,9 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 	rw.SetVersion(topology.DBVersion[:])
 	rw.SetValue(topology.Serialize())
 	if topology.RootVarUUId == nil {
-		rw.SetReferences(msgs.NewVarIdPosList(seg, 0))
+		rw.SetReferences(cmsgs.NewVarIdPosList(seg, 0))
 	} else {
-		refs := msgs.NewVarIdPosList(seg, 1)
+		refs := cmsgs.NewVarIdPosList(seg, 1)
 		rw.SetReferences(refs)
 		varIdPos := refs.At(0)
 		varIdPos.SetId(topology.RootVarUUId[:])
@@ -219,7 +220,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 		return nil, false, fmt.Errorf("Internal error: readwrite of topology gave non-write action")
 	}
 	write := updateAction.Write()
-	var rootVarPos *msgs.VarIdPos
+	var rootVarPos *cmsgs.VarIdPos
 	if refs := write.References(); refs.Len() == 1 {
 		root := refs.At(0)
 		rootVarPos = &root
@@ -280,7 +281,7 @@ func MaybeCreateRoot(topology *server.Topology, conns map[common.RMId]paxos.Conn
 			positions.Set(idx, uint8(idx))
 		}
 		create.SetValue([]byte{})
-		create.SetReferences(msgs.NewVarIdPosList(seg, 0))
+		create.SetReferences(cmsgs.NewVarIdPosList(seg, 0))
 		allocs := msgs.NewAllocationList(seg, requiredKnownRMs)
 		txn.SetAllocations(allocs)
 		idx := 0

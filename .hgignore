@@ -1,6 +1,5 @@
 syntax: glob
 *~
-*.capnp.go
 *.log
 *.test
 *.swp

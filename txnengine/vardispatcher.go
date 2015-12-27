@@ -4,7 +4,8 @@ import (
 	"fmt"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/dispatcher"
 )
@@ -48,6 +49,6 @@ func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarMana
 }
 
 type LocalConnection interface {
-	RunClientTransaction(txn *msgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error)
+	RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error)
 	Status(*server.StatusConsumer)
 }

@@ -5,7 +5,8 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-type VarWriteSubscriber func(v *Var, value []byte, references *msgs.VarIdPos_List, txn *Txn)
+type VarWriteSubscriber func(v *Var, value []byte, references *cmsgs.VarIdPos_List, txn *Txn)
 
 type Var struct {
 	UUId            *common.VarUUId
@@ -113,7 +114,7 @@ func (v *Var) ReceiveTxn(action *localAction) {
 	if isRead && action.Retry {
 		if voted := v.curFrame.ReadRetry(action); !voted {
 			v.AddWriteSubscriber(action.Id,
-				func(v *Var, value []byte, refs *msgs.VarIdPos_List, newtxn *Txn) {
+				func(v *Var, value []byte, refs *cmsgs.VarIdPos_List, newtxn *Txn) {
 					if voted := v.curFrame.ReadRetry(action); voted {
 						v.RemoveWriteSubscriber(action.Id)
 					}
@@ -183,7 +184,7 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 	actionCap := action.writeAction
 	var (
 		value      []byte
-		references msgs.VarIdPos_List
+		references cmsgs.VarIdPos_List
 	)
 	switch actionCap.Which() {
 	case msgs.ACTION_WRITE:

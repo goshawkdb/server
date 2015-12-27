@@ -6,7 +6,8 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"sort"
 )
@@ -690,7 +691,7 @@ func (fo *frameOpen) maybeStartRoll() {
 	}
 }
 
-func (fo *frameOpen) createRollClientTxn() (*msgs.ClientTxn, map[common.VarUUId]*common.Positions) {
+func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions) {
 	var origWrite *msgs.Action
 	vUUIdBytes := fo.v.UUId[:]
 	for idx, l := 0, fo.frameTxnActions.Len(); idx < l; idx++ {
@@ -701,16 +702,16 @@ func (fo *frameOpen) createRollClientTxn() (*msgs.ClientTxn, map[common.VarUUId]
 		}
 	}
 	seg := capn.NewBuffer(nil)
-	ctxn := msgs.NewClientTxn(seg)
+	ctxn := cmsgs.NewClientTxn(seg)
 	ctxn.SetRetry(false)
-	actions := msgs.NewClientActionList(seg, 1)
+	actions := cmsgs.NewClientActionList(seg, 1)
 	ctxn.SetActions(actions)
 	action := actions.At(0)
 	action.SetVarId(fo.v.UUId[:])
 	action.SetRoll()
 	roll := action.Roll()
 	roll.SetVersion(fo.frameTxnId[:])
-	var refs msgs.VarIdPos_List
+	var refs cmsgs.VarIdPos_List
 	switch origWrite.Which() {
 	case msgs.ACTION_WRITE:
 		ow := origWrite.Write()

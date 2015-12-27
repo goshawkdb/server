@@ -11,7 +11,8 @@ import (
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/crypto/nacl/secretbox"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/paxos"
@@ -241,7 +242,7 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 	case *connectionReadMessage:
 		err = conn.handleMsgFromServer((*msgs.Message)(msgT))
 	case *connectionReadClientMessage:
-		err = conn.handleMsgFromClient((*msgs.ClientMessage)(msgT))
+		err = conn.handleMsgFromClient((*cmsgs.ClientMessage)(msgT))
 	case connectionMsgSend:
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
@@ -434,7 +435,7 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 	cah.nonce = 0
 
 	if seg, err := capn.ReadFromStream(cah.socket, nil); err == nil {
-		hello := msgs.ReadRootHello(seg)
+		hello := cmsgs.ReadRootHello(seg)
 		if cah.verifyHello(&hello) {
 			sessionKey := [32]byte{}
 			remotePublicKey := [32]byte{}
@@ -476,7 +477,7 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 
 func (cah *connectionAwaitHandshake) makeHello() (*capn.Segment, error) {
 	seg := capn.NewBuffer(nil)
-	hello := msgs.NewRootHello(seg)
+	hello := cmsgs.NewRootHello(seg)
 	hello.SetProduct(common.ProductName)
 	hello.SetVersion(common.ProductVersion)
 	publicKey, privateKey, err := box.GenerateKey(cr.Reader)
@@ -541,7 +542,7 @@ func (cah *connectionAwaitHandshake) readAndDecryptOne() (*capn.Segment, error) 
 	return seg, err
 }
 
-func (cah *connectionAwaitHandshake) verifyHello(hello *msgs.Hello) bool {
+func (cah *connectionAwaitHandshake) verifyHello(hello *cmsgs.Hello) bool {
 	return hello.Product() == common.ProductName &&
 		hello.Version() == common.ProductVersion
 }
@@ -559,7 +560,7 @@ func (cah *connectionAwaitHandshake) maybeRestartConnection(err error) (bool, er
 
 func (cah *connectionAwaitServerHandshake) makeHelloFromServer(topology *server.Topology) *capn.Segment {
 	seg := capn.NewBuffer(nil)
-	hello := msgs.NewRootHelloFromServer(seg)
+	hello := cmsgs.NewRootHelloFromServer(seg)
 	localHost := cah.connectionManager.LocalHost()
 	hello.SetLocalHost(localHost)
 	namespace := make([]byte, common.KeyLen-8)
@@ -577,7 +578,7 @@ func (cah *connectionAwaitServerHandshake) makeHelloFromServer(topology *server.
 		hello.SetTopology(topology.AddToSegAutoRoot(seg))
 	}
 	if topology.RootVarUUId != nil {
-		varIdPos := msgs.NewVarIdPos(seg)
+		varIdPos := cmsgs.NewVarIdPos(seg)
 		hello.SetRoot(varIdPos)
 		varIdPos.SetId(topology.RootVarUUId[:])
 		varIdPos.SetPositions((capn.UInt8List)(*topology.RootPositions))
@@ -606,7 +607,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 
 	if seg, err := cash.readAndDecryptOne(); err == nil {
-		hello := msgs.ReadRootHelloFromServer(seg)
+		hello := cmsgs.ReadRootHelloFromServer(seg)
 		if verified, remoteTopology := cash.verifyTopology(topology, &hello); verified {
 			cash.Lock()
 			cash.established = true
@@ -627,7 +628,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 }
 
-func (cash *connectionAwaitServerHandshake) verifyTopology(topology *server.Topology, remote *msgs.HelloFromServer) (bool, *server.Topology) {
+func (cash *connectionAwaitServerHandshake) verifyTopology(topology *server.Topology, remote *cmsgs.HelloFromServer) (bool, *server.Topology) {
 	remoteTopologyDBVersion := common.MakeTxnId(remote.TopologyDBVersion())
 	remoteTopologyCap := remote.Topology()
 	remoteRoot := remote.Root()
@@ -650,7 +651,7 @@ func (cach *connectionAwaitClientHandshake) init(conn *Connection) {
 
 func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	if seg, err := cach.readAndDecryptOne(); err == nil {
-		hello := msgs.ReadRootHelloFromClient(seg)
+		hello := cmsgs.ReadRootHelloFromClient(seg)
 		topology := cach.connectionManager.Topology()
 
 		un := hello.Username()
@@ -708,7 +709,7 @@ func (cr *connectionRun) start() (bool, error) {
 
 	seg := capn.NewBuffer(nil)
 	if cr.isClient {
-		message := msgs.NewRootClientMessage(seg)
+		message := cmsgs.NewRootClientMessage(seg)
 		message.SetHeartbeat()
 	} else {
 		message := msgs.NewRootMessage(seg)
@@ -755,19 +756,19 @@ func (cr *connectionRun) disableHashCodes(servers map[common.RMId]paxos.Connecti
 	cr.submitter.TopologyChange(nil, servers)
 }
 
-func (cr *connectionRun) handleMsgFromClient(msg *msgs.ClientMessage) error {
+func (cr *connectionRun) handleMsgFromClient(msg *cmsgs.ClientMessage) error {
 	if cr.currentState != cr {
 		// probably just draining the queue from the reader after a restart
 		return nil
 	}
 	cr.missingBeats = 0
 	switch which := msg.Which(); which {
-	case msgs.CLIENTMESSAGE_HEARTBEAT:
+	case cmsgs.CLIENTMESSAGE_HEARTBEAT:
 		// do nothing
-	case msgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
+	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		ctxn := msg.ClientTxnSubmission()
 		origTxnId := common.MakeTxnId(ctxn.Id())
-		cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *msgs.ClientTxnOutcome, err error) {
+		cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) {
 			switch {
 			case err != nil:
 				cr.clientTxnError(&ctxn, err, origTxnId)
@@ -775,7 +776,7 @@ func (cr *connectionRun) handleMsgFromClient(msg *msgs.ClientMessage) error {
 				return
 			default:
 				seg := capn.NewBuffer(nil)
-				msg := msgs.NewRootClientMessage(seg)
+				msg := cmsgs.NewRootClientMessage(seg)
 				msg.SetClientTxnOutcome(*clientOutcome)
 				cr.sendMessage(server.SegToBytes(msg.Segment))
 			}
@@ -798,10 +799,10 @@ func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 	return nil
 }
 
-func (cr *connectionRun) clientTxnError(ctxn *msgs.ClientTxn, err error, origTxnId *common.TxnId) error {
+func (cr *connectionRun) clientTxnError(ctxn *cmsgs.ClientTxn, err error, origTxnId *common.TxnId) error {
 	seg := capn.NewBuffer(nil)
-	msg := msgs.NewRootClientMessage(seg)
-	outcome := msgs.NewClientTxnOutcome(seg)
+	msg := cmsgs.NewRootClientMessage(seg)
+	outcome := cmsgs.NewClientTxnOutcome(seg)
 	msg.SetClientTxnOutcome(outcome)
 	if origTxnId == nil {
 		outcome.SetId(ctxn.Id())
@@ -961,7 +962,7 @@ func (cr *connectionReader) readServer() {
 
 func (cr *connectionReader) readClient() {
 	cr.read(func (seg *capn.Segment) bool {
-		msg := msgs.ReadRootClientMessage(seg)
+		msg := cmsgs.ReadRootClientMessage(seg)
 		return cr.enqueueQuery((*connectionReadClientMessage)(&msg))
 	})
 }
@@ -989,7 +990,7 @@ type connectionReadMessage msgs.Message
 
 func (crm *connectionReadMessage) connectionMsgWitness() {}
 
-type connectionReadClientMessage msgs.ClientMessage
+type connectionReadClientMessage cmsgs.ClientMessage
 
 func (crcm *connectionReadClientMessage) connectionMsgWitness() {}
 

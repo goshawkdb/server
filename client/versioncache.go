@@ -3,7 +3,7 @@ package client
 import (
 	"fmt"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
 )
 

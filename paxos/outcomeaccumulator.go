@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
 )
 

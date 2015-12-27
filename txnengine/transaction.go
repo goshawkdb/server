@@ -6,7 +6,7 @@ import (
 	mdb "github.com/msackman/gomdb"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"

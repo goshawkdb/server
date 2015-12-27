@@ -5,13 +5,14 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/paxos"
 	"time"
 )
 
-type ClientTxnCompletionConsumer func(*msgs.ClientTxnOutcome, error)
+type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error)
 
 type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
@@ -33,14 +34,14 @@ func (cts *ClientTxnSubmitter) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *msgs.ClientTxn, continuation ClientTxnCompletionConsumer) {
+func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation ClientTxnCompletionConsumer) {
 	if cts.txnLive {
 		continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
 		return
 	}
 
 	seg := capn.NewBuffer(nil)
-	clientOutcome := msgs.NewClientTxnOutcome(seg)
+	clientOutcome := cmsgs.NewClientTxnOutcome(seg)
 	clientOutcome.SetId(ctxnCap.Id())
 
 	curTxnId := common.MakeTxnId(ctxnCap.Id())
@@ -128,14 +129,14 @@ func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
 	}
 }
 
-func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) msgs.ClientUpdate_List {
-	clientUpdates := msgs.NewClientUpdateList(seg, len(updates))
+func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) cmsgs.ClientUpdate_List {
+	clientUpdates := cmsgs.NewClientUpdateList(seg, len(updates))
 	idx := 0
 	for update, actions := range updates {
 		clientUpdate := clientUpdates.At(idx)
 		idx++
 		clientUpdate.SetVersion(update.TxnId())
-		clientActions := msgs.NewClientActionList(seg, len(actions))
+		clientActions := cmsgs.NewClientActionList(seg, len(actions))
 		clientUpdate.SetActions(clientActions)
 
 		for idy, action := range actions {

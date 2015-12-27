@@ -4,7 +4,8 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/paxos"
@@ -131,7 +132,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *msgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration) error {
 	if sts.topology.Equal(server.BlankTopology) {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay) }
 		if sts.bufferedSubmissions == nil {
@@ -185,7 +186,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *msgs.ClientTxn) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewTxn(outgoingSeg)
 
@@ -240,9 +241,9 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 	}
 }
 
-func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *msgs.ClientAction_List) (map[common.RMId]*[]int, error) {
+func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, error) {
 
-	referencesInNeedOfPositions := []*msgs.VarIdPos{}
+	referencesInNeedOfPositions := []*cmsgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
 	createdPositions := make(map[common.VarUUId]*common.Positions)
 
@@ -255,16 +256,16 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 		var hashCodes []common.RMId
 
 		switch clientAction.Which() {
-		case msgs.CLIENTACTION_READ:
+		case cmsgs.CLIENTACTION_READ:
 			sts.translateRead(&action, &clientAction)
 
-		case msgs.CLIENTACTION_WRITE:
+		case cmsgs.CLIENTACTION_WRITE:
 			sts.translateWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
 
-		case msgs.CLIENTACTION_READWRITE:
+		case cmsgs.CLIENTACTION_READWRITE:
 			sts.translateReadWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
 
-		case msgs.CLIENTACTION_CREATE:
+		case cmsgs.CLIENTACTION_CREATE:
 			var positions *common.Positions
 			positions, hashCodes, err = sts.translateCreate(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
 			if err != nil {
@@ -273,7 +274,7 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 			vUUId := common.MakeVarUUId(clientAction.VarId())
 			createdPositions[*vUUId] = positions
 
-		case msgs.CLIENTACTION_ROLL:
+		case cmsgs.CLIENTACTION_ROLL:
 			sts.translateRoll(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
 
 		default:
@@ -286,7 +287,7 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 				return nil, err
 			}
 
-			if clientAction.Which() == msgs.CLIENTACTION_ROLL && hashCodes[0] != sts.rmId {
+			if clientAction.Which() == cmsgs.CLIENTACTION_ROLL && hashCodes[0] != sts.rmId {
 				return nil, AbortRollError
 			}
 		}
@@ -325,37 +326,37 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 	return rmIdToActionIndices, nil
 }
 
-func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientAction *msgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientAction *cmsgs.ClientAction) {
 	action.SetRead()
 	clientRead := clientAction.Read()
 	read := action.Read()
 	read.SetVersion(clientRead.Version())
 }
 
-func (sts *SimpleTxnSubmitter) translateWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *msgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*cmsgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
 	action.SetWrite()
 	clientWrite := clientAction.Write()
 	write := action.Write()
 	write.SetValue(clientWrite.Value())
 	clientReferences := clientWrite.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
+	references := cmsgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
 	write.SetReferences(references)
 	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
 }
 
-func (sts *SimpleTxnSubmitter) translateReadWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *msgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateReadWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*cmsgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
 	action.SetReadwrite()
 	clientReadWrite := clientAction.Readwrite()
 	readWrite := action.Readwrite()
 	readWrite.SetVersion(clientReadWrite.Version())
 	readWrite.SetValue(clientReadWrite.Value())
 	clientReferences := clientReadWrite.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
+	references := cmsgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
 	readWrite.SetReferences(references)
 	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
 }
 
-func (sts *SimpleTxnSubmitter) translateCreate(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *msgs.ClientAction) (*common.Positions, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) translateCreate(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*cmsgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) (*common.Positions, []common.RMId, error) {
 	action.SetCreate()
 	clientCreate := clientAction.Create()
 	create := action.Create()
@@ -367,25 +368,25 @@ func (sts *SimpleTxnSubmitter) translateCreate(outgoingSeg *capn.Segment, refere
 	}
 	create.SetPositions((capn.UInt8List)(*positions))
 	clientReferences := clientCreate.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
+	references := cmsgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
 	create.SetReferences(references)
 	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
 	return positions, hashCodes, nil
 }
 
-func (sts *SimpleTxnSubmitter) translateRoll(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *msgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateRoll(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*cmsgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
 	action.SetRoll()
 	clientRoll := clientAction.Roll()
 	roll := action.Roll()
 	roll.SetVersion(clientRoll.Version())
 	roll.SetValue(clientRoll.Value())
 	clientReferences := clientRoll.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
+	references := cmsgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
 	roll.SetReferences(references)
 	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
 }
 
-func copyReferences(clientReferences *capn.DataList, references *msgs.VarIdPos_List, referencesInNeedOfPositions *[]*msgs.VarIdPos) {
+func copyReferences(clientReferences *capn.DataList, references *cmsgs.VarIdPos_List, referencesInNeedOfPositions *[]*cmsgs.VarIdPos) {
 	for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
 		vUUIdPos := references.At(idx)
 		vUUId := clientReferences.At(idx)
