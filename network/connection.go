@@ -239,7 +239,9 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 		conn.reader = nil
 		err = conn.connectionRun.maybeRestartConnection(msgT)
 	case *connectionReadMessage:
-		err = conn.handleMsgFromPeer((*msgs.Message)(msgT))
+		err = conn.handleMsgFromServer((*msgs.Message)(msgT))
+	case *connectionReadClientMessage:
+		err = conn.handleMsgFromClient((*msgs.ClientMessage)(msgT))
 	case connectionMsgSend:
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
@@ -705,8 +707,13 @@ func (cr *connectionRun) start() (bool, error) {
 	log.Printf("Connection established to %v (%v)\n", cr.remoteHost, cr.remoteRMId)
 
 	seg := capn.NewBuffer(nil)
-	message := msgs.NewRootMessage(seg)
-	message.SetHeartbeat()
+	if cr.isClient {
+		message := msgs.NewRootClientMessage(seg)
+		message.SetHeartbeat()
+	} else {
+		message := msgs.NewRootMessage(seg)
+		message.SetHeartbeat()
+	}
 	cr.beatBytes = server.SegToBytes(seg)
 
 	if cr.isServer {
@@ -725,7 +732,11 @@ func (cr *connectionRun) start() (bool, error) {
 	go cr.beater.beat()
 
 	cr.reader = newConnectionReader(cr.Connection)
-	go cr.reader.read()
+	if cr.isClient {
+		go cr.reader.readClient()
+	} else {
+		go cr.reader.readServer()
+	}
 
 	return false, nil
 }
@@ -744,16 +755,16 @@ func (cr *connectionRun) disableHashCodes(servers map[common.RMId]paxos.Connecti
 	cr.submitter.TopologyChange(nil, servers)
 }
 
-func (cr *connectionRun) handleMsgFromPeer(msg *msgs.Message) error {
+func (cr *connectionRun) handleMsgFromClient(msg *msgs.ClientMessage) error {
 	if cr.currentState != cr {
 		// probably just draining the queue from the reader after a restart
 		return nil
 	}
 	cr.missingBeats = 0
 	switch which := msg.Which(); which {
-	case msgs.MESSAGE_HEARTBEAT:
+	case msgs.CLIENTMESSAGE_HEARTBEAT:
 		// do nothing
-	case msgs.MESSAGE_CLIENTTXNSUBMISSION:
+	case msgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		ctxn := msg.ClientTxnSubmission()
 		origTxnId := common.MakeTxnId(ctxn.Id())
 		cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *msgs.ClientTxnOutcome, err error) {
@@ -764,12 +775,24 @@ func (cr *connectionRun) handleMsgFromPeer(msg *msgs.Message) error {
 				return
 			default:
 				seg := capn.NewBuffer(nil)
-				msg := msgs.NewRootMessage(seg)
+				msg := msgs.NewRootClientMessage(seg)
 				msg.SetClientTxnOutcome(*clientOutcome)
 				cr.sendMessage(server.SegToBytes(msg.Segment))
 			}
 		})
 	default:
+		cr.maybeRestartConnection(fmt.Errorf("Unexpected message type received from client: %v", which))
+	}
+	return nil
+}
+
+func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
+	if cr.currentState != cr {
+		// probably just draining the queue from the reader after a restart
+		return nil
+	}
+	cr.missingBeats = 0
+	if which := msg.Which(); which != msgs.MESSAGE_HEARTBEAT {
 		cr.connectionManager.Dispatchers.DispatchMessage(cr.remoteRMId, which, msg)
 	}
 	return nil
@@ -777,7 +800,7 @@ func (cr *connectionRun) handleMsgFromPeer(msg *msgs.Message) error {
 
 func (cr *connectionRun) clientTxnError(ctxn *msgs.ClientTxn, err error, origTxnId *common.TxnId) error {
 	seg := capn.NewBuffer(nil)
-	msg := msgs.NewRootMessage(seg)
+	msg := msgs.NewRootClientMessage(seg)
 	outcome := msgs.NewClientTxnOutcome(seg)
 	msg.SetClientTxnOutcome(outcome)
 	if origTxnId == nil {
@@ -929,7 +952,21 @@ func newConnectionReader(conn *Connection) *connectionReader {
 	}
 }
 
-func (cr *connectionReader) read() {
+func (cr *connectionReader) readServer() {
+	cr.read(func (seg *capn.Segment) bool {
+		msg := msgs.ReadRootMessage(seg)
+		return cr.enqueueQuery((*connectionReadMessage)(&msg))
+	})
+}
+
+func (cr *connectionReader) readClient() {
+	cr.read(func (seg *capn.Segment) bool {
+		msg := msgs.ReadRootClientMessage(seg)
+		return cr.enqueueQuery((*connectionReadClientMessage)(&msg))
+	})
+}
+
+func (cr *connectionReader) read(fun func(*capn.Segment) bool) {
 	defer cr.terminated.Done()
 	for {
 		select {
@@ -937,8 +974,7 @@ func (cr *connectionReader) read() {
 			return
 		default:
 			if seg, err := cr.readAndDecryptOne(); err == nil {
-				msg := msgs.ReadRootMessage(seg)
-				if !cr.enqueueQuery((*connectionReadMessage)(&msg)) {
+				if !fun(seg) {
 					return
 				}
 			} else {
@@ -952,6 +988,10 @@ func (cr *connectionReader) read() {
 type connectionReadMessage msgs.Message
 
 func (crm *connectionReadMessage) connectionMsgWitness() {}
+
+type connectionReadClientMessage msgs.ClientMessage
+
+func (crcm *connectionReadClientMessage) connectionMsgWitness() {}
 
 type connectionReadError struct {
 	error
