@@ -78,19 +78,21 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
 		if bites, err := rtxn.Get(db.DB.Vars, uuid[:]); err == nil {
 			return bites
 		} else {
-			return nil
+			return err
 		}
 	}).ResultError()
 
-	if err == nil {
-		v, err := VarFromData(result.([]byte), vm.exe, vm.disk, vm)
-		if err == nil {
-			vm.active[*v.UUId] = v
-		}
-		return v, err
-	} else {
+	if err != nil {
 		return nil, err
 	}
+	if nf, ok := result.(mdb.Errno); ok && nf == mdb.NotFound {
+		return nil, nf
+	}
+	v, err := VarFromData(result.([]byte), vm.exe, vm.disk, vm)
+	if err == nil {
+		vm.active[*v.UUId] = v
+	}
+	return v, err
 }
 
 func (vm *VarManager) Status(sc *server.StatusConsumer) {
