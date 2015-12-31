@@ -8,11 +8,10 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"log"
 )
 
 func init() {
@@ -86,11 +85,10 @@ func (am *AcceptorManager) ensureAcceptor(txnId *common.TxnId, txnCap *msgs.Txn)
   in the instance id.
 */
 
-func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) {
+func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
-		log.Println("Unable to decode acceptor state", data)
-		return
+		return err
 	}
 	state := msgs.ReadRootAcceptorState(seg)
 	txn := state.Txn()
@@ -129,6 +127,7 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) {
 	}
 
 	acc.Start()
+	return nil
 }
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {

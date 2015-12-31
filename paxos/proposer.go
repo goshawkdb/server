@@ -5,8 +5,8 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
@@ -55,10 +55,10 @@ func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mod
 	return p
 }
 
-func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) *Proposer {
+func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) (*Proposer, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
-		log.Println("Unable to decode proposer state", data)
+		return nil, err
 	}
 	// If we were on disk, then that means we must be locally complete
 	// and just need to send out TLCs.
@@ -80,7 +80,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) *Pr
 	}
 	p.init()
 	p.allAcceptorsAgreed = true
-	return p
+	return p, nil
 }
 
 func (p *Proposer) init() {
@@ -365,8 +365,9 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 
 	data := server.SegToBytes(stateSeg)
 
-	future := palc.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-		return nil, rwtxn.Put(db.DB.Proposers, palc.txnId[:], data, 0)
+	future := palc.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Put(db.DB.Proposers, palc.txnId[:], data, 0)
+		return nil
 	})
 	go func() {
 		if _, err := future.ResultError(); err != nil {
@@ -453,8 +454,9 @@ func (paf *proposerAwaitFinished) TxnFinished() {
 	server.Log(paf.txnId, "Txn Finished Callback")
 	if paf.currentState == paf {
 		paf.nextState()
-		future := paf.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-			return nil, rwtxn.Del(db.DB.Proposers, paf.txnId[:], nil)
+		future := paf.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+			rwtxn.Del(db.DB.Proposers, paf.txnId[:], nil)
+			return nil
 		})
 		go func() {
 			if _, err := future.ResultError(); err != nil {

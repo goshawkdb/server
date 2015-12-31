@@ -5,8 +5,8 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
@@ -75,31 +75,42 @@ func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 }
 
 func (pd *ProposerDispatcher) loadFromDisk(server *mdbs.MDBServer) {
-	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) (interface{}, error) {
-		return rtxn.WithCursor(db.DB.Proposers, func(cursor *mdb.Cursor) (interface{}, error) {
+	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, err := rtxn.WithCursor(db.DB.Proposers, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.
-			count := 0
+			proposerStates := make(map[*common.TxnId][]byte)
 			txnIdData, proposerState, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; txnIdData, proposerState, err = cursor.Get(nil, nil, mdb.NEXT) {
-				count++
 				txnId := common.MakeTxnId(txnIdData)
-				proposerStateCopy := proposerState
-				pd.withProposerManager(txnId, func(pm *ProposerManager) {
-					pm.loadFromData(txnId, proposerStateCopy)
-				})
+				proposerStates[txnId] = proposerState
 			}
-			if err == mdb.NotFound {
+			if err == mdb.NotFound || err == nil {
 				// fine, we just fell off the end as expected.
-				return count, nil
+				return proposerStates
 			} else {
-				return count, err
+				return nil
 			}
 		})
+		if err == nil {
+			return res
+		} else {
+			return nil
+		}
 	}).ResultError()
 	if err == nil {
-		log.Printf("Loaded %v proposers from disk\n", res.(int))
+		proposerStates := res.(map[*common.TxnId][]byte)
+		for txnId, proposerState := range proposerStates {
+			proposerStateCopy := proposerState
+			txnIdCopy := txnId
+			pd.withProposerManager(txnIdCopy, func(pm *ProposerManager) {
+				if err := pm.loadFromData(txnIdCopy, proposerStateCopy); err != nil {
+					log.Printf("ProposerDispatcher error loading %v from disk: %v\n", txnIdCopy, err)
+				}
+			})
+		}
+		log.Printf("Loaded %v proposers from disk\n", len(proposerStates))
 	} else {
 		log.Println("ProposerDispatcher error loading from disk:", err)
 	}

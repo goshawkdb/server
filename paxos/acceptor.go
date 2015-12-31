@@ -5,8 +5,8 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"log"
 )
@@ -159,8 +159,9 @@ func (awtd *acceptorWriteToDisk) start() {
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	server.Log(awtd.txnId, "Writing 2B to disk...")
-	future := awtd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-		return nil, rwtxn.Put(db.DB.BallotOutcomes, awtd.txnId[:], data, 0)
+	future := awtd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Put(db.DB.BallotOutcomes, awtd.txnId[:], data, 0)
+		return nil
 	})
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.
@@ -299,8 +300,9 @@ func (adfd *acceptorDeleteFromDisk) start() {
 		adfd.acceptorManager.ConnectionManager.RemoveSenderSync(adfd.twoBSender)
 		adfd.twoBSender = nil
 	}
-	future := adfd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-		return nil, rwtxn.Del(db.DB.BallotOutcomes, adfd.txnId[:], nil)
+	future := adfd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Del(db.DB.BallotOutcomes, adfd.txnId[:], nil)
+		return nil
 	})
 	go func() {
 		if _, err := future.ResultError(); err != nil {

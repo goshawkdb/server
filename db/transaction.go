@@ -3,8 +3,8 @@ package db
 import (
 	"encoding/binary"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	// "fmt"
 	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
@@ -56,22 +56,12 @@ func WriteTxnToDisk(rwtxn *mdbs.RWTxn, txnId *common.TxnId, txnBites []byte) err
 	}
 }
 
-func ReadTxnFromDisk(rtxn *mdbs.RTxn, txnId *common.TxnId) (*msgs.Txn, error) {
+func ReadTxnBytesFromDisk(rtxn *mdbs.RTxn, txnId *common.TxnId) []byte {
 	bites, err := rtxn.Get(DB.Transactions, txnId[:])
-	switch err {
-	case nil:
-		if seg, _, err := capn.ReadFromMemoryZeroCopy(bites); err == nil {
-			txn := msgs.ReadRootTxn(seg)
-			return &txn, nil
-		} else {
-			return nil, err
-		}
-
-	case mdb.NotFound:
-		return nil, nil
-
-	default:
-		return nil, err
+	if err == nil {
+		return bites
+	} else {
+		return nil
 	}
 }
 
