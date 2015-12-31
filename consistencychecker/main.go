@@ -41,7 +41,7 @@ func main() {
 	for _, d := range dirs {
 		dir := d
 		log.Printf("...loading from %v\n", dir)
-		disk, err := mdbs.NewMDBServer(dir, 0, 0600, server.OneTB, 1, time.Millisecond, db.DB)
+		disk, err := mdbs.NewMDBServer(dir, 0, 0600, server.MDBInitialSize, 1, time.Millisecond, db.DB)
 		if err != nil {
 			log.Println(err)
 			continue

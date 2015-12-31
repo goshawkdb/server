@@ -6,7 +6,7 @@ import (
 
 const (
 	ServerVersion                 = "dev"
-	OneTB                         = 1099511627776
+	MDBInitialSize                = 1048576
 	TwoToTheSixtyThree            = 9223372036854775808
 	SubmissionInitialAttempts     = 5
 	SubmissionInitialBackoff      = 2 * time.Microsecond

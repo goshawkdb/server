@@ -10,7 +10,6 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"log"
 	"math/rand"
 	"time"
 )
@@ -264,7 +263,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.
 		if _, err := future.ResultError(); err != nil {
-			log.Println("Var error when writing to disk:", err)
+			panic(fmt.Sprintf("Var error when writing to disk: %v\n", err))
 			return
 		}
 		// Switch back to the right go-routine
