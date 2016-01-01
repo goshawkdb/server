@@ -5,12 +5,11 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"log"
 	"math/rand"
 	"time"
 )
@@ -49,15 +48,18 @@ func VarFromData(data []byte, exe *dispatcher.Executor, disk *mdbs.MDBServer, vm
 	writesClock := VectorClockFromCap(varCap.WritesClock())
 	server.Log(v.UUId, "Restored", writeTxnId)
 
-	if result, err := disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) (interface{}, error) {
-		return db.ReadTxnFromDisk(rtxn, writeTxnId)
+	if result, err := disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
 	}).ResultError(); err == nil {
-		if result == nil || result.(*msgs.Txn) == nil {
-			panic(fmt.Sprintf("%v Unable to find txn %v on disk (%v)", v.UUId, writeTxnId, result))
+		bites := result.([]byte)
+		if seg, _, err := capn.ReadFromMemoryZeroCopy(bites); err == nil {
+			txn := msgs.ReadRootTxn(seg)
+			actions := txn.Actions()
+			v.curFrame = NewFrame(nil, v, writeTxnId, &actions, writeTxnClock, writesClock)
+			v.curFrameOnDisk = v.curFrame
+		} else {
+			return nil, err
 		}
-		actions := result.(*msgs.Txn).Actions()
-		v.curFrame = NewFrame(nil, v, writeTxnId, &actions, writeTxnClock, writesClock)
-		v.curFrameOnDisk = v.curFrame
 	} else {
 		return nil, err
 	}
@@ -248,22 +250,20 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
-	future := v.disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-		if err := db.WriteTxnToDisk(rwtxn, f.frameTxnId, txnBytes); err != nil {
-			return nil, err
+	future := v.disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		if err := db.WriteTxnToDisk(rwtxn, f.frameTxnId, txnBytes); err == nil {
+			if err = rwtxn.Put(db.DB.Vars, v.UUId[:], varData, 0); err == nil {
+				if v.curFrameOnDisk != nil {
+					db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameTxnId)
+				}
+			}
 		}
-		if err := rwtxn.Put(db.DB.Vars, v.UUId[:], varData, 0); err != nil {
-			return nil, err
-		}
-		if v.curFrameOnDisk != nil {
-			return nil, db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameTxnId)
-		}
-		return nil, nil
+		return nil
 	})
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.
 		if _, err := future.ResultError(); err != nil {
-			log.Println("Var error when writing to disk:", err)
+			panic(fmt.Sprintf("Var error when writing to disk: %v\n", err))
 			return
 		}
 		// Switch back to the right go-routine

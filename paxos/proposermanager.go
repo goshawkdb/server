@@ -7,8 +7,8 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
@@ -48,12 +48,16 @@ func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatche
 	return pm
 }
 
-func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) {
+func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error {
 	if _, found := pm.proposers[*txnId]; !found {
-		proposer := ProposerFromData(pm, txnId, data)
+		proposer, err := ProposerFromData(pm, txnId, data)
+		if err != nil {
+			return err
+		}
 		pm.proposers[*txnId] = proposer
 		proposer.Start()
 	}
+	return nil
 }
 
 func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {

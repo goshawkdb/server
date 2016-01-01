@@ -7,8 +7,8 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
@@ -41,7 +41,7 @@ func main() {
 	for _, d := range dirs {
 		dir := d
 		log.Printf("...loading from %v\n", dir)
-		disk, err := mdbs.NewMDBServer(dir, 0, 0600, server.OneTB, 1, time.Millisecond, db.DB)
+		disk, err := mdbs.NewMDBServer(dir, 0, 0600, server.MDBInitialSize, 1, time.Millisecond, db.DB)
 		if err != nil {
 			log.Println(err)
 			continue
@@ -66,14 +66,14 @@ func main() {
 }
 
 func loadVars(disk *mdbs.MDBServer, vars map[common.VarUUId]*varstate) {
-	_, err := disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) (interface{}, error) {
-		return rtxn.WithCursor(db.DB.Vars, func(cursor *mdb.Cursor) (interface{}, error) {
+	_, err := disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		_, err := rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
 			key, data, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; key, data, err = cursor.Get(nil, nil, mdb.NEXT) {
 				vUUId := common.MakeVarUUId(key)
 				seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 				if err != nil {
-					log.Println(err)
+					log.Printf("Error when decoding %v: %v\n", vUUId, err)
 					continue
 				}
 
@@ -100,12 +100,9 @@ func loadVars(disk *mdbs.MDBServer, vars map[common.VarUUId]*varstate) {
 					vars[*vUUId] = state
 				}
 			}
-			if err == mdb.NotFound {
-				return nil, nil
-			} else {
-				return nil, err
-			}
+			return nil
 		})
+		return err
 	}).ResultError()
 	if err != nil {
 		log.Println(err)

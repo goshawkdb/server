@@ -72,21 +72,27 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
 		return v, nil
 	}
 
-	result, err := vm.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) (interface{}, error) {
+	result, err := vm.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		// rtxn.Get returns a copy of the data, so we don't need to
 		// worry about pointers into the disk
-		return rtxn.Get(db.DB.Vars, uuid[:])
+		if bites, err := rtxn.Get(db.DB.Vars, uuid[:]); err == nil {
+			return bites
+		} else {
+			return err
+		}
 	}).ResultError()
 
-	if err == nil {
-		v, err := VarFromData(result.([]byte), vm.exe, vm.disk, vm)
-		if err == nil {
-			vm.active[*v.UUId] = v
-		}
-		return v, err
-	} else {
+	if err != nil {
 		return nil, err
 	}
+	if nf, ok := result.(mdb.Errno); ok && nf == mdb.NotFound {
+		return nil, nf
+	}
+	v, err := VarFromData(result.([]byte), vm.exe, vm.disk, vm)
+	if err == nil {
+		vm.active[*v.UUId] = v
+	}
+	return v, err
 }
 
 func (vm *VarManager) Status(sc *server.StatusConsumer) {

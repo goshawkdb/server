@@ -138,7 +138,7 @@ func (s *server) start() {
 	}
 	runtime.GOMAXPROCS(procs)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP, 0600, goshawk.OneTB, procs/2, time.Millisecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
 	s.maybeShutdown(err)
 	s.addOnShutdown(disk.Shutdown)
 
