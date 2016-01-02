@@ -5,6 +5,7 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/common/capnp"
+	"goshawkdb.io/server/certs"
 	"goshawkdb.io/server/configuration"
 )
 
@@ -15,8 +16,9 @@ var (
 
 var BlankTopology = &Topology{
 	Configuration: &configuration.Configuration{
-		F:          0,
-		MaxRMCount: 1,
+		F:                                0,
+		MaxRMCount:                       1,
+		ClusterCertificatePrivateKeyPair: &certs.ClusterCertificatePrivateKeyPair{},
 	},
 	AllRMs:    []common.RMId{},
 	FInc:      1,
@@ -66,7 +68,9 @@ func TopologyDeserialize(txnId *common.TxnId, root *msgs.VarIdPos, data []byte) 
 }
 
 func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, topology *msgs.Topology) *Topology {
-	t := &Topology{Configuration: &configuration.Configuration{}}
+	t := &Topology{
+		Configuration: &configuration.Configuration{
+			ClusterCertificatePrivateKeyPair: &certs.ClusterCertificatePrivateKeyPair{}}}
 	t.ClusterId = topology.ClusterId()
 	t.Version = topology.Version()
 	t.Hosts = topology.Hosts().ToArray()
@@ -92,6 +96,8 @@ func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, topology *msgs.To
 		account := accounts.At(idx)
 		t.Accounts[account.Username()] = account.Password()
 	}
+	t.ClusterCertificate = string(topology.ClusterCertificate())
+	t.ClusterPrivateKey = string(topology.ClusterPrivateKey())
 	return t
 }
 
@@ -121,6 +127,8 @@ func (t *Topology) AddToSegAutoRoot(seg *capn.Segment) msgs.Topology {
 		account.SetUsername(un)
 		account.SetPassword(pw)
 	}
+	topology.SetClusterCertificate(([]byte)(t.ClusterCertificate))
+	topology.SetClusterPrivateKey(([]byte)(t.ClusterPrivateKey))
 	return topology
 }
 

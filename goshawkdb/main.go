@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/howeyc/gopass"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/common/capnp"
 	goshawk "goshawkdb.io/server"
+	"goshawkdb.io/server/certs"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
@@ -41,7 +45,7 @@ func main() {
 func newServer() (*server, error) {
 	var configFile, dataDir, password, passwordFile string
 	var port int
-	var version bool
+	var version, genClusterCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory")
@@ -49,10 +53,35 @@ func newServer() (*server, error) {
 	flag.StringVar(&passwordFile, "passwordfile", "", "`Path` to file containing cluster password")
 	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on")
 	flag.BoolVar(&version, "version", false, "Display version and exit")
+	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate")
 	flag.Parse()
 
 	if version {
 		log.Printf("%v version %v", common.ProductName, goshawk.ServerVersion)
+		os.Exit(0)
+	}
+
+	if genClusterCert {
+		fmt.Printf("Enter passphrase (empty for no passphrase): ")
+		passphrase := gopass.GetPasswd()
+		if len(passphrase) != 0 {
+			fmt.Printf("Enter same passphrase again: ")
+			if passphrase2 := gopass.GetPasswd(); !bytes.Equal(passphrase, passphrase2) {
+				log.Fatal("Passphrases do not match. Exiting")
+			}
+		}
+		keyPair, err := certs.NewClusterCertificates(passphrase)
+		if err != nil {
+			log.Fatal(err)
+		}
+		jsoned, err := json.Marshal(keyPair)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if _, err = os.Stdout.Write(jsoned); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println()
 		os.Exit(0)
 	}
 

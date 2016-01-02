@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"golang.org/x/crypto/bcrypt"
 	"goshawkdb.io/common"
+	"goshawkdb.io/server/certs"
 	"net"
 	"os"
 	"strconv"
@@ -18,7 +19,8 @@ type Configuration struct {
 	F          uint8
 	MaxRMCount uint8
 	AsyncFlush bool
-	Accounts   map[string]string
+	*certs.ClusterCertificatePrivateKeyPair
+	Accounts map[string]string
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {
@@ -37,6 +39,9 @@ func (a *Configuration) Equal(b *Configuration) bool {
 		if pwB, found := b.Accounts[un]; !found || pwA != pwB {
 			return false
 		}
+	}
+	if !a.ClusterCertificatePrivateKeyPair.Equal(b.ClusterCertificatePrivateKeyPair) {
+		return false
 	}
 	return true
 }
@@ -98,6 +103,10 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 		if _, err := net.ResolveTCPAddr("tcp", hostPort); err != nil {
 			return nil, err
 		}
+	}
+	_, _, err = config.ClusterCertificatePrivateKeyPair.Verify()
+	if err != nil {
+		return nil, err
 	}
 	if len(config.Accounts) == 0 {
 		return nil, errors.New("No accounts defined")
