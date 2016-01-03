@@ -5,16 +5,17 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 )
 
-func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarDispatcher, lc *client.LocalConnection) (*server.Topology, error) {
+func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarDispatcher, lc *client.LocalConnection) (*configuration.Topology, error) {
 	if paxos.IsDatabaseClean(varDispatcher) {
 		return nil, nil
 	}
@@ -27,7 +28,7 @@ func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarD
 		actions := msgs.NewActionList(seg, 1)
 		txn.SetActions(actions)
 		action := actions.At(0)
-		action.SetVarId(server.TopologyVarUUId[:])
+		action.SetVarId(configuration.TopologyVarUUId[:])
 		action.SetRead()
 		action.Read().SetVersion(common.VersionZero[:])
 		allocs := msgs.NewAllocationList(seg, 1)
@@ -68,7 +69,7 @@ func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarD
 		var updateAction *msgs.Action
 		for idx, l := 0, updateActions.Len(); idx < l; idx++ {
 			action := updateActions.At(idx)
-			if bytes.Equal(action.VarId(), server.TopologyVarUUId[:]) {
+			if bytes.Equal(action.VarId(), configuration.TopologyVarUUId[:]) {
 				updateAction = &action
 				break
 			}
@@ -85,21 +86,21 @@ func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarD
 			root := refs.At(0)
 			rootPtr = &root
 		}
-		return server.TopologyDeserialize(dbversion, rootPtr, write.Value())
+		return configuration.TopologyDeserialize(dbversion, rootPtr, write.Value())
 	}
 }
 
-func CreateTopologyZero(cm *ConnectionManager, topology *server.Topology, lc *client.LocalConnection) (*common.TxnId, error) {
+func CreateTopologyZero(cm *ConnectionManager, topology *configuration.Topology, lc *client.LocalConnection) (*common.TxnId, error) {
 	seg := capn.NewBuffer(nil)
 	txn := msgs.NewTxn(seg)
-	txnId := server.VersionOne
+	txnId := configuration.VersionOne
 	txn.SetId(txnId[:])
 	txn.SetSubmitter(uint32(cm.RMId))
 	txn.SetSubmitterBootCount(cm.BootCount)
 	actions := msgs.NewActionList(seg, 1)
 	txn.SetActions(actions)
 	action := actions.At(0)
-	action.SetVarId(server.TopologyVarUUId[:])
+	action.SetVarId(configuration.TopologyVarUUId[:])
 	action.SetCreate()
 	create := action.Create()
 	positions := seg.NewUInt8List(int(topology.MaxRMCount))
@@ -133,7 +134,7 @@ func CreateTopologyZero(cm *ConnectionManager, topology *server.Topology, lc *cl
 	}
 }
 
-func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connection, topology *server.Topology, fInc int, active, passive []common.RMId, lc *client.LocalConnection) (*server.Topology, bool, error) {
+func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connection, topology *configuration.Topology, fInc int, active, passive []common.RMId, lc *client.LocalConnection) (*configuration.Topology, bool, error) {
 	seg := capn.NewBuffer(nil)
 	txn := msgs.NewTxn(seg)
 	txn.SetSubmitter(uint32(cm.RMId))
@@ -142,7 +143,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 	actions := msgs.NewActionList(seg, 1)
 	txn.SetActions(actions)
 	topologyAction := actions.At(0)
-	topologyAction.SetVarId(server.TopologyVarUUId[:])
+	topologyAction.SetVarId(configuration.TopologyVarUUId[:])
 	topologyAction.SetReadwrite()
 	rw := topologyAction.Readwrite()
 	rw.SetVersion(topology.DBVersion[:])
@@ -207,7 +208,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 	var updateAction *msgs.Action
 	for idx, l := 0, updateActions.Len(); idx < l; idx++ {
 		action := updateActions.At(idx)
-		if bytes.Equal(action.VarId(), server.TopologyVarUUId[:]) {
+		if bytes.Equal(action.VarId(), configuration.TopologyVarUUId[:]) {
 			updateAction = &action
 			break
 		}
@@ -227,7 +228,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 	} else if refs.Len() > 1 {
 		return nil, false, fmt.Errorf("Internal error: readwrite of topology had wrong references: %v", refs.Len())
 	}
-	topology, err = server.TopologyDeserialize(dbversion, rootVarPos, write.Value())
+	topology, err = configuration.TopologyDeserialize(dbversion, rootVarPos, write.Value())
 	if err != nil {
 		return nil, false, err
 	}
@@ -241,7 +242,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 	return topology, true, nil
 }
 
-func MaybeCreateRoot(topology *server.Topology, conns map[common.RMId]paxos.Connection, cm *ConnectionManager, lc *client.LocalConnection) error {
+func MaybeCreateRoot(topology *configuration.Topology, conns map[common.RMId]paxos.Connection, cm *ConnectionManager, lc *client.LocalConnection) error {
 	if topology.RootVarUUId != nil {
 		return nil
 	}
@@ -324,13 +325,13 @@ func MaybeCreateRoot(topology *server.Topology, conns map[common.RMId]paxos.Conn
 }
 
 type TopologyWriter struct {
-	toWrite           *server.Topology
+	toWrite           *configuration.Topology
 	localConnection   *client.LocalConnection
 	connectionManager *ConnectionManager
 	finished          bool
 }
 
-func NewTopologyWriter(topology *server.Topology, lc *client.LocalConnection, cm *ConnectionManager) *TopologyWriter {
+func NewTopologyWriter(topology *configuration.Topology, lc *client.LocalConnection, cm *ConnectionManager) *TopologyWriter {
 	return &TopologyWriter{
 		toWrite:           topology.Clone(),
 		localConnection:   lc,

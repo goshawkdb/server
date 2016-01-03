@@ -1,15 +1,16 @@
 package network
 
 import (
-	"crypto/sha256"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/common/certs"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	"log"
 	"sync"
@@ -17,21 +18,21 @@ import (
 
 type ConnectionManager struct {
 	sync.RWMutex
-	localHost         string
-	RMId              common.RMId
-	BootCount         uint32
-	passwordHash      [sha256.Size]byte
-	topology          *server.Topology
-	remoteTopology    *server.Topology
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(connectionManagerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan connectionManagerMsg
-	servers           map[string]*Connection
-	rmToServer        map[common.RMId]*connectionWithBootCount
-	connCountToClient map[uint32]paxos.ClientConnection
-	desired           []string
-	senders           map[paxos.Sender]server.EmptyStruct
-	Dispatchers       *paxos.Dispatchers
+	localHost                     string
+	RMId                          common.RMId
+	BootCount                     uint32
+	NodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
+	topology                      *configuration.Topology
+	remoteTopology                *configuration.Topology
+	cellTail                      *cc.ChanCellTail
+	enqueueQueryInner             func(connectionManagerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan                     <-chan connectionManagerMsg
+	servers                       map[string]*Connection
+	rmToServer                    map[common.RMId]*connectionWithBootCount
+	connCountToClient             map[uint32]paxos.ClientConnection
+	desired                       []string
+	senders                       map[paxos.Sender]server.EmptyStruct
+	Dispatchers                   *paxos.Dispatchers
 }
 
 type connectionManagerMsg interface {
@@ -61,7 +62,7 @@ type connectionManagerMsgClientEstablished struct {
 	connNumber uint32
 	conn       paxos.ClientConnection
 	servers    map[common.RMId]paxos.Connection
-	topology   *server.Topology
+	topology   *configuration.Topology
 	resultChan chan struct{}
 }
 
@@ -80,12 +81,12 @@ func (cmms connectionManagerMsgSenderFinished) connectionManagerMsgWitness() {}
 
 type connectionManagerMsgGetTopology struct {
 	resultChan chan struct{}
-	topology   *server.Topology
+	topology   *configuration.Topology
 }
 
 func (cmmgt *connectionManagerMsgGetTopology) connectionManagerMsgWitness() {}
 
-type connectionManagerMsgSetTopology server.Topology
+type connectionManagerMsgSetTopology configuration.Topology
 
 func (cmmst *connectionManagerMsgSetTopology) connectionManagerMsgWitness() {}
 
@@ -114,7 +115,7 @@ func (cm *ConnectionManager) ServerLost(conn *Connection) {
 	cm.enqueueQuery((*connectionManagerMsgServerLost)(conn))
 }
 
-func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) (*server.Topology, map[common.RMId]paxos.Connection) {
+func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) (*configuration.Topology, map[common.RMId]paxos.Connection) {
 	query := &connectionManagerMsgClientEstablished{
 		connNumber: connNumber,
 		conn:       conn,
@@ -148,7 +149,7 @@ func (cm *ConnectionManager) LocalHost() string {
 	return cm.localHost
 }
 
-func (cm *ConnectionManager) Topology() *server.Topology {
+func (cm *ConnectionManager) Topology() *configuration.Topology {
 	query := &connectionManagerMsgGetTopology{
 		resultChan: make(chan struct{}),
 	}
@@ -158,7 +159,7 @@ func (cm *ConnectionManager) Topology() *server.Topology {
 	return nil
 }
 
-func (cm *ConnectionManager) SetTopology(topology *server.Topology) {
+func (cm *ConnectionManager) SetTopology(topology *configuration.Topology) {
 	cm.enqueueQuery((*connectionManagerMsgSetTopology)(topology))
 }
 
@@ -200,11 +201,11 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *mdbs.MDBServer, passwordHash [sha256.Size]byte) (*ConnectionManager, *client.LocalConnection) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *mdbs.MDBServer, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair) (*ConnectionManager, *client.LocalConnection) {
 	cm := &ConnectionManager{
-		RMId:              rmId,
-		BootCount:         bootCount,
-		passwordHash:      passwordHash,
+		RMId:                          rmId,
+		BootCount:                     bootCount,
+		NodeCertificatePrivateKeyPair: nodeCertPrivKeyPair,
 		servers:           make(map[string]*Connection),
 		rmToServer:        make(map[common.RMId]*connectionWithBootCount),
 		connCountToClient: make(map[uint32]paxos.ClientConnection),
@@ -230,7 +231,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 				}
 			}
 		})
-	lc := client.NewLocalConnection(rmId, bootCount, server.BlankTopology, cm)
+	lc := client.NewLocalConnection(rmId, bootCount, configuration.BlankTopology, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
 	cm.rmToServer[rmId] = &connectionWithBootCount{connectionSend: cm, bootCount: bootCount}
 	go cm.actorLoop(head)
@@ -265,7 +266,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgSenderFinished:
 				cm.removeSender(msgT.Sender, msgT.resultChan)
 			case *connectionManagerMsgSetTopology:
-				cm.updateTopology((*server.Topology)(msgT))
+				cm.updateTopology((*configuration.Topology)(msgT))
 			case *connectionManagerMsgGetTopology:
 				cm.getTopology(msgT)
 			case *connectionManagerMsgClientEstablished:
@@ -423,7 +424,7 @@ func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
 	}
 }
 
-func (cm *ConnectionManager) updateTopology(topology *server.Topology) {
+func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
 	if cm.topology.Equal(topology) {
 		return
 	}

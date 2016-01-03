@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/howeyc/gopass"
@@ -12,8 +13,8 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/common/capnp"
+	"goshawkdb.io/common/certs"
 	goshawk "goshawkdb.io/server"
-	"goshawkdb.io/server/certs"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
@@ -43,17 +44,17 @@ func main() {
 }
 
 func newServer() (*server, error) {
-	var configFile, dataDir, password, passwordFile string
+	var configFile, dataDir, certFile string
 	var port int
-	var version, genClusterCert bool
+	var version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory")
-	flag.StringVar(&password, "password", "", "Cluster password")
-	flag.StringVar(&passwordFile, "passwordfile", "", "`Path` to file containing cluster password")
+	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file")
 	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on")
 	flag.BoolVar(&version, "version", false, "Display version and exit")
-	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate")
+	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair")
+	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair")
 	flag.Parse()
 
 	if version {
@@ -62,30 +63,43 @@ func newServer() (*server, error) {
 	}
 
 	if genClusterCert {
-		fmt.Printf("Enter passphrase (empty for no passphrase): ")
-		passphrase := gopass.GetPasswd()
-		if len(passphrase) != 0 {
-			fmt.Printf("Enter same passphrase again: ")
-			if passphrase2 := gopass.GetPasswd(); !bytes.Equal(passphrase, passphrase2) {
-				log.Fatal("Passphrases do not match. Exiting")
-			}
-		}
-		keyPair, err := certs.NewClusterCertificates(passphrase)
+		passphrase, err := getPasswd("Cluster Private Key")
 		if err != nil {
 			log.Fatal(err)
 		}
-		jsoned, err := json.Marshal(keyPair)
+
+		certificatePrivateKeyPair, err := certs.NewClusterCertificate(passphrase)
 		if err != nil {
 			log.Fatal(err)
 		}
-		if _, err = os.Stdout.Write(jsoned); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println()
+		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		os.Exit(0)
 	}
 
-	var err error
+	if len(certFile) == 0 {
+		return nil, fmt.Errorf("Not certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate")
+	}
+	certificate, err := ioutil.ReadFile(certFile)
+	if err != nil {
+		return nil, err
+	}
+
+	if genClientCert {
+		passphrase, err := getPasswd("Client Private Key")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		certificatePrivateKeyPair, err := certs.NewClientCertificate(passphrase, certificate)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
+		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
+		fmt.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
+		os.Exit(0)
+	}
+
 	if dataDir == "" {
 		dataDir, err = ioutil.TempDir("", common.ProductName+"_Data_")
 		if err != nil {
@@ -109,30 +123,12 @@ func newServer() (*server, error) {
 		return nil, fmt.Errorf("Supplied port is illegal (%v). Port must be > 0 and < 65536", port)
 	}
 
-	var passwordHash [sha256.Size]byte
-	switch {
-	case password == "" && passwordFile == "":
-		return nil, fmt.Errorf("Password must be supplied with either -password or -passwordfile")
-	case passwordFile == "":
-		passwordHash = sha256.Sum256([]byte(password))
-		password = ""
-	case password == "":
-		passwordFileBytes, err := ioutil.ReadFile(passwordFile)
-		if err != nil {
-			return nil, err
-		}
-		passwordHash = sha256.Sum256(passwordFileBytes)
-		passwordFile = ""
-	default:
-		return nil, fmt.Errorf("Both -password and -passwordfile supplied. Only one can be supplied.")
-	}
-
 	s := &server{
-		configFile:   configFile,
-		dataDir:      dataDir,
-		port:         port,
-		passwordHash: passwordHash,
-		onShutdown:   []func(){},
+		configFile:  configFile,
+		certificate: certificate,
+		dataDir:     dataDir,
+		port:        port,
+		onShutdown:  []func(){},
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -145,12 +141,24 @@ func newServer() (*server, error) {
 	return s, nil
 }
 
+func getPasswd(purpose string) ([]byte, error) {
+	fmt.Printf("Enter passphrase for %v (empty for no passphrase): ", purpose)
+	passphrase := gopass.GetPasswd()
+	if len(passphrase) != 0 {
+		fmt.Printf("Enter same passphrase again: ")
+		if passphrase2 := gopass.GetPasswd(); !bytes.Equal(passphrase, passphrase2) {
+			return nil, errors.New("Passphrases do not match. Exiting")
+		}
+	}
+	return passphrase, nil
+}
+
 type server struct {
 	sync.WaitGroup
 	configFile        string
+	certificate       []byte
 	dataDir           string
 	port              int
-	passwordHash      [sha256.Size]byte
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
@@ -167,11 +175,16 @@ func (s *server) start() {
 	}
 	runtime.GOMAXPROCS(procs)
 
+	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
+	s.certificate = nil
+
+	s.maybeShutdown(err)
+
 	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
 	s.maybeShutdown(err)
 	s.addOnShutdown(disk.Shutdown)
 
-	cm, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, s.passwordHash)
+	cm, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair)
 	s.connectionManager = cm
 	s.addOnShutdown(cm.Shutdown)
 	s.addOnShutdown(lc.Shutdown)
@@ -206,7 +219,7 @@ func (s *server) start() {
 					root := refs.At(0)
 					rootVarPosPtr = &root
 				}
-				topology, err := goshawk.TopologyDeserialize(txn.Id, rootVarPosPtr, value)
+				topology, err := configuration.TopologyDeserialize(txn.Id, rootVarPosPtr, value)
 				if err != nil {
 					log.Println("Unable to deserialize new topology:", err)
 				}
@@ -215,7 +228,7 @@ func (s *server) start() {
 					return nil, env.SetFlags(mdb.MAPASYNC, topology.AsyncFlush)
 				})
 			})
-	}, false, goshawk.TopologyVarUUId)
+	}, false, configuration.TopologyVarUUId)
 
 	cm.AddSender(network.NewTopologyWriter(topology, lc, cm))
 
@@ -287,7 +300,7 @@ func (s *server) ensureBootCount() error {
 	return ioutil.WriteFile(path, b, 0600)
 }
 
-func (s *server) chooseTopology(topology *goshawk.Topology) (*goshawk.Topology, error) {
+func (s *server) chooseTopology(topology *configuration.Topology) (*configuration.Topology, error) {
 	var config *configuration.Configuration
 	if s.configFile != "" {
 		var err error
@@ -301,7 +314,7 @@ func (s *server) chooseTopology(topology *goshawk.Topology) (*goshawk.Topology, 
 	case topology == nil && config == nil:
 		return nil, fmt.Errorf("Local data store is empty and no external config supplied. Must supply config with -config")
 	case topology == nil:
-		return goshawk.NewTopology(config), nil
+		return configuration.NewTopology(config), nil
 	case config == nil:
 		return topology, nil
 	case topology.Configuration.Equal(config):
@@ -330,6 +343,7 @@ func (s *server) signalStatus() {
 }
 
 func (s *server) signalReloadConfig() {
+	return // not supported for now.
 	if s.configFile == "" {
 		log.Println("Attempt to reload config failed as no path to configuration provided on command line.")
 		return

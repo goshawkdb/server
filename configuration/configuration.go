@@ -1,26 +1,27 @@
 package configuration
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"golang.org/x/crypto/bcrypt"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server/certs"
+	"goshawkdb.io/server"
 	"net"
 	"os"
 	"strconv"
 )
 
 type Configuration struct {
-	ClusterId  string
-	Version    uint32
-	Hosts      []string
-	F          uint8
-	MaxRMCount uint8
-	AsyncFlush bool
-	*certs.ClusterCertificatePrivateKeyPair
-	Accounts map[string]string
+	ClusterId                     string
+	Version                       uint32
+	Hosts                         []string
+	F                             uint8
+	MaxRMCount                    uint8
+	AsyncFlush                    bool
+	ClientCertificateFingerprints []string
+	fingerprints                  map[[sha256.Size]byte]server.EmptyStruct
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {
@@ -32,16 +33,13 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			return false
 		}
 	}
-	if len(a.Accounts) != len(b.Accounts) {
+	if len(a.fingerprints) != len(b.fingerprints) {
 		return false
 	}
-	for un, pwA := range a.Accounts {
-		if pwB, found := b.Accounts[un]; !found || pwA != pwB {
+	for fingerprint := range b.fingerprints {
+		if _, found := a.fingerprints[fingerprint]; !found {
 			return false
 		}
-	}
-	if !a.ClusterCertificatePrivateKeyPair.Equal(b.ClusterCertificatePrivateKeyPair) {
-		return false
 	}
 	return true
 }
@@ -49,6 +47,10 @@ func (a *Configuration) Equal(b *Configuration) bool {
 func (c *Configuration) String() string {
 	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, AsyncFlush: %v}",
 		c.ClusterId, c.Version, c.Hosts, c.F, c.MaxRMCount, c.AsyncFlush)
+}
+
+func (c *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
+	return c.fingerprints
 }
 
 func LoadConfigurationFromPath(path string) (*Configuration, error) {
@@ -104,20 +106,22 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 			return nil, err
 		}
 	}
-	_, _, err = config.ClusterCertificatePrivateKeyPair.Verify()
-	if err != nil {
-		return nil, err
-	}
-	if len(config.Accounts) == 0 {
-		return nil, errors.New("No accounts defined")
+	if len(config.ClientCertificateFingerprints) == 0 {
+		return nil, errors.New("No ClientCertificateFingerprints defined")
 	} else {
-		for un, pw := range config.Accounts {
-			if cost, err := bcrypt.Cost([]byte(pw)); err != nil {
-				return nil, fmt.Errorf("Error in password for account %v: %v", un, err)
-			} else if cost < bcrypt.DefaultCost {
-				return nil, fmt.Errorf("Error in password for account %v: cost too low (%v)", un, cost)
+		fingerprints := make(map[[sha256.Size]byte]server.EmptyStruct, len(config.ClientCertificateFingerprints))
+		for _, fingerprint := range config.ClientCertificateFingerprints {
+			fingerprintBytes, err := hex.DecodeString(fingerprint)
+			if err != nil {
+				return nil, err
+			} else if l := len(fingerprintBytes); l != sha256.Size {
+				return nil, fmt.Errorf("Invalid fingerprint: expected %v bytes, and found %v", sha256.Size, l)
 			}
+			ary := [sha256.Size]byte{}
+			copy(ary[:], fingerprintBytes)
+			fingerprints[ary] = server.EmptyStructVal
 		}
+		config.fingerprints = fingerprints
 	}
 	return &config, err
 }
