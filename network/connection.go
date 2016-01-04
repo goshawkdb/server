@@ -563,7 +563,6 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 
 		opts := x509.VerifyOptions{
 			Roots:         config.RootCAs,
-			CurrentTime:   time.Now(),
 			DNSName:       "", // disable server name checking
 			Intermediates: x509.NewCertPool(),
 		}

@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
-	"github.com/howeyc/gopass"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -63,12 +60,7 @@ func newServer() (*server, error) {
 	}
 
 	if genClusterCert {
-		passphrase, err := getPasswd("Cluster Private Key")
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		certificatePrivateKeyPair, err := certs.NewClusterCertificate(passphrase)
+		certificatePrivateKeyPair, err := certs.NewClusterCertificate()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -85,12 +77,7 @@ func newServer() (*server, error) {
 	}
 
 	if genClientCert {
-		passphrase, err := getPasswd("Client Private Key")
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		certificatePrivateKeyPair, err := certs.NewClientCertificate(passphrase, certificate)
+		certificatePrivateKeyPair, err := certs.NewClientCertificate(certificate)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -139,18 +126,6 @@ func newServer() (*server, error) {
 	}
 
 	return s, nil
-}
-
-func getPasswd(purpose string) ([]byte, error) {
-	fmt.Printf("Enter passphrase for %v (empty for no passphrase): ", purpose)
-	passphrase := gopass.GetPasswd()
-	if len(passphrase) != 0 {
-		fmt.Printf("Enter same passphrase again: ")
-		if passphrase2 := gopass.GetPasswd(); !bytes.Equal(passphrase, passphrase2) {
-			return nil, errors.New("Passphrases do not match. Exiting")
-		}
-	}
-	return passphrase, nil
 }
 
 type server struct {
