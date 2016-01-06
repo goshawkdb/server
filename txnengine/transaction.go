@@ -6,8 +6,8 @@ import (
 	mdb "github.com/msackman/gomdb"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"sync"
@@ -256,8 +256,8 @@ func (txn *Txn) TxnRootBytes() []byte {
 		txn.Lock()
 		if txn.txnRootBytes == nil {
 			txn.txnRootBytes = db.TxnToRootBytes(txn.TxnCap)
-			trb = txn.txnRootBytes
 		}
+		trb = txn.txnRootBytes
 		txn.Unlock()
 	}
 	return trb
