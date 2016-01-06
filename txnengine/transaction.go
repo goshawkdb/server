@@ -251,18 +251,19 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actions msgs.Action_List
 }
 
 func (txn *Txn) TxnRootBytes() []byte {
-	txn.txnRootBytes.RLock()
-	trb := txn.txnRootBytes.bites
-	txn.txnRootBytes.RUnlock()
-	if trb == nil {
-		txn.txnRootBytes.Lock()
-		if txn.txnRootBytes.bites == nil {
-			txn.txnRootBytes.bites = db.TxnToRootBytes(txn.TxnCap)
+	trb := &txn.txnRootBytes
+	trb.RLock()
+	bites := trb.bites
+	trb.RUnlock()
+	if bites == nil {
+		trb.Lock()
+		if trb.bites == nil {
+			trb.bites = db.TxnToRootBytes(txn.TxnCap)
 		}
-		trb = txn.txnRootBytes.bites
-		txn.txnRootBytes.Unlock()
+		bites = trb.bites
+		trb.Unlock()
 	}
-	return trb
+	return bites
 }
 
 func (txn *Txn) Start(voter bool) {
