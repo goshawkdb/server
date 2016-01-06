@@ -21,17 +21,19 @@ type TxnLocalStateChange interface {
 }
 
 type Txn struct {
-	sync.RWMutex
 	Id           *common.TxnId
 	Retry        bool
 	writes       []*common.VarUUId
 	localActions []localAction
 	voter        bool
 	TxnCap       *msgs.Txn
-	txnRootBytes []byte
-	exe          *dispatcher.Executor
-	vd           *VarDispatcher
-	stateChange  TxnLocalStateChange
+	txnRootBytes struct {
+		sync.RWMutex
+		bites []byte
+	}
+	exe         *dispatcher.Executor
+	vd          *VarDispatcher
+	stateChange TxnLocalStateChange
 	txnDetermineLocalBallots
 	txnAwaitLocalBallots
 	txnReceiveOutcome
@@ -249,16 +251,16 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actions msgs.Action_List
 }
 
 func (txn *Txn) TxnRootBytes() []byte {
-	txn.RLock()
-	trb := txn.txnRootBytes
-	txn.RUnlock()
+	txn.txnRootBytes.RLock()
+	trb := txn.txnRootBytes.bites
+	txn.txnRootBytes.RUnlock()
 	if trb == nil {
-		txn.Lock()
-		if txn.txnRootBytes == nil {
-			txn.txnRootBytes = db.TxnToRootBytes(txn.TxnCap)
+		txn.txnRootBytes.Lock()
+		if txn.txnRootBytes.bites == nil {
+			txn.txnRootBytes.bites = db.TxnToRootBytes(txn.TxnCap)
 		}
-		trb = txn.txnRootBytes
-		txn.Unlock()
+		trb = txn.txnRootBytes.bites
+		txn.txnRootBytes.Unlock()
 	}
 	return trb
 }
