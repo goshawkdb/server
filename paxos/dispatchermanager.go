@@ -7,7 +7,7 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server"
+	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
 )
 
@@ -88,6 +88,6 @@ func IsDatabaseClean(varDispatcher *eng.VarDispatcher) bool {
 	resultChan := make(chan bool, 1)
 	varDispatcher.ApplyToVar(func(v *eng.Var, err error) {
 		resultChan <- err == mdb.NotFound
-	}, false, server.TopologyVarUUId)
+	}, false, configuration.TopologyVarUUId)
 	return <-resultChan
 }

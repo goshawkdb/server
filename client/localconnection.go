@@ -4,9 +4,10 @@ import (
 	"encoding/binary"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	"log"
 	"sync"
@@ -45,7 +46,7 @@ type localConnectionMsgOutcomeReceived func(*LocalConnection)
 func (lcmor localConnectionMsgOutcomeReceived) localConnectionMsgWitness() {}
 
 type localConnectionMsgTopologyChange struct {
-	topology *server.Topology
+	topology *configuration.Topology
 	servers  map[common.RMId]paxos.Connection
 }
 
@@ -105,7 +106,7 @@ func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *ms
 	lcmrt.maybeClose()
 }
 
-func NewLocalConnection(rmId common.RMId, bootCount uint32, topology *server.Topology, cm paxos.ConnectionManager) *LocalConnection {
+func NewLocalConnection(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *LocalConnection {
 	namespace := make([]byte, common.KeyLen)
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
@@ -188,7 +189,7 @@ func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *
 	}))
 }
 
-func (lc *LocalConnection) TopologyChange(topology *server.Topology, servers map[common.RMId]paxos.Connection) {
+func (lc *LocalConnection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
 	lc.enqueueQuery(&localConnectionMsgTopologyChange{
 		topology: topology,
 		servers:  servers,

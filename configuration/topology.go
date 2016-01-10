@@ -1,11 +1,12 @@
-package server
+package configuration
 
 import (
+	"crypto/sha256"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/common/capnp"
-	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server"
 )
 
 var (
@@ -14,7 +15,7 @@ var (
 )
 
 var BlankTopology = &Topology{
-	Configuration: &configuration.Configuration{
+	Configuration: &Configuration{
 		F:          0,
 		MaxRMCount: 1,
 	},
@@ -25,7 +26,7 @@ var BlankTopology = &Topology{
 }
 
 type Topology struct {
-	*configuration.Configuration
+	*Configuration
 	AllRMs        common.RMIds
 	FInc          uint8
 	TwoFInc       uint16
@@ -34,7 +35,7 @@ type Topology struct {
 	RootPositions *common.Positions
 }
 
-func NewTopology(config *configuration.Configuration) *Topology {
+func NewTopology(config *Configuration) *Topology {
 	return &Topology{
 		Configuration: config,
 		AllRMs:        []common.RMId{},
@@ -66,7 +67,7 @@ func TopologyDeserialize(txnId *common.TxnId, root *msgs.VarIdPos, data []byte) 
 }
 
 func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, topology *msgs.Topology) *Topology {
-	t := &Topology{Configuration: &configuration.Configuration{}}
+	t := &Topology{Configuration: &Configuration{}}
 	t.ClusterId = topology.ClusterId()
 	t.Version = topology.Version()
 	t.Hosts = topology.Hosts().ToArray()
@@ -86,12 +87,14 @@ func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, topology *msgs.To
 		pos := common.Positions(root.Positions())
 		t.RootPositions = &pos
 	}
-	accounts := topology.Accounts()
-	t.Accounts = make(map[string]string, accounts.Len())
-	for idx, l := 0, accounts.Len(); idx < l; idx++ {
-		account := accounts.At(idx)
-		t.Accounts[account.Username()] = account.Password()
+	fingerprints := topology.Fingerprints()
+	fingerprintsMap := make(map[[sha256.Size]byte]server.EmptyStruct, fingerprints.Len())
+	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
+		ary := [sha256.Size]byte{}
+		copy(ary[:], fingerprints.At(idx))
+		fingerprintsMap[ary] = server.EmptyStructVal
 	}
+	t.fingerprints = fingerprintsMap
 	return t
 }
 
@@ -112,14 +115,13 @@ func (t *Topology) AddToSegAutoRoot(seg *capn.Segment) msgs.Topology {
 	for idx, rmId := range t.AllRMs {
 		rms.Set(idx, uint32(rmId))
 	}
-	accounts := msgs.NewAccountList(seg, len(t.Accounts))
-	topology.SetAccounts(accounts)
+	fingerprintsMap := t.fingerprints
+	fingerprints := seg.NewDataList(len(fingerprintsMap))
+	topology.SetFingerprints(fingerprints)
 	idx := 0
-	for un, pw := range t.Accounts {
-		account := accounts.At(idx)
+	for fingerprint := range fingerprintsMap {
+		fingerprints.Set(idx, fingerprint[:])
 		idx++
-		account.SetUsername(un)
-		account.SetPassword(pw)
 	}
 	return topology
 }
@@ -127,7 +129,7 @@ func (t *Topology) AddToSegAutoRoot(seg *capn.Segment) msgs.Topology {
 func (t *Topology) Serialize() []byte {
 	seg := capn.NewBuffer(nil)
 	t.AddToSegAutoRoot(seg)
-	return SegToBytes(seg)
+	return server.SegToBytes(seg)
 }
 
 func (a *Topology) Equal(b *Topology) bool {

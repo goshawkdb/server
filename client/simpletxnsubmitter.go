@@ -4,9 +4,10 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/paxos"
 	"math/rand"
@@ -24,7 +25,7 @@ type SimpleTxnSubmitter struct {
 	onShutdown          map[*func(bool)]server.EmptyStruct
 	resolver            *ch.Resolver
 	hashCache           *ch.ConsistentHashCache
-	topology            *server.Topology
+	topology            *configuration.Topology
 	rng                 *rand.Rand
 	bufferedSubmissions []func()
 }
@@ -34,7 +35,7 @@ var AbortRollError = fmt.Errorf("Not leading hashcode")
 type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
 type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
 
-func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, topology *server.Topology, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
+func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	resolver := ch.NewResolver(rng, topology.AllRMs)
 	disabled := make(map[common.RMId]server.EmptyStruct, len(topology.AllRMs))
@@ -133,7 +134,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 }
 
 func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration) error {
-	if sts.topology.Equal(server.BlankTopology) {
+	if sts.topology.Equal(configuration.BlankTopology) {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
@@ -150,7 +151,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	return nil
 }
 
-func (sts *SimpleTxnSubmitter) TopologyChange(topology *server.Topology, servers map[common.RMId]paxos.Connection) {
+func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
 	if topology != nil {
 		server.Log("TM setting topology to", topology)
 		sts.topology = topology
@@ -160,7 +161,7 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *server.Topology, servers
 			sts.hashCache.AddPosition(topology.RootVarUUId, topology.RootPositions)
 		}
 
-		if !topology.Equal(server.BlankTopology) && sts.bufferedSubmissions != nil {
+		if !topology.Equal(configuration.BlankTopology) && sts.bufferedSubmissions != nil {
 			funcs := sts.bufferedSubmissions
 			sts.bufferedSubmissions = nil
 			for _, fun := range funcs {

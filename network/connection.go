@@ -1,20 +1,21 @@
 package network
 
 import (
-	cr "crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
-	"golang.org/x/crypto/bcrypt"
-	"golang.org/x/crypto/nacl/box"
-	"golang.org/x/crypto/nacl/secretbox"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	"log"
 	"math/rand"
@@ -30,8 +31,8 @@ type Connection struct {
 	remoteRMId        common.RMId
 	remoteBootCount   uint32
 	combinedTieBreak  uint32
-	remoteTopology    *server.Topology
-	socket            *net.TCPConn
+	remoteTopology    *configuration.Topology
+	socket            net.Conn
 	ConnectionNumber  uint32
 	connectionManager *ConnectionManager
 	submitter         *client.ClientTxnSubmitter
@@ -67,7 +68,7 @@ type connectionMsgOutcomeReceived func(*connectionRun)
 func (cor connectionMsgOutcomeReceived) connectionMsgWitness() {}
 
 type connectionMsgTopologyChange struct {
-	topology *server.Topology
+	topology *configuration.Topology
 	servers  map[common.RMId]paxos.Connection
 }
 
@@ -97,7 +98,7 @@ func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *com
 	}))
 }
 
-func (conn *Connection) TopologyChange(topology *server.Topology, servers map[common.RMId]paxos.Connection) {
+func (conn *Connection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
 	conn.enqueueQuery(&connectionMsgTopologyChange{
 		topology: topology,
 		servers:  servers,
@@ -108,7 +109,7 @@ func (conn *Connection) Status(sc *server.StatusConsumer) {
 	conn.enqueueQuery((*connectionMsgStatus)(sc))
 }
 
-func (conn *Connection) RemoteDetails() (bool, string, common.RMId, uint32, uint32, *server.Topology) {
+func (conn *Connection) RemoteDetails() (bool, string, common.RMId, uint32, uint32, *configuration.Topology) {
 	conn.RLock()
 	defer conn.RUnlock()
 	return conn.established, conn.remoteHost, conn.remoteRMId, conn.remoteBootCount, conn.combinedTieBreak, conn.remoteTopology
@@ -148,6 +149,8 @@ func NewConnectionToDial(host string, cm *ConnectionManager) *Connection {
 }
 
 func NewConnectionFromTCPConn(socket *net.TCPConn, cm *ConnectionManager, count uint32) *Connection {
+	socket.SetKeepAlive(true)
+	socket.SetKeepAlivePeriod(time.Second)
 	conn := &Connection{
 		socket:            socket,
 		connectionManager: cm,
@@ -338,11 +341,6 @@ func (cd *connectionDelay) start() (bool, error) {
 	cd.maybeStopBeater()
 	cd.Lock()
 	cd.established = false
-	cd.privateKey = nil
-	cd.sessionKey = nil
-	cd.nonce = 0
-	cd.nonceAryOut[0] = 0
-	cd.nonceAryIn[0] = 0
 	cd.isServer = false
 	cd.isClient = false
 	cd.Unlock()
@@ -364,7 +362,7 @@ func (cd *connectionDelay) received() {
 	}
 }
 
-// Connect
+// Dial
 
 type connectionDial struct {
 	*Connection
@@ -401,15 +399,8 @@ func (cc *connectionDial) start() (bool, error) {
 
 type connectionAwaitHandshake struct {
 	*Connection
-	privateKey  *[32]byte
-	sessionKey  *[32]byte
-	nonce       uint64
-	nonceAryIn  *[24]byte
-	nonceAryOut *[24]byte
-	isServer    bool
-	isClient    bool
-	outBuff     []byte
-	inBuff      []byte
+	isServer bool
+	isClient bool
 }
 
 func (cah *connectionAwaitHandshake) connectionStateMachineComponentWitness() {}
@@ -417,56 +408,32 @@ func (cah *connectionAwaitHandshake) String() string                          { 
 
 func (cah *connectionAwaitHandshake) init(conn *Connection) {
 	cah.Connection = conn
-	nonceAryIn := [24]byte{}
-	cah.nonceAryIn = &nonceAryIn
-	nonceAryOut := [24]byte{}
-	cah.nonceAryOut = &nonceAryOut
-	cah.inBuff = make([]byte, 16)
 }
 
 func (cah *connectionAwaitHandshake) start() (bool, error) {
-	helloSeg, err := cah.makeHello()
-	if err != nil {
-		return cah.maybeRestartConnection(err)
-	}
+
+	helloSeg := cah.makeHello()
 	if err := cah.send(server.SegToBytes(helloSeg)); err != nil {
 		return cah.maybeRestartConnection(err)
 	}
-	cah.nonce = 0
 
 	if seg, err := capn.ReadFromStream(cah.socket, nil); err == nil {
 		hello := cmsgs.ReadRootHello(seg)
 		if cah.verifyHello(&hello) {
-			sessionKey := [32]byte{}
-			remotePublicKey := [32]byte{}
-			copy(remotePublicKey[:], hello.PublicKey())
-			box.Precompute(&sessionKey, &remotePublicKey, cah.privateKey)
-
 			if hello.IsClient() {
 				cah.Lock()
 				cah.isClient = true
-				cah.sessionKey = &sessionKey
 				cah.Unlock()
-				cah.nonceAryIn[0] = 128
 				cah.nextState(&cah.connectionAwaitClientHandshake)
 
 			} else {
-				extendedKey := make([]byte, 64)
-				copy(extendedKey[:32], sessionKey[:])
-				copy(extendedKey[32:], cah.connectionManager.passwordHash[:])
-				sessionKey = sha256.Sum256(extendedKey)
 				cah.Lock()
 				cah.isServer = true
-				cah.sessionKey = &sessionKey
 				cah.Unlock()
-				if cah.remoteHost == "" {
-					cah.nonceAryIn[0] = 128
-				} else {
-					cah.nonceAryOut[0] = 128
-				}
 				cah.nextState(&cah.connectionAwaitServerHandshake)
 			}
 			return false, nil
+
 		} else {
 			return cah.maybeRestartConnection(fmt.Errorf("Received erroneous hello from peer"))
 		}
@@ -475,71 +442,22 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 	}
 }
 
-func (cah *connectionAwaitHandshake) makeHello() (*capn.Segment, error) {
+func (cah *connectionAwaitHandshake) makeHello() *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHello(seg)
 	hello.SetProduct(common.ProductName)
 	hello.SetVersion(common.ProductVersion)
-	publicKey, privateKey, err := box.GenerateKey(cr.Reader)
-	if err != nil {
-		return nil, err
-	}
-	cah.privateKey = privateKey
-	hello.SetPublicKey(publicKey[:])
 	hello.SetIsClient(false)
-	return seg, nil
+	return seg
 }
 
-func (cah *connectionAwaitHandshake) send(msg []byte) (err error) {
-	if cah.sessionKey == nil {
-		_, err = cah.socket.Write(msg)
-	} else {
-		reqLen := len(msg) + secretbox.Overhead + 16
-		if cah.outBuff == nil {
-			cah.outBuff = make([]byte, 16, reqLen)
-		} else if l := len(cah.outBuff); l < reqLen {
-			cah.outBuff = make([]byte, 16, l*(1+(reqLen/l)))
-		} else {
-			cah.outBuff = cah.outBuff[:16]
-		}
-		cah.nonce++
-		binary.BigEndian.PutUint64(cah.outBuff[:8], cah.nonce)
-		binary.BigEndian.PutUint64(cah.nonceAryOut[16:], cah.nonce)
-		secretbox.Seal(cah.outBuff[16:], msg, cah.nonceAryOut, cah.sessionKey)
-		binary.BigEndian.PutUint64(cah.outBuff[8:16], uint64(reqLen-16))
-		_, err = cah.socket.Write(cah.outBuff[:reqLen])
-	}
-	return
+func (cah *connectionAwaitHandshake) send(msg []byte) error {
+	_, err := cah.socket.Write(msg)
+	return err
 }
 
-func (cah *connectionAwaitHandshake) readAndDecryptOne() (*capn.Segment, error) {
-	if cah.sessionKey == nil {
-		return capn.ReadFromStream(cah.socket, nil)
-	}
-	read, err := cah.socket.Read(cah.inBuff)
-	if err != nil {
-		return nil, err
-	} else if read < len(cah.inBuff) {
-		return nil, fmt.Errorf("Only read %v bytes, wanted %v", read, len(cah.inBuff))
-	}
-	copy(cah.nonceAryIn[16:], cah.inBuff[:8])
-	msgLen := binary.BigEndian.Uint64(cah.inBuff[8:16])
-	plainLen := msgLen - secretbox.Overhead
-	msgBuf := make([]byte, plainLen+msgLen)
-	for recvBuf := msgBuf[plainLen:]; len(recvBuf) != 0; {
-		read, err = cah.socket.Read(recvBuf)
-		if err != nil {
-			return nil, err
-		} else {
-			recvBuf = recvBuf[read:]
-		}
-	}
-	plaintext, ok := secretbox.Open(msgBuf[:0], msgBuf[plainLen:], cah.nonceAryIn, cah.sessionKey)
-	if !ok {
-		return nil, fmt.Errorf("Unable to decrypt message")
-	}
-	seg, _, err := capn.ReadFromMemoryZeroCopy(plaintext)
-	return seg, err
+func (cah *connectionAwaitHandshake) readOne() (*capn.Segment, error) {
+	return capn.ReadFromStream(cah.socket, nil)
 }
 
 func (cah *connectionAwaitHandshake) verifyHello(hello *cmsgs.Hello) bool {
@@ -558,7 +476,7 @@ func (cah *connectionAwaitHandshake) maybeRestartConnection(err error) (bool, er
 	}
 }
 
-func (cah *connectionAwaitServerHandshake) makeHelloFromServer(topology *server.Topology) *capn.Segment {
+func (cah *connectionAwaitHandshake) makeHelloFromServer(topology *configuration.Topology) *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloFromServer(seg)
 	localHost := cah.connectionManager.LocalHost()
@@ -586,6 +504,26 @@ func (cah *connectionAwaitServerHandshake) makeHelloFromServer(topology *server.
 	return seg
 }
 
+func (cah *connectionAwaitHandshake) commonTLSConfig() *tls.Config {
+	nodeCertPrivKeyPair := cah.connectionManager.NodeCertificatePrivateKeyPair
+	roots := x509.NewCertPool()
+	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{
+			tls.Certificate{
+				Certificate: [][]byte{nodeCertPrivKeyPair.Certificate},
+				PrivateKey:  nodeCertPrivKeyPair.PrivateKey,
+			},
+		},
+		CipherSuites:             []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+		MinVersion:               tls.VersionTLS12,
+		PreferServerCipherSuites: true,
+		ClientCAs:                roots,
+		RootCAs:                  roots,
+	}
+}
+
 // Await Server Handshake
 
 type connectionAwaitServerHandshake struct {
@@ -600,13 +538,53 @@ func (cash *connectionAwaitServerHandshake) init(conn *Connection) {
 }
 
 func (cash *connectionAwaitServerHandshake) start() (bool, error) {
+	// TLS seems to require us to pick one end as the client and one
+	// end as the server even though in a server-server connection we
+	// really don't care which is which.
+	config := cash.commonTLSConfig()
+	if cash.remoteHost == "" {
+		// We came from the listener, so we're going to act as the server.
+		config.ClientAuth = tls.RequireAndVerifyClientCert
+		cash.socket = tls.Server(cash.socket, config)
+
+	} else {
+		config.InsecureSkipVerify = true
+		socket := tls.Client(cash.socket, config)
+		cash.socket = socket
+
+		// This is nuts: as a server, we can demand the client cert and
+		// verify that without any concept of a client name. But as the
+		// client, if we don't have a server name, then we have to do
+		// the verification ourself. Why is TLS asymmetric?!
+
+		if err := socket.Handshake(); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
+
+		opts := x509.VerifyOptions{
+			Roots:         config.RootCAs,
+			DNSName:       "", // disable server name checking
+			Intermediates: x509.NewCertPool(),
+		}
+		certs := socket.ConnectionState().PeerCertificates
+		for i, cert := range certs {
+			if i == 0 {
+				continue
+			}
+			opts.Intermediates.AddCert(cert)
+		}
+		if _, err := certs[0].Verify(opts); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
+	}
+
 	topology := cash.connectionManager.Topology()
 	helloFromServer := cash.makeHelloFromServer(topology)
 	if err := cash.send(server.SegToBytes(helloFromServer)); err != nil {
 		return cash.connectionAwaitHandshake.maybeRestartConnection(err)
 	}
 
-	if seg, err := cash.readAndDecryptOne(); err == nil {
+	if seg, err := cash.readOne(); err == nil {
 		hello := cmsgs.ReadRootHelloFromServer(seg)
 		if verified, remoteTopology := cash.verifyTopology(topology, &hello); verified {
 			cash.Lock()
@@ -628,11 +606,11 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 }
 
-func (cash *connectionAwaitServerHandshake) verifyTopology(topology *server.Topology, remote *cmsgs.HelloFromServer) (bool, *server.Topology) {
+func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *cmsgs.HelloFromServer) (bool, *configuration.Topology) {
 	remoteTopologyDBVersion := common.MakeTxnId(remote.TopologyDBVersion())
 	remoteTopologyCap := remote.Topology()
 	remoteRoot := remote.Root()
-	remoteTopology := server.TopologyFromCap(remoteTopologyDBVersion, &remoteRoot, &remoteTopologyCap)
+	remoteTopology := configuration.TopologyFromCap(remoteTopologyDBVersion, &remoteRoot, &remoteTopologyCap)
 	return topology.Configuration.Equal(remoteTopology.Configuration), remoteTopology
 }
 
@@ -650,33 +628,41 @@ func (cach *connectionAwaitClientHandshake) init(conn *Connection) {
 }
 
 func (cach *connectionAwaitClientHandshake) start() (bool, error) {
-	if seg, err := cach.readAndDecryptOne(); err == nil {
-		hello := cmsgs.ReadRootHelloFromClient(seg)
-		topology := cach.connectionManager.Topology()
-
-		un := hello.Username()
-		if pw, found := topology.Accounts[un]; !found {
-			return false, fmt.Errorf("Unknown user '%s'", un)
-		} else if err = bcrypt.CompareHashAndPassword([]byte(pw), hello.Password()); err != nil {
-			return false, fmt.Errorf("Incorrect password for '%s': %v", un, err)
-		} else {
-			log.Printf("User '%s' authenticated", un)
-		}
-
-		helloFromServer := cach.makeHelloFromServer(topology)
-		if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
-			return cach.connectionAwaitHandshake.maybeRestartConnection(err)
-		}
-		cach.Lock()
-		cach.established = true
-		cach.remoteHost = cach.socket.RemoteAddr().String()
-		cach.Unlock()
-		cach.nextState(nil)
-		return false, nil
-
-	} else {
+	config := cach.commonTLSConfig()
+	config.ClientAuth = tls.RequireAnyClientCert
+	socket := tls.Server(cach.socket, config)
+	cach.socket = socket
+	if err := socket.Handshake(); err != nil {
 		return cach.connectionAwaitHandshake.maybeRestartConnection(err)
 	}
+
+	topology := cach.connectionManager.Topology()
+
+	found := false
+	fingerprints := topology.Fingerprints()
+	var hashsum [sha256.Size]byte
+	for _, cert := range socket.ConnectionState().PeerCertificates {
+		hashsum = sha256.Sum256(cert.Raw)
+		if _, found = fingerprints[hashsum]; found {
+			break
+		}
+	}
+	if found {
+		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
+	} else {
+		return false, errors.New("No client certificate known")
+	}
+
+	helloFromServer := cach.makeHelloFromServer(topology)
+	if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
+		return cach.connectionAwaitHandshake.maybeRestartConnection(err)
+	}
+	cach.Lock()
+	cach.established = true
+	cach.remoteHost = cach.socket.RemoteAddr().String()
+	cach.Unlock()
+	cach.nextState(nil)
+	return false, nil
 }
 
 // Run
@@ -954,14 +940,14 @@ func newConnectionReader(conn *Connection) *connectionReader {
 }
 
 func (cr *connectionReader) readServer() {
-	cr.read(func (seg *capn.Segment) bool {
+	cr.read(func(seg *capn.Segment) bool {
 		msg := msgs.ReadRootMessage(seg)
 		return cr.enqueueQuery((*connectionReadMessage)(&msg))
 	})
 }
 
 func (cr *connectionReader) readClient() {
-	cr.read(func (seg *capn.Segment) bool {
+	cr.read(func(seg *capn.Segment) bool {
 		msg := cmsgs.ReadRootClientMessage(seg)
 		return cr.enqueueQuery((*connectionReadClientMessage)(&msg))
 	})
@@ -974,7 +960,7 @@ func (cr *connectionReader) read(fun func(*capn.Segment) bool) {
 		case <-cr.terminate:
 			return
 		default:
-			if seg, err := cr.readAndDecryptOne(); err == nil {
+			if seg, err := cr.readOne(); err == nil {
 				if !fun(seg) {
 					return
 				}

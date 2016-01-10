@@ -2,8 +2,9 @@ package paxos
 
 import (
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 )
 
 type ConnectionManager interface {
@@ -25,7 +26,7 @@ type Connection interface {
 }
 
 type ClientConnection interface {
-	TopologyChange(*server.Topology, map[common.RMId]Connection)
+	TopologyChange(*configuration.Topology, map[common.RMId]Connection)
 	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *msgs.Outcome)
 }
 

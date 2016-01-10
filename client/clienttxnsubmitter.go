@@ -5,9 +5,10 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	"time"
 )
@@ -20,7 +21,7 @@ type ClientTxnSubmitter struct {
 	txnLive      bool
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, topology *server.Topology, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, topology, cm),
 		versionCache:       NewVersionCache(),
