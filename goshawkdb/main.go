@@ -69,7 +69,7 @@ func newServer() (*server, error) {
 	}
 
 	if len(certFile) == 0 {
-		return nil, fmt.Errorf("Not certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate")
+		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate")
 	}
 	certificate, err := ioutil.ReadFile(certFile)
 	if err != nil {
@@ -83,7 +83,7 @@ func newServer() (*server, error) {
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
-		fmt.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
+		log.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
 		os.Exit(0)
 	}
 
