@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"encoding/json"
 	C "github.com/glycerine/go-capnproto"
-	"goshawkdb.io/common/capnp"
 	"io"
 )
 
@@ -460,56 +459,48 @@ const (
 	ACTION_ROLL      Action_Which = 5
 )
 
-func NewAction(s *C.Segment) Action      { return Action(s.NewStruct(8, 4)) }
-func NewRootAction(s *C.Segment) Action  { return Action(s.NewRootStruct(8, 4)) }
-func AutoNewAction(s *C.Segment) Action  { return Action(s.NewStructAR(8, 4)) }
-func ReadRootAction(s *C.Segment) Action { return Action(s.Root(0).ToStruct()) }
-func (s Action) Which() Action_Which     { return Action_Which(C.Struct(s).Get16(0)) }
-func (s Action) VarId() []byte           { return C.Struct(s).GetObject(0).ToData() }
-func (s Action) SetVarId(v []byte)       { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Action) Read() ActionRead        { return ActionRead(s) }
-func (s Action) SetRead()                { C.Struct(s).Set16(0, 0) }
-func (s ActionRead) Version() []byte     { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionRead) SetVersion(v []byte) { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s Action) Write() ActionWrite      { return ActionWrite(s) }
-func (s Action) SetWrite()               { C.Struct(s).Set16(0, 1) }
-func (s ActionWrite) Value() []byte      { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionWrite) SetValue(v []byte)  { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s ActionWrite) References() capnp.VarIdPos_List {
-	return capnp.VarIdPos_List(C.Struct(s).GetObject(2))
-}
-func (s ActionWrite) SetReferences(v capnp.VarIdPos_List) { C.Struct(s).SetObject(2, C.Object(v)) }
-func (s Action) Readwrite() ActionReadwrite               { return ActionReadwrite(s) }
-func (s Action) SetReadwrite()                            { C.Struct(s).Set16(0, 2) }
-func (s ActionReadwrite) Version() []byte                 { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionReadwrite) SetVersion(v []byte)             { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s ActionReadwrite) Value() []byte                   { return C.Struct(s).GetObject(2).ToData() }
-func (s ActionReadwrite) SetValue(v []byte)               { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s ActionReadwrite) References() capnp.VarIdPos_List {
-	return capnp.VarIdPos_List(C.Struct(s).GetObject(3))
-}
-func (s ActionReadwrite) SetReferences(v capnp.VarIdPos_List) { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Action) Create() ActionCreate                         { return ActionCreate(s) }
-func (s Action) SetCreate()                                   { C.Struct(s).Set16(0, 3) }
-func (s ActionCreate) Positions() C.UInt8List                 { return C.UInt8List(C.Struct(s).GetObject(1)) }
-func (s ActionCreate) SetPositions(v C.UInt8List)             { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s ActionCreate) Value() []byte                          { return C.Struct(s).GetObject(2).ToData() }
-func (s ActionCreate) SetValue(v []byte)                      { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s ActionCreate) References() capnp.VarIdPos_List {
-	return capnp.VarIdPos_List(C.Struct(s).GetObject(3))
-}
-func (s ActionCreate) SetReferences(v capnp.VarIdPos_List) { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Action) SetMissing()                               { C.Struct(s).Set16(0, 4) }
-func (s Action) Roll() ActionRoll                          { return ActionRoll(s) }
-func (s Action) SetRoll()                                  { C.Struct(s).Set16(0, 5) }
-func (s ActionRoll) Version() []byte                       { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionRoll) SetVersion(v []byte)                   { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s ActionRoll) Value() []byte                         { return C.Struct(s).GetObject(2).ToData() }
-func (s ActionRoll) SetValue(v []byte)                     { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s ActionRoll) References() capnp.VarIdPos_List {
-	return capnp.VarIdPos_List(C.Struct(s).GetObject(3))
-}
-func (s ActionRoll) SetReferences(v capnp.VarIdPos_List) { C.Struct(s).SetObject(3, C.Object(v)) }
+func NewAction(s *C.Segment) Action                     { return Action(s.NewStruct(8, 4)) }
+func NewRootAction(s *C.Segment) Action                 { return Action(s.NewRootStruct(8, 4)) }
+func AutoNewAction(s *C.Segment) Action                 { return Action(s.NewStructAR(8, 4)) }
+func ReadRootAction(s *C.Segment) Action                { return Action(s.Root(0).ToStruct()) }
+func (s Action) Which() Action_Which                    { return Action_Which(C.Struct(s).Get16(0)) }
+func (s Action) VarId() []byte                          { return C.Struct(s).GetObject(0).ToData() }
+func (s Action) SetVarId(v []byte)                      { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Action) Read() ActionRead                       { return ActionRead(s) }
+func (s Action) SetRead()                               { C.Struct(s).Set16(0, 0) }
+func (s ActionRead) Version() []byte                    { return C.Struct(s).GetObject(1).ToData() }
+func (s ActionRead) SetVersion(v []byte)                { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s Action) Write() ActionWrite                     { return ActionWrite(s) }
+func (s Action) SetWrite()                              { C.Struct(s).Set16(0, 1) }
+func (s ActionWrite) Value() []byte                     { return C.Struct(s).GetObject(1).ToData() }
+func (s ActionWrite) SetValue(v []byte)                 { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s ActionWrite) References() VarIdPos_List         { return VarIdPos_List(C.Struct(s).GetObject(2)) }
+func (s ActionWrite) SetReferences(v VarIdPos_List)     { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s Action) Readwrite() ActionReadwrite             { return ActionReadwrite(s) }
+func (s Action) SetReadwrite()                          { C.Struct(s).Set16(0, 2) }
+func (s ActionReadwrite) Version() []byte               { return C.Struct(s).GetObject(1).ToData() }
+func (s ActionReadwrite) SetVersion(v []byte)           { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s ActionReadwrite) Value() []byte                 { return C.Struct(s).GetObject(2).ToData() }
+func (s ActionReadwrite) SetValue(v []byte)             { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
+func (s ActionReadwrite) References() VarIdPos_List     { return VarIdPos_List(C.Struct(s).GetObject(3)) }
+func (s ActionReadwrite) SetReferences(v VarIdPos_List) { C.Struct(s).SetObject(3, C.Object(v)) }
+func (s Action) Create() ActionCreate                   { return ActionCreate(s) }
+func (s Action) SetCreate()                             { C.Struct(s).Set16(0, 3) }
+func (s ActionCreate) Positions() C.UInt8List           { return C.UInt8List(C.Struct(s).GetObject(1)) }
+func (s ActionCreate) SetPositions(v C.UInt8List)       { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s ActionCreate) Value() []byte                    { return C.Struct(s).GetObject(2).ToData() }
+func (s ActionCreate) SetValue(v []byte)                { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
+func (s ActionCreate) References() VarIdPos_List        { return VarIdPos_List(C.Struct(s).GetObject(3)) }
+func (s ActionCreate) SetReferences(v VarIdPos_List)    { C.Struct(s).SetObject(3, C.Object(v)) }
+func (s Action) SetMissing()                            { C.Struct(s).Set16(0, 4) }
+func (s Action) Roll() ActionRoll                       { return ActionRoll(s) }
+func (s Action) SetRoll()                               { C.Struct(s).Set16(0, 5) }
+func (s ActionRoll) Version() []byte                    { return C.Struct(s).GetObject(1).ToData() }
+func (s ActionRoll) SetVersion(v []byte)                { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s ActionRoll) Value() []byte                      { return C.Struct(s).GetObject(2).ToData() }
+func (s ActionRoll) SetValue(v []byte)                  { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
+func (s ActionRoll) References() VarIdPos_List          { return VarIdPos_List(C.Struct(s).GetObject(3)) }
+func (s ActionRoll) SetReferences(v VarIdPos_List)      { C.Struct(s).SetObject(3, C.Object(v)) }
 func (s Action) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error

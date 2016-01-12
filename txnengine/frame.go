@@ -6,9 +6,9 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"sort"
 )
 
@@ -711,7 +711,7 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	action.SetRoll()
 	roll := action.Roll()
 	roll.SetVersion(fo.frameTxnId[:])
-	var refs cmsgs.VarIdPos_List
+	var refs msgs.VarIdPos_List
 	switch origWrite.Which() {
 	case msgs.ACTION_WRITE:
 		ow := origWrite.Write()

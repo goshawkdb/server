@@ -14,3 +14,8 @@ struct Var {
   writeTxnClock   @3: VC.VectorClock;
   writesClock     @4: VC.VectorClock;
 }
+
+struct VarIdPos {
+  id        @0: Data;
+  positions @1: List(UInt8);
+}

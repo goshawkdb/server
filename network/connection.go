@@ -476,34 +476,6 @@ func (cah *connectionAwaitHandshake) maybeRestartConnection(err error) (bool, er
 	}
 }
 
-func (cah *connectionAwaitHandshake) makeHelloFromServer(topology *configuration.Topology) *capn.Segment {
-	seg := capn.NewBuffer(nil)
-	hello := cmsgs.NewRootHelloFromServer(seg)
-	localHost := cah.connectionManager.LocalHost()
-	hello.SetLocalHost(localHost)
-	namespace := make([]byte, common.KeyLen-8)
-	binary.BigEndian.PutUint32(namespace[0:4], cah.ConnectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], cah.connectionManager.BootCount)
-	binary.BigEndian.PutUint32(namespace[8:], uint32(cah.connectionManager.RMId))
-	hello.SetNamespace(namespace)
-	if cah.isServer {
-		tieBreak := cah.rng.Uint32()
-		cah.Lock()
-		cah.combinedTieBreak = tieBreak
-		cah.Unlock()
-		hello.SetTieBreak(tieBreak)
-		hello.SetTopologyDBVersion(topology.DBVersion[:])
-		hello.SetTopology(topology.AddToSegAutoRoot(seg))
-	}
-	if topology.RootVarUUId != nil {
-		varIdPos := cmsgs.NewVarIdPos(seg)
-		hello.SetRoot(varIdPos)
-		varIdPos.SetId(topology.RootVarUUId[:])
-		varIdPos.SetPositions((capn.UInt8List)(*topology.RootPositions))
-	}
-	return seg
-}
-
 func (cah *connectionAwaitHandshake) commonTLSConfig() *tls.Config {
 	nodeCertPrivKeyPair := cah.connectionManager.NodeCertificatePrivateKeyPair
 	roots := x509.NewCertPool()
@@ -579,20 +551,19 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 
 	topology := cash.connectionManager.Topology()
-	helloFromServer := cash.makeHelloFromServer(topology)
+	helloFromServer := cash.makeHelloServerFromServer(topology)
 	if err := cash.send(server.SegToBytes(helloFromServer)); err != nil {
 		return cash.connectionAwaitHandshake.maybeRestartConnection(err)
 	}
 
 	if seg, err := cash.readOne(); err == nil {
-		hello := cmsgs.ReadRootHelloFromServer(seg)
+		hello := msgs.ReadRootHelloServerFromServer(seg)
 		if verified, remoteTopology := cash.verifyTopology(topology, &hello); verified {
 			cash.Lock()
 			cash.established = true
 			cash.remoteHost = hello.LocalHost()
-			ns := hello.Namespace()
-			cash.remoteBootCount = binary.BigEndian.Uint32(ns[4:8])
-			cash.remoteRMId = common.RMId(binary.BigEndian.Uint32(ns[8:12]))
+			cash.remoteRMId = common.RMId(hello.RmId())
+			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
 			cash.remoteTopology = remoteTopology
 			cash.Unlock()
@@ -606,12 +577,28 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 }
 
-func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *cmsgs.HelloFromServer) (bool, *configuration.Topology) {
+func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *msgs.HelloServerFromServer) (bool, *configuration.Topology) {
 	remoteTopologyDBVersion := common.MakeTxnId(remote.TopologyDBVersion())
 	remoteTopologyCap := remote.Topology()
-	remoteRoot := remote.Root()
-	remoteTopology := configuration.TopologyFromCap(remoteTopologyDBVersion, &remoteRoot, &remoteTopologyCap)
+	remoteTopology := configuration.TopologyFromCap(remoteTopologyDBVersion, &remoteTopologyCap)
 	return topology.Configuration.Equal(remoteTopology.Configuration), remoteTopology
+}
+
+func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *configuration.Topology) *capn.Segment {
+	seg := capn.NewBuffer(nil)
+	hello := msgs.NewRootHelloServerFromServer(seg)
+	localHost := cash.connectionManager.LocalHost()
+	hello.SetLocalHost(localHost)
+	hello.SetRmId(uint32(cash.connectionManager.RMId))
+	hello.SetBootCount(cash.connectionManager.BootCount)
+	tieBreak := cash.rng.Uint32()
+	cash.Lock()
+	cash.combinedTieBreak = tieBreak
+	cash.Unlock()
+	hello.SetTieBreak(tieBreak)
+	hello.SetTopologyDBVersion(topology.DBVersion[:])
+	hello.SetTopology(topology.AddToSegAutoRoot(seg))
+	return seg
 }
 
 // Await Client Handshake
@@ -653,7 +640,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 		return false, errors.New("No client certificate known")
 	}
 
-	helloFromServer := cach.makeHelloFromServer(topology)
+	helloFromServer := cach.makeHelloClientFromServer(topology)
 	if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
 		return cach.connectionAwaitHandshake.maybeRestartConnection(err)
 	}
@@ -663,6 +650,20 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	cach.Unlock()
 	cach.nextState(nil)
 	return false, nil
+}
+
+func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
+	seg := capn.NewBuffer(nil)
+	hello := cmsgs.NewRootHelloClientFromServer(seg)
+	namespace := make([]byte, common.KeyLen-8)
+	binary.BigEndian.PutUint32(namespace[0:4], cach.ConnectionNumber)
+	binary.BigEndian.PutUint32(namespace[4:8], cach.connectionManager.BootCount)
+	binary.BigEndian.PutUint32(namespace[8:], uint32(cach.connectionManager.RMId))
+	hello.SetNamespace(namespace)
+	if topology.Root.VarUUId != nil {
+		hello.SetRootId(topology.Root.VarUUId[:])
+	}
+	return seg
 }
 
 // Run

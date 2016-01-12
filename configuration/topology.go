@@ -5,8 +5,8 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 )
 
 var (
@@ -27,12 +27,16 @@ var BlankTopology = &Topology{
 
 type Topology struct {
 	*Configuration
-	AllRMs        common.RMIds
-	FInc          uint8
-	TwoFInc       uint16
-	DBVersion     *common.TxnId
-	RootVarUUId   *common.VarUUId
-	RootPositions *common.Positions
+	AllRMs    common.RMIds
+	FInc      uint8
+	TwoFInc   uint16
+	DBVersion *common.TxnId
+	Root
+}
+
+type Root struct {
+	VarUUId   *common.VarUUId
+	Positions *common.Positions
 }
 
 func NewTopology(config *Configuration) *Topology {
@@ -52,8 +56,10 @@ func (t *Topology) Clone() *Topology {
 		FInc:          t.FInc,
 		TwoFInc:       t.TwoFInc,
 		DBVersion:     t.DBVersion,
-		RootVarUUId:   t.RootVarUUId,
-		RootPositions: t.RootPositions,
+		Root: Root{
+			VarUUId:   t.Root.VarUUId,
+			Positions: t.Root.Positions,
+		},
 	}
 }
 
@@ -62,11 +68,17 @@ func TopologyDeserialize(txnId *common.TxnId, root *msgs.VarIdPos, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-	topology := msgs.ReadRootTopology(seg)
-	return TopologyFromCap(txnId, root, &topology), nil
+	topologyCap := msgs.ReadRootTopology(seg)
+	topology := TopologyFromCap(txnId, &topologyCap)
+	if root != nil {
+		topology.Root.VarUUId = common.MakeVarUUId(root.Id())
+		positions := root.Positions()
+		topology.Root.Positions = (*common.Positions)(&positions)
+	}
+	return topology, nil
 }
 
-func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, topology *msgs.Topology) *Topology {
+func TopologyFromCap(txnId *common.TxnId, topology *msgs.Topology) *Topology {
 	t := &Topology{Configuration: &Configuration{}}
 	t.ClusterId = topology.ClusterId()
 	t.Version = topology.Version()
@@ -82,11 +94,6 @@ func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, topology *msgs.To
 		t.AllRMs[idx] = common.RMId(rms.At(idx))
 	}
 	t.DBVersion = txnId
-	if root != nil && len(root.Id()) == common.KeyLen {
-		t.RootVarUUId = common.MakeVarUUId(root.Id())
-		pos := common.Positions(root.Positions())
-		t.RootPositions = &pos
-	}
 	fingerprints := topology.Fingerprints()
 	fingerprintsMap := make(map[[sha256.Size]byte]server.EmptyStruct, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
@@ -144,10 +151,7 @@ func (a *Topology) Equal(b *Topology) bool {
 		len(a.AllRMs) == len(b.AllRMs)) {
 		return false
 	}
-	if (a.RootVarUUId == nil || b.RootVarUUId == nil) && a.RootVarUUId != b.RootVarUUId {
-		return false
-	}
-	if a.RootVarUUId != nil && !a.RootVarUUId.Equal(b.RootVarUUId) {
+	if !a.Root.VarUUId.Equal(b.Root.VarUUId) {
 		return false
 	}
 	for idx, aRM := range a.AllRMs {
@@ -163,8 +167,8 @@ func (t *Topology) String() string {
 		return "nil"
 	}
 	root := "unset"
-	if t.RootVarUUId != nil {
-		root = fmt.Sprintf("%v@%v", t.RootVarUUId, (*capn.UInt8List)(t.RootPositions).ToArray())
+	if t.Root.VarUUId != nil {
+		root = fmt.Sprintf("%v@%v", t.Root.VarUUId, (*capn.UInt8List)(t.Root.Positions).ToArray())
 	}
 	return fmt.Sprintf("Topology{%v, AllRMs: %v, F+1: %v, 2F+1: %v, DBVersion: %v, Root: %v}",
 		t.Configuration, t.AllRMs, t.FInc, t.TwoFInc, t.DBVersion, root)

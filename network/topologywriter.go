@@ -5,7 +5,6 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
@@ -81,7 +80,7 @@ func GetTopologyFromLocalDatabase(cm *ConnectionManager, varDispatcher *eng.VarD
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave non-write action")
 		}
 		write := updateAction.Write()
-		var rootPtr *cmsgs.VarIdPos
+		var rootPtr *msgs.VarIdPos
 		if refs := write.References(); refs.Len() == 1 {
 			root := refs.At(0)
 			rootPtr = &root
@@ -109,7 +108,7 @@ func CreateTopologyZero(cm *ConnectionManager, topology *configuration.Topology,
 		positions.Set(idx, uint8(idx))
 	}
 	create.SetValue(topology.Serialize())
-	create.SetReferences(cmsgs.NewVarIdPosList(seg, 0))
+	create.SetReferences(msgs.NewVarIdPosList(seg, 0))
 	allocs := msgs.NewAllocationList(seg, 1)
 	txn.SetAllocations(allocs)
 	alloc := allocs.At(0)
@@ -148,14 +147,14 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 	rw := topologyAction.Readwrite()
 	rw.SetVersion(topology.DBVersion[:])
 	rw.SetValue(topology.Serialize())
-	if topology.RootVarUUId == nil {
-		rw.SetReferences(cmsgs.NewVarIdPosList(seg, 0))
+	if topology.Root.VarUUId == nil {
+		rw.SetReferences(msgs.NewVarIdPosList(seg, 0))
 	} else {
-		refs := cmsgs.NewVarIdPosList(seg, 1)
+		refs := msgs.NewVarIdPosList(seg, 1)
 		rw.SetReferences(refs)
 		varIdPos := refs.At(0)
-		varIdPos.SetId(topology.RootVarUUId[:])
-		varIdPos.SetPositions((capn.UInt8List)(*topology.RootPositions))
+		varIdPos.SetId(topology.Root.VarUUId[:])
+		varIdPos.SetPositions((capn.UInt8List)(*topology.Root.Positions))
 	}
 
 	allocs := msgs.NewAllocationList(seg, len(topology.AllRMs))
@@ -221,7 +220,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 		return nil, false, fmt.Errorf("Internal error: readwrite of topology gave non-write action")
 	}
 	write := updateAction.Write()
-	var rootVarPos *cmsgs.VarIdPos
+	var rootVarPos *msgs.VarIdPos
 	if refs := write.References(); refs.Len() == 1 {
 		root := refs.At(0)
 		rootVarPos = &root
@@ -243,7 +242,7 @@ func AddSelfToTopology(cm *ConnectionManager, conns map[common.RMId]paxos.Connec
 }
 
 func MaybeCreateRoot(topology *configuration.Topology, conns map[common.RMId]paxos.Connection, cm *ConnectionManager, lc *client.LocalConnection) error {
-	if topology.RootVarUUId != nil {
+	if topology.Root.VarUUId != nil {
 		return nil
 	}
 	requiredKnownRMs := int(topology.TwoFInc)
@@ -282,7 +281,7 @@ func MaybeCreateRoot(topology *configuration.Topology, conns map[common.RMId]pax
 			positions.Set(idx, uint8(idx))
 		}
 		create.SetValue([]byte{})
-		create.SetReferences(cmsgs.NewVarIdPosList(seg, 0))
+		create.SetReferences(msgs.NewVarIdPosList(seg, 0))
 		allocs := msgs.NewAllocationList(seg, requiredKnownRMs)
 		txn.SetAllocations(allocs)
 		idx := 0
@@ -312,8 +311,8 @@ func MaybeCreateRoot(topology *configuration.Topology, conns map[common.RMId]pax
 		}
 		if result.Which() == msgs.OUTCOME_COMMIT {
 			server.Log("Root created in", vUUId)
-			topology.RootVarUUId = vUUId
-			topology.RootPositions = (*common.Positions)(&positions)
+			topology.Root.VarUUId = vUUId
+			topology.Root.Positions = (*common.Positions)(&positions)
 			return nil
 		}
 		abort := result.Abort()
@@ -415,15 +414,15 @@ func (tw *TopologyWriter) maybeStartWrite(conns map[common.RMId]paxos.Connection
 			log.Println("Error when creating root:", err)
 			return
 		}
-		tw.toWrite.RootVarUUId = toWrite.RootVarUUId
-		tw.toWrite.RootPositions = toWrite.RootPositions
+		tw.toWrite.Root.VarUUId = toWrite.Root.VarUUId
+		tw.toWrite.Root.Positions = toWrite.Root.Positions
 		topology, restart, err := AddSelfToTopology(tw.connectionManager, conns, toWrite, fInc, activeRMs, passiveRMs, tw.localConnection)
 		if restart {
 			if topology == nil {
 				topology = tw.toWrite
-			} else if topology.RootVarUUId == nil {
-				topology.RootVarUUId = toWrite.RootVarUUId
-				topology.RootPositions = toWrite.RootPositions
+			} else if topology.Root.VarUUId == nil {
+				topology.Root.VarUUId = toWrite.Root.VarUUId
+				topology.Root.Positions = toWrite.Root.Positions
 			}
 			tw.connectionManager.AddSender(NewTopologyWriter(topology, tw.localConnection, tw.connectionManager))
 		} else if err != nil {
