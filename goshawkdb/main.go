@@ -251,11 +251,8 @@ func (s *server) ensureRMId() error {
 
 	} else {
 		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		for {
+		for s.rmId == common.RMIdEmpty {
 			s.rmId = common.RMId(rng.Uint32())
-			if s.rmId != common.RMIdEmpty {
-				break
-			}
 		}
 		b := make([]byte, 4)
 		binary.BigEndian.PutUint32(b, uint32(s.rmId))
