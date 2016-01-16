@@ -360,7 +360,6 @@ func (fo *frameOpen) ReadWriteCommitted(action *localAction) {
 	if node := fo.writes.Get(action); node != nil && node.Value == uncommitted {
 		node.Value = committed
 		fo.uncommittedWrites--
-		fo.positionsFound = fo.positionsFound || (fo.frameTxnActions == nil && action.createPositions != nil)
 		fo.maybeCreateChild()
 	} else {
 		panic(fmt.Sprintf("%v ReadWriteCommitted called for unknown txn %v", fo.frame, txn))

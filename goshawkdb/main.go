@@ -293,8 +293,12 @@ func (s *server) chooseTopology(topology *configuration.Topology) (*configuratio
 		return topology, nil
 	case topology.ClusterId != config.ClusterId:
 		return nil, fmt.Errorf("Local data store is configured for cluster '%v', but supplied config is for cluster '%v'. Cannot continue. Either adjust config or use clean data directory", topology.ClusterId, config.ClusterId)
+	case topology.Version > config.Version:
+		return topology, nil
+	case topology.Version == config.Version:
+		return nil, fmt.Errorf("Configuration has same version number but different contents. Did you forget to increase the version number? (%v)", topology.Version)
 	default:
-		return nil, fmt.Errorf("Topology change not currently supported. Sorry.")
+		return configuration.NewTopology(config), nil
 	}
 }
 

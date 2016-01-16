@@ -5,7 +5,6 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xb30c67519ab66651;
 
-using Topology = import "topology.capnp";
 using PTV = import "paxostxnvote.capnp";
 using Outcome = import "outcome.capnp";
 using Txn = import "transaction.capnp";
@@ -16,8 +15,7 @@ struct HelloServerFromServer {
  rmId              @1: UInt32;
  bootCount         @2: UInt32;
  tieBreak          @3: UInt32;
- topologyDBVersion @4: Data;
- topology          @5: Topology.Topology;
+ clusterId         @4: Text;
 }
 
 struct Message {

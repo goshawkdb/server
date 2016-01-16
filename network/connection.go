@@ -31,7 +31,6 @@ type Connection struct {
 	remoteRMId        common.RMId
 	remoteBootCount   uint32
 	combinedTieBreak  uint32
-	remoteTopology    *configuration.Topology
 	socket            net.Conn
 	ConnectionNumber  uint32
 	connectionManager *ConnectionManager
@@ -109,10 +108,10 @@ func (conn *Connection) Status(sc *server.StatusConsumer) {
 	conn.enqueueQuery((*connectionMsgStatus)(sc))
 }
 
-func (conn *Connection) RemoteDetails() (bool, string, common.RMId, uint32, uint32, *configuration.Topology) {
+func (conn *Connection) RemoteDetails() (bool, string, common.RMId, uint32, uint32) {
 	conn.RLock()
 	defer conn.RUnlock()
-	return conn.established, conn.remoteHost, conn.remoteRMId, conn.remoteBootCount, conn.combinedTieBreak, conn.remoteTopology
+	return conn.established, conn.remoteHost, conn.remoteRMId, conn.remoteBootCount, conn.combinedTieBreak
 }
 
 func (conn *Connection) IsServer() bool {
@@ -558,14 +557,13 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 
 	if seg, err := cash.readOne(); err == nil {
 		hello := msgs.ReadRootHelloServerFromServer(seg)
-		if verified, remoteTopology := cash.verifyTopology(topology, &hello); verified {
+		if cash.verifyTopology(topology, &hello) {
 			cash.Lock()
 			cash.established = true
 			cash.remoteHost = hello.LocalHost()
 			cash.remoteRMId = common.RMId(hello.RmId())
 			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
-			cash.remoteTopology = remoteTopology
 			cash.Unlock()
 			cash.nextState(nil)
 			return false, nil
@@ -577,11 +575,8 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 }
 
-func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *msgs.HelloServerFromServer) (bool, *configuration.Topology) {
-	remoteTopologyDBVersion := common.MakeTxnId(remote.TopologyDBVersion())
-	remoteTopologyCap := remote.Topology()
-	remoteTopology := configuration.TopologyFromCap(remoteTopologyDBVersion, &remoteTopologyCap)
-	return topology.Configuration.Equal(remoteTopology.Configuration), remoteTopology
+func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *msgs.HelloServerFromServer) bool {
+	return topology.Configuration.ClusterId == remote.ClusterId()
 }
 
 func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *configuration.Topology) *capn.Segment {
@@ -596,8 +591,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 	cash.combinedTieBreak = tieBreak
 	cash.Unlock()
 	hello.SetTieBreak(tieBreak)
-	hello.SetTopologyDBVersion(topology.DBVersion[:])
-	hello.SetTopology(topology.AddToSegAutoRoot(seg))
+	hello.SetClusterId(topology.ClusterId)
 	return seg
 }
 
@@ -620,10 +614,13 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	socket := tls.Server(cach.socket, config)
 	cach.socket = socket
 	if err := socket.Handshake(); err != nil {
-		return cach.connectionAwaitHandshake.maybeRestartConnection(err)
+		return false, err
 	}
 
 	topology := cach.connectionManager.Topology()
+	if topology.Root.VarUUId == nil {
+		return false, errors.New("Root not yet known")
+	}
 
 	found := false
 	fingerprints := topology.Fingerprints()
@@ -642,7 +639,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 
 	helloFromServer := cach.makeHelloClientFromServer(topology)
 	if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
-		return cach.connectionAwaitHandshake.maybeRestartConnection(err)
+		return false, err
 	}
 	cach.Lock()
 	cach.established = true

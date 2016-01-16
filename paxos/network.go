@@ -22,6 +22,7 @@ type Sender interface {
 
 type Connection interface {
 	BootCount() uint32
+	Host() string
 	Send(msg []byte)
 }
 

@@ -5,7 +5,7 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xbbc717d787db5c5f;
 
-struct Topology {
+struct Configuration {
   clusterId          @0: Text;
   version            @1: UInt32;
   hosts              @2: List(Text);
@@ -14,4 +14,8 @@ struct Topology {
   asyncFlush         @5: Bool;
   rms                @6: List(UInt32);
   fingerprints       @7: List(Data);
+  union {
+    transitioningTo  @8: Configuration;
+    stable           @9: Void;
+  }
 }

@@ -7,7 +7,7 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 )
 
@@ -84,10 +84,16 @@ func (d *Dispatchers) DispatchMessage(sender common.RMId, msgType msgs.Message_W
 	}
 }
 
-func IsDatabaseClean(varDispatcher *eng.VarDispatcher) bool {
-	resultChan := make(chan bool, 1)
-	varDispatcher.ApplyToVar(func(v *eng.Var, err error) {
-		resultChan <- err == mdb.NotFound
-	}, false, configuration.TopologyVarUUId)
-	return <-resultChan
+func (d *Dispatchers) IsDatabaseEmpty() (bool, error) {
+	res, err := d.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, _ := rtxn.WithCursor(db.DB.Transactions, func(cursor *mdbs.Cursor) interface{} {
+			_, _, err := cursor.Get(nil, nil, mdb.FIRST)
+			return err == mdb.NotFound
+		})
+		return res
+	}).ResultError()
+	if err != nil {
+		return false, err
+	}
+	return res.(bool), nil
 }

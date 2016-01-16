@@ -23,12 +23,11 @@ type ConnectionManager struct {
 	BootCount                     uint32
 	NodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
 	topology                      *configuration.Topology
-	remoteTopology                *configuration.Topology
 	cellTail                      *cc.ChanCellTail
 	enqueueQueryInner             func(connectionManagerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan                     <-chan connectionManagerMsg
 	servers                       map[string]*Connection
-	rmToServer                    map[common.RMId]*connectionWithBootCount
+	rmToServer                    map[common.RMId]*connectionDetails
 	connCountToClient             map[uint32]paxos.ClientConnection
 	desired                       []string
 	senders                       map[paxos.Sender]server.EmptyStruct
@@ -207,7 +206,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 		BootCount:                     bootCount,
 		NodeCertificatePrivateKeyPair: nodeCertPrivKeyPair,
 		servers:           make(map[string]*Connection),
-		rmToServer:        make(map[common.RMId]*connectionWithBootCount),
+		rmToServer:        make(map[common.RMId]*connectionDetails),
 		connCountToClient: make(map[uint32]paxos.ClientConnection),
 		desired:           nil,
 		senders:           make(map[paxos.Sender]server.EmptyStruct),
@@ -233,7 +232,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 		})
 	lc := client.NewLocalConnection(rmId, bootCount, configuration.BlankTopology, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
-	cm.rmToServer[rmId] = &connectionWithBootCount{connectionSend: cm, bootCount: bootCount}
+	cm.rmToServer[rmId] = &connectionDetails{connectionSend: cm, bootCount: bootCount}
 	go cm.actorLoop(head)
 	cm.ClientEstablished(0, lc)
 	return cm, lc
@@ -308,7 +307,7 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 	}
 
 	for _, conn := range oldServers {
-		_, _, rmId, _, _, _ := conn.RemoteDetails()
+		_, _, rmId, _, _ := conn.RemoteDetails()
 		if c, found := cm.rmToServer[rmId]; found && c.connectionSend == conn {
 			delete(cm.rmToServer, rmId)
 			cm.sendersConnectionLost(rmId)
@@ -320,22 +319,17 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 }
 
 func (cm *ConnectionManager) serverEstablished(conn *Connection) {
-	established, host, rmId, bootCount, tiebreak, remoteTopology := conn.RemoteDetails()
+	established, host, rmId, bootCount, tiebreak := conn.RemoteDetails()
 	if !established {
 		return
 	}
-	cm.Lock()
-	if cm.remoteTopology == nil && len(remoteTopology.AllRMs) >= int(remoteTopology.FInc) {
-		cm.remoteTopology = remoteTopology
-	}
-	cm.Unlock()
 	if c, found := cm.servers[host]; found && c == conn {
-		cwbc := &connectionWithBootCount{connectionSend: conn, bootCount: bootCount}
+		cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host}
 		cm.rmToServer[rmId] = cwbc
 		cm.sendersConnectionEstablished(rmId, cwbc)
 		return
 	} else if found {
-		establishedC, _, _, bootCountC, tiebreakC, _ := c.RemoteDetails()
+		establishedC, _, _, bootCountC, tiebreakC := c.RemoteDetails()
 		killOld, killNew := false, false
 		switch {
 		case !establishedC || bootCountC < bootCount:
@@ -360,7 +354,7 @@ func (cm *ConnectionManager) serverEstablished(conn *Connection) {
 		case killOld:
 			c.Shutdown(false)
 			cm.servers[host] = conn
-			cwbc := &connectionWithBootCount{connectionSend: conn, bootCount: bootCount}
+			cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host}
 			cm.rmToServer[rmId] = cwbc
 			cm.sendersConnectionEstablished(rmId, cwbc)
 		case killNew:
@@ -375,7 +369,7 @@ func (cm *ConnectionManager) serverEstablished(conn *Connection) {
 }
 
 func (cm *ConnectionManager) serverLost(conn *Connection) {
-	_, _, rmId, _, _, _ := conn.RemoteDetails()
+	_, _, rmId, _, _ := conn.RemoteDetails()
 	if c, found := cm.rmToServer[rmId]; found && c.connectionSend == conn {
 		log.Printf("Connection to RMId %v lost\n", rmId)
 		delete(cm.rmToServer, rmId)
@@ -410,7 +404,7 @@ func (cm *ConnectionManager) removeSender(sender paxos.Sender, resultChan chan s
 	}
 }
 
-func (cm *ConnectionManager) sendersConnectionEstablished(rmId common.RMId, conn *connectionWithBootCount) {
+func (cm *ConnectionManager) sendersConnectionEstablished(rmId common.RMId, conn *connectionDetails) {
 	rmToServerCopy := cm.cloneRMToServer()
 	for sender := range cm.senders {
 		sender.ConnectionEstablished(rmId, conn, rmToServerCopy)
@@ -425,16 +419,10 @@ func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
 }
 
 func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
-	if cm.topology.Equal(topology) {
+	if cm.topology != nil && cm.topology.Configuration.Equal(topology.Configuration) {
 		return
 	}
-	rmEq := cm.topology != nil && cm.topology.AllRMs.Equal(topology.AllRMs)
-	// Even if no semantic change, the DBVersion/TxnId may have
-	// changed, so we must update our cache.
-	cm.topology = topology.Clone()
-	if rmEq {
-		return
-	}
+	cm.topology = topology
 	server.Log("Topology change:", topology)
 	rmToServerCopy := cm.cloneRMToServer()
 	for _, cconn := range cm.connCountToClient {
@@ -495,13 +483,18 @@ func (cm *ConnectionManager) Send(b []byte) {
 	cm.Dispatchers.DispatchMessage(cm.RMId, msg.Which(), &msg)
 }
 
-type connectionWithBootCount struct {
+type connectionDetails struct {
 	connectionSend
 	bootCount uint32
+	host      string
 }
 
-func (cwbc *connectionWithBootCount) BootCount() uint32 {
-	return cwbc.bootCount
+func (cd *connectionDetails) BootCount() uint32 {
+	return cd.bootCount
+}
+
+func (cd *connectionDetails) Host() string {
+	return cd.host
 }
 
 type connectionSend interface {

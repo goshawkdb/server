@@ -37,13 +37,15 @@ type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	resolver := ch.NewResolver(rng, topology.AllRMs)
-	disabled := make(map[common.RMId]server.EmptyStruct, len(topology.AllRMs))
-	for _, rmId := range topology.AllRMs {
-		disabled[rmId] = server.EmptyStructVal
+	resolver := ch.NewResolver(rng, topology.RMs())
+	disabled := make(map[common.RMId]server.EmptyStruct, len(topology.RMs()))
+	for _, rmId := range topology.RMs() {
+		if rmId != common.RMIdEmpty {
+			disabled[rmId] = server.EmptyStructVal
+		}
 	}
 
-	cache := ch.NewCache(resolver, topology.AllRMs.NonEmptyLen(), rng)
+	cache := ch.NewCache(resolver, topology.RMs().NonEmptyLen(), rng)
 	if topology.Root.VarUUId != nil {
 		cache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
 	}
@@ -134,7 +136,8 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 }
 
 func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration) error {
-	if sts.topology.Equal(configuration.BlankTopology) {
+	// Frames could attempt rolls before we have a topology.
+	if sts.topology.IsBlank() {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
@@ -155,13 +158,13 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 	if topology != nil {
 		server.Log("TM setting topology to", topology)
 		sts.topology = topology
-		sts.resolver = ch.NewResolver(sts.rng, topology.AllRMs)
-		sts.hashCache.SetResolverDesiredLen(sts.resolver, topology.AllRMs.NonEmptyLen())
+		sts.resolver = ch.NewResolver(sts.rng, topology.RMs())
+		sts.hashCache.SetResolverDesiredLen(sts.resolver, topology.RMs().NonEmptyLen())
 		if topology.Root.VarUUId != nil {
 			sts.hashCache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
 		}
 
-		if !topology.Equal(configuration.BlankTopology) && sts.bufferedSubmissions != nil {
+		if !topology.IsBlank() && sts.bufferedSubmissions != nil {
 			funcs := sts.bufferedSubmissions
 			sts.bufferedSubmissions = nil
 			for _, fun := range funcs {
@@ -170,9 +173,9 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 		}
 	}
 	if servers != nil {
-		sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.AllRMs))
-		for _, rmId := range sts.topology.AllRMs {
-			if _, found := servers[rmId]; !found {
+		sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
+		for _, rmId := range sts.topology.RMs() {
+			if _, found := servers[rmId]; !found && rmId != common.RMIdEmpty {
 				sts.disabledHashCodes[rmId] = server.EmptyStructVal
 			}
 		}

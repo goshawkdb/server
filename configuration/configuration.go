@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"net"
 	"os"
 	"strconv"
@@ -21,36 +23,9 @@ type Configuration struct {
 	MaxRMCount                    uint8
 	AsyncFlush                    bool
 	ClientCertificateFingerprints []string
+	rms                           []common.RMId
 	fingerprints                  map[[sha256.Size]byte]server.EmptyStruct
-}
-
-func (a *Configuration) Equal(b *Configuration) bool {
-	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.AsyncFlush == b.AsyncFlush && len(a.Hosts) == len(b.Hosts)) {
-		return false
-	}
-	for idx, aHost := range a.Hosts {
-		if aHost != b.Hosts[idx] {
-			return false
-		}
-	}
-	if len(a.fingerprints) != len(b.fingerprints) {
-		return false
-	}
-	for fingerprint := range b.fingerprints {
-		if _, found := a.fingerprints[fingerprint]; !found {
-			return false
-		}
-	}
-	return true
-}
-
-func (c *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, AsyncFlush: %v}",
-		c.ClusterId, c.Version, c.Hosts, c.F, c.MaxRMCount, c.AsyncFlush)
-}
-
-func (c *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
-	return c.fingerprints
+	nextConfiguration             *Configuration
 }
 
 func LoadConfigurationFromPath(path string) (*Configuration, error) {
@@ -122,8 +97,123 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 			fingerprints[ary] = server.EmptyStructVal
 		}
 		config.fingerprints = fingerprints
+		config.ClientCertificateFingerprints = nil
 	}
 	return &config, err
+}
+
+func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
+	c := &Configuration{
+		ClusterId:  config.ClusterId(),
+		Version:    config.Version(),
+		Hosts:      config.Hosts().ToArray(),
+		F:          config.F(),
+		MaxRMCount: config.MaxRMCount(),
+		AsyncFlush: config.AsyncFlush(),
+	}
+
+	rms := config.Rms()
+	c.rms = make([]common.RMId, rms.Len())
+	for idx := range c.rms {
+		c.rms[idx] = common.RMId(rms.At(idx))
+	}
+
+	fingerprints := config.Fingerprints()
+	fingerprintsMap := make(map[[sha256.Size]byte]server.EmptyStruct, fingerprints.Len())
+	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
+		ary := [sha256.Size]byte{}
+		copy(ary[:], fingerprints.At(idx))
+		fingerprintsMap[ary] = server.EmptyStructVal
+	}
+	c.fingerprints = fingerprintsMap
+
+	if config.Which() == msgs.CONFIGURATION_TRANSITIONINGTO {
+		nextConfig := config.TransitioningTo()
+		c.nextConfiguration = ConfigurationFromCap(&nextConfig)
+	}
+
+	return c
+}
+
+func (a *Configuration) Equal(b *Configuration) bool {
+	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.AsyncFlush == b.AsyncFlush && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms)) {
+		return false
+	}
+	for idx, aHost := range a.Hosts {
+		if aHost != b.Hosts[idx] {
+			return false
+		}
+	}
+	for idx, aRM := range a.rms {
+		if aRM != b.rms[idx] {
+			return false
+		}
+	}
+	for fingerprint := range b.fingerprints {
+		if _, found := a.fingerprints[fingerprint]; !found {
+			return false
+		}
+	}
+	if a.nextConfiguration == nil || b.nextConfiguration == nil {
+		return a.nextConfiguration == b.nextConfiguration
+	}
+	return a.nextConfiguration.Equal(b.nextConfiguration)
+}
+
+func (config *Configuration) String() string {
+	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, AsyncFlush: %v, RMs: %v}",
+		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.AsyncFlush, config.rms)
+}
+
+func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
+	return config.fingerprints
+}
+
+func (config *Configuration) RMs() common.RMIds {
+	return config.rms
+}
+
+func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configuration {
+	cap := msgs.AutoNewConfiguration(seg)
+	cap.SetClusterId(config.ClusterId)
+	cap.SetVersion(config.Version)
+
+	hosts := seg.NewTextList(len(config.Hosts))
+	cap.SetHosts(hosts)
+	for idx, host := range config.Hosts {
+		hosts.Set(idx, host)
+	}
+
+	cap.SetF(config.F)
+	cap.SetMaxRMCount(config.MaxRMCount)
+	cap.SetAsyncFlush(config.AsyncFlush)
+
+	rms := seg.NewUInt32List(len(config.rms))
+	cap.SetRms(rms)
+	for idx, rmId := range config.rms {
+		rms.Set(idx, uint32(rmId))
+	}
+	fingerprintsMap := config.fingerprints
+	fingerprints := seg.NewDataList(len(fingerprintsMap))
+	cap.SetFingerprints(fingerprints)
+	idx := 0
+	for fingerprint := range fingerprintsMap {
+		fingerprints.Set(idx, fingerprint[:])
+		idx++
+	}
+
+	if config.nextConfiguration == nil {
+		cap.SetStable()
+	} else {
+		cap.SetTransitioningTo(config.nextConfiguration.AddToSegAutoRoot(seg))
+	}
+	return cap
+}
+
+func (config *Configuration) Serialize() []byte {
+	seg := capn.NewBuffer(nil)
+	config.AddToSegAutoRoot(seg)
+	return server.SegToBytes(seg)
 }
 
 // Also checks we are in there somewhere
