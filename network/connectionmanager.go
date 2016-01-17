@@ -230,7 +230,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 				}
 			}
 		})
-	lc := client.NewLocalConnection(rmId, bootCount, configuration.BlankTopology, cm)
+	lc := client.NewLocalConnection(rmId, bootCount, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
 	cm.rmToServer[rmId] = &connectionDetails{connectionSend: cm, bootCount: bootCount}
 	go cm.actorLoop(head)
@@ -307,7 +307,7 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 	}
 
 	for _, conn := range oldServers {
-		_, _, rmId, _, _ := conn.RemoteDetails()
+		_, _, rmId, _, _, _ := conn.RemoteDetails()
 		if c, found := cm.rmToServer[rmId]; found && c.connectionSend == conn {
 			delete(cm.rmToServer, rmId)
 			cm.sendersConnectionLost(rmId)
@@ -319,17 +319,17 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 }
 
 func (cm *ConnectionManager) serverEstablished(conn *Connection) {
-	established, host, rmId, bootCount, tiebreak := conn.RemoteDetails()
+	established, host, rmId, rootId, bootCount, tiebreak := conn.RemoteDetails()
 	if !established {
 		return
 	}
 	if c, found := cm.servers[host]; found && c == conn {
-		cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host}
+		cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host, rootId: rootId}
 		cm.rmToServer[rmId] = cwbc
 		cm.sendersConnectionEstablished(rmId, cwbc)
 		return
 	} else if found {
-		establishedC, _, _, bootCountC, tiebreakC := c.RemoteDetails()
+		establishedC, _, _, _, bootCountC, tiebreakC := c.RemoteDetails()
 		killOld, killNew := false, false
 		switch {
 		case !establishedC || bootCountC < bootCount:
@@ -354,22 +354,22 @@ func (cm *ConnectionManager) serverEstablished(conn *Connection) {
 		case killOld:
 			c.Shutdown(false)
 			cm.servers[host] = conn
-			cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host}
+			cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host, rootId: rootId}
 			cm.rmToServer[rmId] = cwbc
 			cm.sendersConnectionEstablished(rmId, cwbc)
 		case killNew:
 			conn.Shutdown(false)
 		}
 	} else {
-		// It's not a desired connection. Kill it.
-		conn.Shutdown(false)
-		delete(cm.rmToServer, rmId)
-		cm.sendersConnectionLost(rmId)
+		cm.servers[host] = conn
+		cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host, rootId: rootId}
+		cm.rmToServer[rmId] = cwbc
+		cm.sendersConnectionEstablished(rmId, cwbc)
 	}
 }
 
 func (cm *ConnectionManager) serverLost(conn *Connection) {
-	_, _, rmId, _, _ := conn.RemoteDetails()
+	_, _, rmId, _, _, _ := conn.RemoteDetails()
 	if c, found := cm.rmToServer[rmId]; found && c.connectionSend == conn {
 		log.Printf("Connection to RMId %v lost\n", rmId)
 		delete(cm.rmToServer, rmId)
@@ -487,6 +487,7 @@ type connectionDetails struct {
 	connectionSend
 	bootCount uint32
 	host      string
+	rootId    *common.VarUUId
 }
 
 func (cd *connectionDetails) BootCount() uint32 {
@@ -495,6 +496,10 @@ func (cd *connectionDetails) BootCount() uint32 {
 
 func (cd *connectionDetails) Host() string {
 	return cd.host
+}
+
+func (cd *connectionDetails) RootId() *common.VarUUId {
+	return cd.rootId
 }
 
 type connectionSend interface {

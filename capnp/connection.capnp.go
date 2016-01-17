@@ -13,13 +13,13 @@ import (
 type HelloServerFromServer C.Struct
 
 func NewHelloServerFromServer(s *C.Segment) HelloServerFromServer {
-	return HelloServerFromServer(s.NewStruct(16, 2))
+	return HelloServerFromServer(s.NewStruct(16, 3))
 }
 func NewRootHelloServerFromServer(s *C.Segment) HelloServerFromServer {
-	return HelloServerFromServer(s.NewRootStruct(16, 2))
+	return HelloServerFromServer(s.NewRootStruct(16, 3))
 }
 func AutoNewHelloServerFromServer(s *C.Segment) HelloServerFromServer {
-	return HelloServerFromServer(s.NewStructAR(16, 2))
+	return HelloServerFromServer(s.NewStructAR(16, 3))
 }
 func ReadRootHelloServerFromServer(s *C.Segment) HelloServerFromServer {
 	return HelloServerFromServer(s.Root(0).ToStruct())
@@ -36,6 +36,8 @@ func (s HelloServerFromServer) SetTieBreak(v uint32)   { C.Struct(s).Set32(8, v)
 func (s HelloServerFromServer) ClusterId() string      { return C.Struct(s).GetObject(1).ToText() }
 func (s HelloServerFromServer) ClusterIdBytes() []byte { return C.Struct(s).GetObject(1).ToData() }
 func (s HelloServerFromServer) SetClusterId(v string)  { C.Struct(s).SetObject(1, s.Segment.NewText(v)) }
+func (s HelloServerFromServer) RootId() []byte         { return C.Struct(s).GetObject(2).ToData() }
+func (s HelloServerFromServer) SetRootId(v []byte)     { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
 func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -127,6 +129,25 @@ func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.ClusterId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"rootId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.RootId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -248,6 +269,25 @@ func (s HelloServerFromServer) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("rootId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.RootId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -264,7 +304,7 @@ func (s HelloServerFromServer) MarshalCapLit() ([]byte, error) {
 type HelloServerFromServer_List C.PointerList
 
 func NewHelloServerFromServerList(s *C.Segment, sz int) HelloServerFromServer_List {
-	return HelloServerFromServer_List(s.NewCompositeList(16, 2, sz))
+	return HelloServerFromServer_List(s.NewCompositeList(16, 3, sz))
 }
 func (s HelloServerFromServer_List) Len() int { return C.PointerList(s).Len() }
 func (s HelloServerFromServer_List) At(i int) HelloServerFromServer {
@@ -297,6 +337,7 @@ const (
 	MESSAGE_TWOBTXNVOTES        Message_Which = 8
 	MESSAGE_TXNLOCALLYCOMPLETE  Message_Which = 9
 	MESSAGE_TXNGLOBALLYCOMPLETE Message_Which = 10
+	MESSAGE_CONNECTIONERROR     Message_Which = 11
 )
 
 func NewMessage(s *C.Segment) Message      { return Message(s.NewStruct(8, 1)) }
@@ -362,6 +403,12 @@ func (s Message) TxnGloballyComplete() TxnGloballyComplete {
 func (s Message) SetTxnGloballyComplete(v TxnGloballyComplete) {
 	C.Struct(s).Set16(0, 10)
 	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s Message) ConnectionError() string      { return C.Struct(s).GetObject(0).ToText() }
+func (s Message) ConnectionErrorBytes() []byte { return C.Struct(s).GetObject(0).ToData() }
+func (s Message) SetConnectionError(v string) {
+	C.Struct(s).Set16(0, 11)
+	C.Struct(s).SetObject(0, s.Segment.NewText(v))
 }
 func (s Message) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
@@ -508,6 +555,23 @@ func (s Message) WriteJSON(w io.Writer) error {
 		{
 			s := s.TxnGloballyComplete()
 			err = s.WriteJSON(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_CONNECTIONERROR {
+		_, err = b.WriteString("\"connectionError\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.ConnectionError()
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
 			if err != nil {
 				return err
 			}
@@ -670,6 +734,23 @@ func (s Message) WriteCapLit(w io.Writer) error {
 		{
 			s := s.TxnGloballyComplete()
 			err = s.WriteCapLit(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_CONNECTIONERROR {
+		_, err = b.WriteString("connectionError = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.ConnectionError()
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
 			if err != nil {
 				return err
 			}

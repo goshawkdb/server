@@ -25,22 +25,24 @@ type Root struct {
 	Positions *common.Positions
 }
 
-var BlankTopology = &Topology{
-	Configuration: &Configuration{
-		ClusterId:                     "",
-		Version:                       0,
-		Hosts:                         []string{},
-		F:                             0,
-		MaxRMCount:                    0,
-		AsyncFlush:                    false,
-		ClientCertificateFingerprints: []string{},
-		rms:               []common.RMId{},
-		fingerprints:      nil,
-		nextConfiguration: nil,
-	},
-	FInc:      0,
-	TwoFInc:   0,
-	DBVersion: VersionOne,
+func BlankTopology(clusterId string) *Topology {
+	return &Topology{
+		Configuration: &Configuration{
+			ClusterId:                     clusterId,
+			Version:                       0,
+			Hosts:                         []string{},
+			F:                             0,
+			MaxRMCount:                    0,
+			AsyncFlush:                    false,
+			ClientCertificateFingerprints: []string{},
+			rms:               []common.RMId{},
+			fingerprints:      nil,
+			nextConfiguration: nil,
+		},
+		FInc:      0,
+		TwoFInc:   0,
+		DBVersion: VersionOne,
+	}
 }
 
 func NewTopology(txnId *common.TxnId, root *msgs.VarIdPos, config *Configuration) *Topology {
@@ -93,5 +95,5 @@ func (t *Topology) String() string {
 }
 
 func (t *Topology) IsBlank() bool {
-	return t.Version == 0
+	return t == nil || t.Version == 0
 }

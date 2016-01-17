@@ -24,6 +24,7 @@ type Connection interface {
 	BootCount() uint32
 	Host() string
 	Send(msg []byte)
+	RootId() *common.VarUUId
 }
 
 type ClientConnection interface {

@@ -13,9 +13,10 @@ struct Configuration {
   maxRMCount         @4: UInt8;
   asyncFlush         @5: Bool;
   rms                @6: List(UInt32);
-  fingerprints       @7: List(Data);
+  rmsRemoved         @7: List(UInt32);
+  fingerprints       @8: List(Data);
   union {
-    transitioningTo  @8: Configuration;
-    stable           @9: Void;
+    transitioningTo  @9: Configuration;
+    stable          @10: Void;
   }
 }

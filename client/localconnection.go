@@ -106,7 +106,7 @@ func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *ms
 	lcmrt.maybeClose()
 }
 
-func NewLocalConnection(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *LocalConnection {
+func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *LocalConnection {
 	namespace := make([]byte, common.KeyLen)
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
@@ -114,7 +114,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, topology *configurat
 		rmId:              rmId,
 		connectionManager: cm,
 		namespace:         namespace,
-		submitter:         NewSimpleTxnSubmitter(rmId, bootCount, topology, cm),
+		submitter:         NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		nextTxnNumber:     0,
 		nextVarNumber:     0,
 	}

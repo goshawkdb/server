@@ -35,32 +35,18 @@ var AbortRollError = fmt.Errorf("Not leading hashcode")
 type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
 type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
 
-func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
+func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	resolver := ch.NewResolver(rng, topology.RMs())
-	disabled := make(map[common.RMId]server.EmptyStruct, len(topology.RMs()))
-	for _, rmId := range topology.RMs() {
-		if rmId != common.RMIdEmpty {
-			disabled[rmId] = server.EmptyStructVal
-		}
-	}
-
-	cache := ch.NewCache(resolver, topology.RMs().NonEmptyLen(), rng)
-	if topology.Root.VarUUId != nil {
-		cache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
-	}
+	cache := ch.NewCache(nil, 0, rng)
 
 	sts := &SimpleTxnSubmitter{
 		rmId:              rmId,
 		bootCount:         bootCount,
-		disabledHashCodes: disabled,
 		connections:       nil,
 		connectionManager: cm,
 		outcomeConsumers:  make(map[common.TxnId]txnOutcomeConsumer),
 		onShutdown:        make(map[*func(bool)]server.EmptyStruct),
-		resolver:          resolver,
 		hashCache:         cache,
-		topology:          topology,
 		rng:               rng,
 	}
 	return sts

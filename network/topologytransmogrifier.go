@@ -2,6 +2,7 @@ package network
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
@@ -58,7 +59,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection) (*TopologyTransmogrifier, error) {
+func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, commandLineConfig *configuration.Configuration) (*TopologyTransmogrifier, error) {
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
@@ -104,18 +105,17 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 			})
 	}, true, configuration.TopologyVarUUId)
 
-	err := tt.ensureLocalTopology()
+	err := tt.ensureLocalTopology(commandLineConfig)
 	if err != nil {
 		return nil, err
 	}
 
+	cm.AddSender(tt)
 	go tt.actorLoop(head)
 	return tt, nil
 }
 
 func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
-	tt.connectionManager.AddSender(tt)
-
 	var (
 		err       error
 		queryChan <-chan topologyTransmogrifierMsg
@@ -147,14 +147,16 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 	tt.cellTail.Terminate()
 }
 
-func (tt *TopologyTransmogrifier) ensureLocalTopology() error {
+func (tt *TopologyTransmogrifier) ensureLocalTopology(config *configuration.Configuration) error {
 	topology, err := tt.getTopologyFromLocalDatabase()
 	if err != nil {
 		return err
 	}
 
-	if topology == nil {
-		_, err := tt.createTopologyZero()
+	if topology == nil && config == nil {
+		return errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
+	} else if topology == nil {
+		_, err := tt.createTopologyZero(config.ClusterId)
 		return err
 	}
 
@@ -291,8 +293,9 @@ func (tt *TopologyTransmogrifier) getTopologyFromLocalDatabase() (*configuration
 	}
 }
 
-func (tt *TopologyTransmogrifier) createTopologyZero() (*common.TxnId, error) {
-	txn := tt.createTopologyTransaction(nil, configuration.BlankTopology, []common.RMId{tt.connectionManager.RMId}, nil)
+func (tt *TopologyTransmogrifier) createTopologyZero(clusterId string) (*common.TxnId, error) {
+	topology := configuration.BlankTopology(clusterId)
+	txn := tt.createTopologyTransaction(nil, topology, []common.RMId{tt.connectionManager.RMId}, nil)
 	txnId := configuration.VersionOne
 	result, err := tt.localConnection.RunTransaction(txn, false, tt.connectionManager.RMId)
 	if err != nil {

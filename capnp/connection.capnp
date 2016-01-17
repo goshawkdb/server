@@ -11,11 +11,12 @@ using Txn = import "transaction.capnp";
 using TxnCompletion = import "txncompletion.capnp";
 
 struct HelloServerFromServer {
- localHost         @0: Text;
- rmId              @1: UInt32;
- bootCount         @2: UInt32;
- tieBreak          @3: UInt32;
- clusterId         @4: Text;
+ localHost @0: Text;
+ rmId      @1: UInt32;
+ bootCount @2: UInt32;
+ tieBreak  @3: UInt32;
+ clusterId @4: Text;
+ rootId    @5: Data;
 }
 
 struct Message {
@@ -31,5 +32,6 @@ struct Message {
     twoBTxnVotes        @8:  PTV.TwoBTxnVotes;
     txnLocallyComplete  @9:  TxnCompletion.TxnLocallyComplete;
     txnGloballyComplete @10: TxnCompletion.TxnGloballyComplete;
+    connectionError     @11: Text;
   }
 }

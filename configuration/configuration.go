@@ -23,7 +23,8 @@ type Configuration struct {
 	MaxRMCount                    uint8
 	AsyncFlush                    bool
 	ClientCertificateFingerprints []string
-	rms                           []common.RMId
+	rms                           common.RMIds
+	rmsRemoved                    map[common.RMId]server.EmptyStruct
 	fingerprints                  map[[sha256.Size]byte]server.EmptyStruct
 	nextConfiguration             *Configuration
 }
@@ -47,6 +48,9 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 	err := decoder.Decode(&config)
 	if err != nil {
 		return nil, err
+	}
+	if config.ClusterId == "" {
+		return nil, fmt.Errorf("Invalid configuration cluster id must not be empty")
 	}
 	if config.Version < 1 {
 		return nil, fmt.Errorf("Invalid configuration version (must be > 0): %v", config.Version)
@@ -118,6 +122,12 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		c.rms[idx] = common.RMId(rms.At(idx))
 	}
 
+	rmsRemoved := config.RmsRemoved()
+	c.rmsRemoved = make(map[common.RMId]server.EmptyStruct, rmsRemoved.Len())
+	for idx, l := 0, rmsRemoved.Len(); idx < l; idx++ {
+		c.rmsRemoved[common.RMId(rmsRemoved.At(idx))] = server.EmptyStructVal
+	}
+
 	fingerprints := config.Fingerprints()
 	fingerprintsMap := make(map[[sha256.Size]byte]server.EmptyStruct, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
@@ -136,7 +146,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {
-	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.AsyncFlush == b.AsyncFlush && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms)) {
+	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.AsyncFlush == b.AsyncFlush && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
 		return false
 	}
 	for idx, aHost := range a.Hosts {
@@ -146,6 +156,11 @@ func (a *Configuration) Equal(b *Configuration) bool {
 	}
 	for idx, aRM := range a.rms {
 		if aRM != b.rms[idx] {
+			return false
+		}
+	}
+	for aRM := range a.rmsRemoved {
+		if _, found := b.rmsRemoved[aRM]; !found {
 			return false
 		}
 	}
@@ -173,6 +188,10 @@ func (config *Configuration) RMs() common.RMIds {
 	return config.rms
 }
 
+func (config *Configuration) RMsRemoved() map[common.RMId]server.EmptyStruct {
+	return config.rmsRemoved
+}
+
 func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configuration {
 	cap := msgs.AutoNewConfiguration(seg)
 	cap.SetClusterId(config.ClusterId)
@@ -193,10 +212,19 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 	for idx, rmId := range config.rms {
 		rms.Set(idx, uint32(rmId))
 	}
+
+	rmsRemoved := seg.NewUInt32List(len(config.rmsRemoved))
+	cap.SetRmsRemoved(rmsRemoved)
+	idx := 0
+	for rmId := range config.rmsRemoved {
+		rmsRemoved.Set(idx, uint32(rmId))
+		idx++
+	}
+
 	fingerprintsMap := config.fingerprints
 	fingerprints := seg.NewDataList(len(fingerprintsMap))
 	cap.SetFingerprints(fingerprints)
-	idx := 0
+	idx = 0
 	for fingerprint := range fingerprintsMap {
 		fingerprints.Set(idx, fingerprint[:])
 		idx++

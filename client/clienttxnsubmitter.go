@@ -8,7 +8,6 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	"time"
 )
@@ -21,9 +20,9 @@ type ClientTxnSubmitter struct {
 	txnLive      bool
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
-		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, topology, cm),
+		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		versionCache:       NewVersionCache(),
 		txnLive:            false,
 	}
