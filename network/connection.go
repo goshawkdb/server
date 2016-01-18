@@ -251,7 +251,7 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 	case connectionMsgOutcomeReceived:
 		conn.outcomeReceived(msgT)
 	case *connectionMsgTopologyChange:
-		conn.topologyChange(msgT)
+		err = conn.topologyChange(msgT)
 	case connectionMsgDisableHashCodes:
 		conn.disableHashCodes(msgT)
 	case *connectionMsgStatus:
@@ -568,9 +568,8 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
 			cash.Unlock()
 			if _, found := topology.RMsRemoved()[cash.remoteRMId]; found {
-				return cash.connectionAwaitHandshake.maybeRestartConnection(
-					cash.serverError(
-						fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId)))
+				return false, cash.serverError(
+					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
 			}
 			cash.nextState(nil)
 			return false, nil
@@ -738,11 +737,20 @@ func (cr *connectionRun) start() (bool, error) {
 	return false, nil
 }
 
-func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) {
-	if cr.currentState != cr || !cr.isClient {
-		return
+func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) error {
+	if cr.currentState != cr {
+		return nil
 	}
-	cr.submitter.TopologyChange(tChange.topology, tChange.servers)
+	if topology := tChange.topology; cr.isServer && topology != nil {
+		if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
+			return cr.serverError(
+				fmt.Errorf("%v has been removed from topology and may not rejoin.", cr.remoteRMId))
+		}
+	}
+	if cr.isClient {
+		cr.submitter.TopologyChange(tChange.topology, tChange.servers)
+	}
+	return nil
 }
 
 func (cr *connectionRun) disableHashCodes(servers map[common.RMId]paxos.Connection) {

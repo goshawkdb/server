@@ -158,7 +158,7 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 			}
 		}
 	}
-	if servers != nil {
+	if servers != nil && sts.topology != nil {
 		sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
 		for _, rmId := range sts.topology.RMs() {
 			if _, found := servers[rmId]; !found && rmId != common.RMIdEmpty {
