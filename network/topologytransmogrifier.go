@@ -22,9 +22,11 @@ type TopologyTransmogrifier struct {
 	activeTopology    *configuration.Topology
 	hostRMIds         map[string]common.RMId
 	activeConnections map[common.RMId]paxos.Connection
+	tasks             []topologyTask
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan topologyTransmogrifierMsg
+	listenPort        uint16
 }
 
 type topologyTransmogrifierMsg interface {
@@ -45,10 +47,18 @@ type topologyTransmogrifierMsgVarChanged configuration.Topology
 
 func (ttmvc *topologyTransmogrifierMsgVarChanged) topologyTransmogrifierMsgWitness() {}
 
+type topologyTransmogrifierMsgRequestConfigChange configuration.Configuration
+
+func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) topologyTransmogrifierMsgWitness() {}
+
 func (tt *TopologyTransmogrifier) Shutdown() {
 	if tt.enqueueQuery(topologyTransmogrifierMsgShutdownInst) {
 		tt.cellTail.Wait()
 	}
+}
+
+func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
+	tt.enqueueQuery((*topologyTransmogrifierMsgRequestConfigChange)(config))
 }
 
 func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
@@ -59,11 +69,12 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, commandLineConfig *configuration.Configuration) (*TopologyTransmogrifier, error) {
+func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, commandLineConfig *configuration.Configuration, listenPort uint16) (*TopologyTransmogrifier, error) {
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
 		hostRMIds:         make(map[string]common.RMId),
+		listenPort:        listenPort,
 	}
 
 	var head *cc.ChanCellHead
@@ -86,6 +97,7 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 			}
 		})
 
+	subscriberInstalled := make(chan struct{})
 	cm.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
 		if err != nil {
 			panic(fmt.Errorf("Error trying to subscribe to topology: %v", err))
@@ -103,11 +115,15 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 				}
 				tt.enqueueQuery((*topologyTransmogrifierMsgVarChanged)(topology))
 			})
+		close(subscriberInstalled)
 	}, true, configuration.TopologyVarUUId)
 
-	err := tt.ensureLocalTopology(commandLineConfig)
-	if err != nil {
-		return nil, err
+	<-subscriberInstalled
+
+	tt.enqueueQuery(&ensureLocalTopology{TopologyTransmogrifier: tt, config: commandLineConfig})
+
+	if commandLineConfig != nil {
+		tt.RequestConfigurationChange(commandLineConfig)
 	}
 
 	cm.AddSender(tt)
@@ -130,10 +146,16 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 			case *topologyTransmogrifierMsgShutdown:
 				terminate = true
 			case topologyTransmogrifierMsgSetActiveConnections:
-				tt.activeConnections = msgT
+				err = tt.activeConnectionsChange(msgT)
 			case *topologyTransmogrifierMsgVarChanged:
-				tt.activeTopology = (*configuration.Topology)(msgT)
-				tt.connectionManager.SetTopology(tt.activeTopology)
+				err = tt.setTopology((*configuration.Topology)(msgT))
+			case *topologyTransmogrifierMsgRequestConfigChange:
+				err = tt.initiateChange((*configuration.Configuration)(msgT))
+			case topologyTask:
+				tt.tasks = append(tt.tasks, msgT)
+				if len(tt.tasks) == 1 {
+					err = tt.tasks[0].start()
+				}
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -147,22 +169,59 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 	tt.cellTail.Terminate()
 }
 
-func (tt *TopologyTransmogrifier) ensureLocalTopology(config *configuration.Configuration) error {
-	topology, err := tt.getTopologyFromLocalDatabase()
-	if err != nil {
-		return err
+func (tt *TopologyTransmogrifier) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
+	tt.activeConnections = conns
+
+	if len(tt.tasks) == 0 {
+		return nil
+	} else {
+		return tt.tasks[0].activeConnectionsChange(conns)
 	}
+}
 
-	if topology == nil && config == nil {
-		return errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
-	} else if topology == nil {
-		_, err := tt.createTopologyZero(config.ClusterId)
-		return err
+func (tt *TopologyTransmogrifier) setTopology(topology *configuration.Topology) error {
+	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
+		// TODO: proper shutdown mech
+		return errors.New("We have been removed from the topology. Shutting down.")
 	}
+	tt.activeTopology = topology
+	tt.connectionManager.SetTopology(topology)
+	if len(tt.tasks) == 0 {
+		log.Println("TODO: unhandled unexpected topology change")
+		return nil
+	} else {
+		return tt.tasks[0].activeTopologyChange(topology)
+	}
+}
 
-	tt.enqueueQuery((*topologyTransmogrifierMsgVarChanged)(topology))
-
+func (tt *TopologyTransmogrifier) initiateChange(config *configuration.Configuration) error {
+	accomodated := false
+	var err error
+	for _, task := range tt.tasks {
+		if accomodated, err = task.accomodateTarget(config); err != nil {
+			log.Printf("Ignoring requested changed due to error: %v", err)
+			return nil
+		} else if accomodated {
+			return nil
+		}
+	}
+	if !accomodated {
+		tt.tasks = append(tt.tasks, &topologyChange{TopologyTransmogrifier: tt, config: config})
+		if len(tt.tasks) == 1 {
+			return tt.tasks[0].start()
+		}
+	}
 	return nil
+}
+
+func (tt *TopologyTransmogrifier) taskCompleted() error {
+	if len(tt.tasks) == 1 {
+		tt.tasks = nil
+		return nil
+	} else {
+		tt.tasks = tt.tasks[1:]
+		return tt.tasks[0].start()
+	}
 }
 
 func (tt *TopologyTransmogrifier) createTopologyTransaction(read, write *configuration.Topology, active, passive common.RMIds) *msgs.Txn {
@@ -297,6 +356,7 @@ func (tt *TopologyTransmogrifier) createTopologyZero(clusterId string) (*common.
 	topology := configuration.BlankTopology(clusterId)
 	txn := tt.createTopologyTransaction(nil, topology, []common.RMId{tt.connectionManager.RMId}, nil)
 	txnId := configuration.VersionOne
+	txn.SetId(txnId[:])
 	result, err := tt.localConnection.RunTransaction(txn, false, tt.connectionManager.RMId)
 	if err != nil {
 		return nil, err
@@ -429,3 +489,122 @@ func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[com
 func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
 	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
 }
+
+type topologyTask interface {
+	start() error
+	activeTopologyChange(topology *configuration.Topology) error
+	activeConnectionsChange(conns map[common.RMId]paxos.Connection) error
+	accomodateTarget(config *configuration.Configuration) (bool, error)
+	topologyTransmogrifierMsg
+}
+
+type ensureLocalTopology struct {
+	*TopologyTransmogrifier
+	config                 *configuration.Configuration
+	startOnLocalConnection bool
+}
+
+func (task *ensureLocalTopology) start() error {
+	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
+		task.startOnLocalConnection = true
+		return nil
+	}
+
+	topology, err := task.getTopologyFromLocalDatabase()
+	if err != nil {
+		return err
+	}
+
+	switch {
+	case topology != nil:
+		task.enqueueQuery((*topologyTransmogrifierMsgVarChanged)(topology))
+		return nil
+	case task.config == nil:
+		return errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
+	default:
+		_, err := task.createTopologyZero(task.config.ClusterId)
+		return err
+	}
+
+	return nil
+}
+
+func (task *ensureLocalTopology) activeTopologyChange(topology *configuration.Topology) error {
+	if topology.Version == 0 && task.config == nil {
+		return errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
+	} else if topology.Version > 0 {
+		localHost, remoteHosts, err := topology.LocalRemoteHosts(task.listenPort)
+		if err != nil {
+			return err
+		}
+		log.Printf(">==> We are %v (%v) <==<\n", localHost, task.connectionManager.RMId)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	}
+	return task.taskCompleted()
+}
+
+func (task *ensureLocalTopology) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
+	if _, found := task.activeConnections[task.connectionManager.RMId]; found && task.startOnLocalConnection {
+		task.startOnLocalConnection = false
+		return task.start()
+	}
+	return nil
+}
+
+func (task *ensureLocalTopology) accomodateTarget(config *configuration.Configuration) (bool, error) {
+	return false, nil
+}
+
+func (task *ensureLocalTopology) topologyTransmogrifierMsgWitness() {}
+
+type topologyChange struct {
+	*TopologyTransmogrifier
+	config *configuration.Configuration
+}
+
+func (task *topologyChange) start() error {
+	if task.activeTopology == nil {
+		return errors.New("Internal logic failure: config change started with nil activeTopology")
+	}
+	if task.activeTopology.ClusterId != task.config.ClusterId {
+		log.Printf("Ignoring supplied config due to incorrect ClusterId: should be '%v'; is '%v'",
+			task.activeTopology.ClusterId, task.config.ClusterId)
+		return task.taskCompleted()
+	}
+	if task.activeTopology.Version >= task.config.Version {
+		log.Printf("Ignoring supplied config as version is not greater than current active version (%v)",
+			task.activeTopology.Version)
+		return task.taskCompleted()
+	}
+	log.Printf("Attempting to change topology to %v", task.config)
+	return nil
+}
+
+func (task *topologyChange) activeTopologyChange(topology *configuration.Topology) error {
+	return nil
+}
+
+func (task *topologyChange) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
+	return nil
+}
+
+func (task *topologyChange) accomodateTarget(config *configuration.Configuration) (bool, error) {
+	if task.activeTopology != nil {
+		if task.activeTopology.ClusterId != config.ClusterId {
+			return false, fmt.Errorf("Incorrect ClusterId: should be '%v'; is '%v'",
+				task.activeTopology.ClusterId, config.ClusterId)
+		}
+		if task.activeTopology.Version >= config.Version {
+			return false, fmt.Errorf("Version is not greater than current active version (%v)",
+				task.activeTopology.Version)
+		}
+	}
+	if task.config.Version >= config.Version {
+		return false, fmt.Errorf("Version is not greater than current scheduled version (%v)",
+			task.config.Version)
+	}
+	task.config = config
+	return true, nil
+}
+
+func (task *topologyChange) topologyTransmogrifierMsgWitness() {}

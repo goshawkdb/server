@@ -1,5 +1,6 @@
 package network
 
+/*
 import (
 	"bytes"
 	"fmt"
@@ -229,3 +230,4 @@ func (tw *TopologyWriter) maybeStartWrite(conns map[common.RMId]paxos.Connection
 		}
 	}()
 }
+*/

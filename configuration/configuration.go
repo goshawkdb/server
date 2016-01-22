@@ -245,7 +245,7 @@ func (config *Configuration) Serialize() []byte {
 }
 
 // Also checks we are in there somewhere
-func (config *Configuration) LocalRemoteHosts(listenPort int) (string, []string, error) {
+func (config *Configuration) LocalRemoteHosts(listenPort uint16) (string, []string, error) {
 	listenPortStr := fmt.Sprint(listenPort)
 	localIPs, err := LocalAddresses()
 	if err != nil {

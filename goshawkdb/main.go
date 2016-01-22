@@ -11,12 +11,9 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
 	goshawk "goshawkdb.io/server"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
-	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -114,7 +111,7 @@ func newServer() (*server, error) {
 		configFile:  configFile,
 		certificate: certificate,
 		dataDir:     dataDir,
-		port:        port,
+		port:        uint16(port),
 		onShutdown:  []func(){},
 	}
 
@@ -133,11 +130,11 @@ type server struct {
 	configFile        string
 	certificate       []byte
 	dataDir           string
-	port              int
+	port              uint16
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
-	dispatchers       *paxos.Dispatchers
+	transmogrifier    *network.TopologyTransmogrifier
 	profileFile       *os.File
 	traceFile         *os.File
 	onShutdown        []func()
@@ -159,6 +156,9 @@ func (s *server) start() {
 	s.maybeShutdown(err)
 	s.addOnShutdown(disk.Shutdown)
 
+	commandLineConfig, err := s.commandLineConfig()
+	s.maybeShutdown(err)
+
 	cm, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair)
 	s.connectionManager = cm
 	s.addOnShutdown(cm.Shutdown)
@@ -167,56 +167,14 @@ func (s *server) start() {
 	s.Add(1)
 	go s.signalHandler()
 
-	topologyLocal, err := network.GetTopologyFromLocalDatabase(cm, cm.Dispatchers.VarDispatcher, lc)
+	transmogrifier, err := network.NewTopologyTransmogrifier(cm, lc, commandLineConfig, s.port)
 	s.maybeShutdown(err)
-
-	topology, err := s.chooseTopology(topologyLocal)
-	s.maybeShutdown(err)
-
-	if topologyLocal == nil {
-		topologyTxnId, err := network.CreateTopologyZero(cm, topology, lc)
-		s.maybeShutdown(err)
-		topology.DBVersion = topologyTxnId
-	}
-
-	cm.SetTopology(topology)
-
-	cm.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
-		if err != nil {
-			log.Println("Error trying to subscribe to topology:", err)
-			return
-		}
-		emptyTxnId := common.MakeTxnId([]byte{})
-		v.AddWriteSubscriber(emptyTxnId,
-			func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-				var rootVarPosPtr *msgs.VarIdPos
-				if refs.Len() == 1 {
-					root := refs.At(0)
-					rootVarPosPtr = &root
-				}
-				topology, err := configuration.TopologyDeserialize(txn.Id, rootVarPosPtr, value)
-				if err != nil {
-					log.Println("Unable to deserialize new topology:", err)
-				}
-				cm.SetTopology(topology)
-				disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
-					return nil, env.SetFlags(mdb.MAPASYNC, topology.AsyncFlush)
-				})
-			})
-	}, false, configuration.TopologyVarUUId)
-
-	cm.AddSender(network.NewTopologyWriter(topology, lc, cm))
-
-	localHost, remoteHosts, err := topology.LocalRemoteHosts(s.port)
-	s.maybeShutdown(err)
-
-	log.Printf(">==> We are %v (%v) <==<\n", localHost, s.rmId)
+	s.addOnShutdown(transmogrifier.Shutdown)
+	s.transmogrifier = transmogrifier
 
 	listener, err := network.NewListener(s.port, cm)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
-
-	cm.SetDesiredServers(localHost, remoteHosts)
 
 	defer s.shutdown(nil)
 	s.Wait()
@@ -272,6 +230,14 @@ func (s *server) ensureBootCount() error {
 	return ioutil.WriteFile(path, b, 0600)
 }
 
+func (s *server) commandLineConfig() (*configuration.Configuration, error) {
+	if s.configFile != "" {
+		return configuration.LoadConfigurationFromPath(s.configFile)
+	}
+	return nil, nil
+}
+
+/*
 func (s *server) chooseTopology(topology *configuration.Topology) (*configuration.Topology, error) {
 	var config *configuration.Configuration
 	if s.configFile != "" {
@@ -301,6 +267,7 @@ func (s *server) chooseTopology(topology *configuration.Topology) (*configuratio
 		return configuration.NewTopology(config), nil
 	}
 }
+*/
 
 func (s *server) signalShutdown() {
 	log.Println("Shutting down.")
@@ -319,7 +286,6 @@ func (s *server) signalStatus() {
 }
 
 func (s *server) signalReloadConfig() {
-	return // not supported for now.
 	if s.configFile == "" {
 		log.Println("Attempt to reload config failed as no path to configuration provided on command line.")
 		return
@@ -329,13 +295,7 @@ func (s *server) signalReloadConfig() {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	localHost, remoteHosts, err := config.LocalRemoteHosts(s.port)
-	if err != nil {
-		log.Println("Cannot reload config due to error:", err)
-		return
-	}
-	s.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	log.Println("Reloaded configuration.")
+	s.transmogrifier.RequestConfigurationChange(config)
 }
 
 func (s *server) signalDumpStacks() {
