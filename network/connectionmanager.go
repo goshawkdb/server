@@ -200,7 +200,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *mdbs.MDBServer, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair) (*ConnectionManager, *client.LocalConnection) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *mdbs.MDBServer, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair, clusterId string, port uint16) (*ConnectionManager, *TopologyTransmogrifier, error) {
 	cm := &ConnectionManager{
 		RMId:                          rmId,
 		BootCount:                     bootCount,
@@ -235,7 +235,12 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 	cm.rmToServer[rmId] = &connectionDetails{connectionSend: cm, bootCount: bootCount}
 	go cm.actorLoop(head)
 	cm.ClientEstablished(0, lc)
-	return cm, lc
+	transmogrifier, err := NewTopologyTransmogrifier(cm, lc, clusterId, port)
+	if err != nil {
+		cm.Shutdown()
+		return nil, nil, err
+	}
+	return cm, transmogrifier, err
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {

@@ -158,19 +158,24 @@ func (s *server) start() {
 
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
+	clusterId := ""
+	if commandLineConfig != nil {
+		clusterId = commandLineConfig.ClusterId
+	}
 
-	cm, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair)
+	cm, transmogrifier, err := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, clusterId, s.port)
 	s.connectionManager = cm
+	s.transmogrifier = transmogrifier
+	s.maybeShutdown(err)
 	s.addOnShutdown(cm.Shutdown)
-	s.addOnShutdown(lc.Shutdown)
+	s.addOnShutdown(transmogrifier.Shutdown)
 
 	s.Add(1)
 	go s.signalHandler()
 
-	transmogrifier, err := network.NewTopologyTransmogrifier(cm, lc, commandLineConfig, s.port)
-	s.maybeShutdown(err)
-	s.addOnShutdown(transmogrifier.Shutdown)
-	s.transmogrifier = transmogrifier
+	if commandLineConfig != nil {
+		transmogrifier.RequestConfigurationChange(commandLineConfig)
+	}
 
 	listener, err := network.NewListener(s.port, cm)
 	s.maybeShutdown(err)

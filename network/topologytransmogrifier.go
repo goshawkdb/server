@@ -14,6 +14,8 @@ import (
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
+	"math/rand"
+	"time"
 )
 
 type TopologyTransmogrifier struct {
@@ -27,6 +29,7 @@ type TopologyTransmogrifier struct {
 	enqueueQueryInner func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan topologyTransmogrifierMsg
 	listenPort        uint16
+	rng               *rand.Rand
 }
 
 type rmIdAndRootId struct {
@@ -74,12 +77,13 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, commandLineConfig *configuration.Configuration, listenPort uint16) (*TopologyTransmogrifier, error) {
+func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, clusterId string, listenPort uint16) (*TopologyTransmogrifier, error) {
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
 		hostRMIds:         make(map[string]*rmIdAndRootId),
 		listenPort:        listenPort,
+		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	var head *cc.ChanCellHead
@@ -125,14 +129,16 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 
 	<-subscriberInstalled
 
-	tt.enqueueQuery(&ensureLocalTopology{TopologyTransmogrifier: tt, config: commandLineConfig})
-
-	if commandLineConfig != nil {
-		tt.RequestConfigurationChange(commandLineConfig)
-	}
+	established := make(chan struct{})
+	tt.enqueueQuery(&ensureLocalTopology{
+		TopologyTransmogrifier: tt,
+		clusterId:              clusterId,
+		established:            established,
+	})
 
 	cm.AddSender(tt)
 	go tt.actorLoop(head)
+	<-established
 	return tt, nil
 }
 
@@ -493,7 +499,7 @@ func (tt *TopologyTransmogrifier) chooseRMIdsForTopology(localHost string, topol
 	return active, passive
 }
 
-func (tt *TopologyTransmogrifier) attemptCreateRoot(topology *configuration.Topology) error {
+func (tt *TopologyTransmogrifier) attemptCreateRoot(topology *configuration.Topology) (bool, error) {
 	twoFInc, fInc, f := int(topology.TwoFInc), int(topology.FInc), int(topology.F)
 	active := make([]common.RMId, fInc)
 	passive := make([]common.RMId, f)
@@ -501,7 +507,7 @@ func (tt *TopologyTransmogrifier) attemptCreateRoot(topology *configuration.Topo
 	nonEmpties := topology.RMs().NonEmpty()
 	for _, rmId := range nonEmpties {
 		if _, found := tt.activeConnections[rmId]; !found {
-			return nil
+			return false, nil
 		}
 	}
 	copy(active, nonEmpties[:fInc])
@@ -550,22 +556,22 @@ func (tt *TopologyTransmogrifier) attemptCreateRoot(topology *configuration.Topo
 	txn.SetTopologyVersion(topology.Version)
 	result, err := tt.localConnection.RunTransaction(&txn, true, active...)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if result == nil { // shutdown
-		return nil
+		return false, nil
 	}
 	if result.Which() == msgs.OUTCOME_COMMIT {
 		server.Log("Root created in", vUUId)
 		topology.Root.VarUUId = vUUId
 		topology.Root.Positions = (*common.Positions)(&positions)
-		return nil
+		return false, nil
 	}
 	abort := result.Abort()
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("Internal error: creation of root gave rerun outcome")
+	return false, fmt.Errorf("Internal error: creation of root gave rerun outcome")
 }
 
 func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -594,8 +600,9 @@ type topologyTask interface {
 
 type ensureLocalTopology struct {
 	*TopologyTransmogrifier
-	config                 *configuration.Configuration
+	clusterId              string
 	startOnLocalConnection bool
+	established            chan struct{}
 }
 
 func (task *ensureLocalTopology) start() error {
@@ -604,16 +611,17 @@ func (task *ensureLocalTopology) start() error {
 		return nil
 	}
 
+	defer close(task.established)
 	topology, err := task.getTopologyFromLocalDatabase()
 	if err != nil {
 		return err
 	}
 
-	if topology == nil && task.config == nil {
+	if topology == nil && task.clusterId == "" {
 		return errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
 
 	} else if topology == nil {
-		topology, err = task.createTopologyZero(task.config.ClusterId)
+		topology, err = task.createTopologyZero(task.clusterId)
 		if err != nil {
 			return err
 		}
@@ -625,9 +633,8 @@ func (task *ensureLocalTopology) start() error {
 }
 
 func (task *ensureLocalTopology) topologyVarChanged(topology *configuration.Topology) error {
-	// The only way we're here is if we're waiting for the local
-	// connection. Once that arrives, we'll start and then discover and
-	// return the topology. So it's safe to ignore this here.
+	// This should be impossible: we don't have any desired connections
+	// and the listener shouldn't be active yet.
 	return nil
 }
 
@@ -667,7 +674,7 @@ func (task *topologyChange) start() error {
 		return task.taskCompleted(task.activeTopology)
 	}
 	log.Printf("Attempting to transition to %v", task.config)
-	if task.activeTopology.Root.VarUUId == nil {
+	if task.activeTopology.Version == 0 {
 		task.tasks[0] = &joinCluster{topologyChange: task}
 	} else {
 		task.tasks[0] = &modifyCluster{task}
@@ -784,15 +791,22 @@ func (task *joinCluster) maybeBegin() error {
 		if task.targetTopology == nil {
 			targetTopology := configuration.NewTopology(task.activeTopology.DBVersion, nil, task.config)
 			targetTopology.SetRMs(rmIds)
-			switch err := task.attemptCreateRoot(targetTopology); {
-			case err != nil:
-				return err
-			case targetTopology.Root.VarUUId == nil:
-				// We failed; likely we need to wait for connections to change
-				task.maybeBeginOnConnectionChange = true
-				return nil
-			default:
-				task.targetTopology = targetTopology
+		Outer:
+			for {
+				switch resubmit, err := task.attemptCreateRoot(targetTopology); {
+				case err != nil:
+					return err
+				case resubmit:
+					time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+					continue
+				case targetTopology.Root.VarUUId == nil:
+					// We failed; likely we need to wait for connections to change
+					task.maybeBeginOnConnectionChange = true
+					return nil
+				default:
+					task.targetTopology = targetTopology
+					break Outer
+				}
 			}
 		}
 
@@ -811,6 +825,7 @@ func (task *joinCluster) maybeBegin() error {
 				return err
 			}
 			if resubmit {
+				time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
 				continue
 			}
 			// It would be possible for all to be starting from empty,
