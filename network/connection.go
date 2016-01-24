@@ -563,7 +563,10 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 			cash.established = true
 			cash.remoteHost = hello.LocalHost()
 			cash.remoteRMId = common.RMId(hello.RmId())
-			cash.remoteRootId = common.MakeVarUUId(hello.RootId())
+			rootId := hello.RootId()
+			if len(rootId) == common.KeyLen {
+				cash.remoteRootId = common.MakeVarUUId(rootId)
+			}
 			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
 			cash.Unlock()

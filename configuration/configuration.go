@@ -184,12 +184,54 @@ func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptySt
 	return config.fingerprints
 }
 
+func (config *Configuration) Next() *Configuration {
+	return config.nextConfiguration
+}
+
+func (config *Configuration) SetNext(next *Configuration) {
+	config.nextConfiguration = next
+}
+
 func (config *Configuration) RMs() common.RMIds {
 	return config.rms
 }
 
+func (config *Configuration) SetRMs(rms common.RMIds) {
+	config.rms = rms
+}
+
 func (config *Configuration) RMsRemoved() map[common.RMId]server.EmptyStruct {
 	return config.rmsRemoved
+}
+
+func (config *Configuration) Clone() *Configuration {
+	clone := &Configuration{
+		ClusterId:                     config.ClusterId,
+		Version:                       config.Version,
+		Hosts:                         make([]string, len(config.Hosts)),
+		F:                             config.F,
+		MaxRMCount:                    config.MaxRMCount,
+		AsyncFlush:                    config.AsyncFlush,
+		ClientCertificateFingerprints: make([]string, len(config.ClientCertificateFingerprints)),
+		rms:               make([]common.RMId, len(config.rms)),
+		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
+		fingerprints:      make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
+		nextConfiguration: config.nextConfiguration,
+	}
+
+	copy(clone.Hosts, config.Hosts)
+	copy(clone.ClientCertificateFingerprints, config.ClientCertificateFingerprints)
+	copy(clone.rms, config.rms)
+	for k, v := range config.rmsRemoved {
+		clone.rmsRemoved[k] = v
+	}
+	for k, v := range config.fingerprints {
+		clone.fingerprints[k] = v
+	}
+	if clone.nextConfiguration != nil {
+		clone.nextConfiguration = clone.nextConfiguration.Clone()
+	}
+	return clone
 }
 
 func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configuration {

@@ -64,7 +64,7 @@ func NewTopology(txnId *common.TxnId, root *msgs.VarIdPos, config *Configuration
 
 func (t *Topology) Clone() *Topology {
 	return &Topology{
-		Configuration: t.Configuration,
+		Configuration: t.Configuration.Clone(),
 		FInc:          t.FInc,
 		TwoFInc:       t.TwoFInc,
 		DBVersion:     t.DBVersion,
