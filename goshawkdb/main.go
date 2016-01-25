@@ -153,8 +153,8 @@ func (s *server) start() {
 	s.maybeShutdown(err)
 
 	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
-	s.maybeShutdown(err)
 	s.addOnShutdown(disk.Shutdown)
+	s.maybeShutdown(err)
 
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
@@ -164,11 +164,11 @@ func (s *server) start() {
 	}
 
 	cm, transmogrifier, err := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, clusterId, s.port)
-	s.connectionManager = cm
-	s.transmogrifier = transmogrifier
-	s.maybeShutdown(err)
 	s.addOnShutdown(cm.Shutdown)
 	s.addOnShutdown(transmogrifier.Shutdown)
+	s.maybeShutdown(err)
+	s.connectionManager = cm
+	s.transmogrifier = transmogrifier
 
 	s.Add(1)
 	go s.signalHandler()
@@ -178,15 +178,17 @@ func (s *server) start() {
 	}
 
 	listener, err := network.NewListener(s.port, cm)
-	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
+	s.maybeShutdown(err)
 
 	defer s.shutdown(nil)
 	s.Wait()
 }
 
 func (s *server) addOnShutdown(f func()) {
-	s.onShutdown = append(s.onShutdown, f)
+	if f != nil {
+		s.onShutdown = append(s.onShutdown, f)
+	}
 }
 
 func (s *server) shutdown(err error) {

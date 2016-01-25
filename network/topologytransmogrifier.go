@@ -77,7 +77,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, clusterId string, listenPort uint16) (*TopologyTransmogrifier, error) {
+func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, clusterId string, listenPort uint16) func() (*TopologyTransmogrifier, error) {
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
@@ -138,8 +138,10 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 
 	cm.AddSender(tt)
 	go tt.actorLoop(head)
-	<-established
-	return tt, nil
+	return func() (*TopologyTransmogrifier, error) {
+		<-established
+		return tt, nil
+	}
 }
 
 func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
