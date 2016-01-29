@@ -805,6 +805,19 @@ func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 		// do nothing
 	case msgs.MESSAGE_CONNECTIONERROR:
 		return fmt.Errorf("Error received from %v: \"%s\"", cr.remoteRMId, msg.ConnectionError())
+	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
+		configCap := msg.TopologyChangeRequest()
+		config := configuration.ConfigurationFromCap(&configCap)
+		errChan := cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
+		go func() {
+			err := <-errChan
+			if err != nil {
+				seg := capn.NewBuffer(nil)
+				msg := msgs.NewRootMessage(seg)
+				msg.SetConnectionError(err.Error())
+				cr.Send(server.SegToBytes(seg))
+			}
+		}()
 	default:
 		cr.connectionManager.Dispatchers.DispatchMessage(cr.remoteRMId, which, msg)
 	}

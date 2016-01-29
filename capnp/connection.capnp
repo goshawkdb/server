@@ -9,6 +9,7 @@ using PTV = import "paxostxnvote.capnp";
 using Outcome = import "outcome.capnp";
 using Txn = import "transaction.capnp";
 using TxnCompletion = import "txncompletion.capnp";
+using Config = import "configuration.capnp";
 
 struct HelloServerFromServer {
  localHost @0: Text;
@@ -21,17 +22,18 @@ struct HelloServerFromServer {
 
 struct Message {
   union {
-    heartbeat           @0:  Void;
-    txnSubmission       @1:  Txn.Txn;
-    submissionOutcome   @2:  Outcome.Outcome;
-    submissionComplete  @3:  TxnCompletion.TxnSubmissionComplete;
-    submissionAbort     @4:  TxnCompletion.TxnSubmissionAbort;
-    oneATxnVotes        @5:  PTV.OneATxnVotes;
-    oneBTxnVotes        @6:  PTV.OneBTxnVotes;
-    twoATxnVotes        @7:  PTV.TwoATxnVotes;
-    twoBTxnVotes        @8:  PTV.TwoBTxnVotes;
-    txnLocallyComplete  @9:  TxnCompletion.TxnLocallyComplete;
-    txnGloballyComplete @10: TxnCompletion.TxnGloballyComplete;
-    connectionError     @11: Text;
+    heartbeat             @0:  Void;
+    connectionError       @1:  Text;
+    txnSubmission         @2:  Txn.Txn;
+    submissionOutcome     @3:  Outcome.Outcome;
+    submissionComplete    @4:  TxnCompletion.TxnSubmissionComplete;
+    submissionAbort       @5:  TxnCompletion.TxnSubmissionAbort;
+    oneATxnVotes          @6:  PTV.OneATxnVotes;
+    oneBTxnVotes          @7:  PTV.OneBTxnVotes;
+    twoATxnVotes          @8:  PTV.TwoATxnVotes;
+    twoBTxnVotes          @9:  PTV.TwoBTxnVotes;
+    txnLocallyComplete    @10: TxnCompletion.TxnLocallyComplete;
+    txnGloballyComplete   @11: TxnCompletion.TxnGloballyComplete;
+    topologyChangeRequest @12: Config.Configuration;
   }
 }

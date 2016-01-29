@@ -55,7 +55,10 @@ type topologyTransmogrifierMsgVarChanged configuration.Topology
 
 func (ttmvc *topologyTransmogrifierMsgVarChanged) topologyTransmogrifierMsgWitness() {}
 
-type topologyTransmogrifierMsgRequestConfigChange configuration.Configuration
+type topologyTransmogrifierMsgRequestConfigChange struct {
+	config  *configuration.Configuration
+	errChan chan error
+}
 
 func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) topologyTransmogrifierMsgWitness() {}
 
@@ -65,8 +68,13 @@ func (tt *TopologyTransmogrifier) Shutdown() {
 	}
 }
 
-func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
-	tt.enqueueQuery((*topologyTransmogrifierMsgRequestConfigChange)(config))
+func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) chan error {
+	errChan := make(chan error, 1)
+	tt.enqueueQuery(&topologyTransmogrifierMsgRequestConfigChange{
+		config:  config,
+		errChan: errChan,
+	})
+	return errChan
 }
 
 func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
@@ -77,7 +85,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, clusterId string, listenPort uint16) func() (*TopologyTransmogrifier, error) {
+func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, clusterId string, listenPort uint16) (*TopologyTransmogrifier, func() error) {
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
@@ -129,7 +137,7 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 
 	<-subscriberInstalled
 
-	established := make(chan struct{})
+	established := make(chan error)
 	tt.enqueueQuery(&ensureLocalTopology{
 		TopologyTransmogrifier: tt,
 		clusterId:              clusterId,
@@ -138,9 +146,8 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 
 	cm.AddSender(tt)
 	go tt.actorLoop(head)
-	return func() (*TopologyTransmogrifier, error) {
-		<-established
-		return tt, nil
+	return tt, func() error {
+		return <-established
 	}
 }
 
@@ -163,7 +170,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 			case *topologyTransmogrifierMsgVarChanged:
 				err = tt.topologyVarChanged((*configuration.Topology)(msgT))
 			case *topologyTransmogrifierMsgRequestConfigChange:
-				err = tt.initiateChange((*configuration.Configuration)(msgT))
+				err = tt.initiateChange(msgT.config, msgT.errChan)
 			case topologyTask:
 				tt.tasks = append(tt.tasks, msgT)
 				if len(tt.tasks) == 1 {
@@ -219,25 +226,29 @@ func (tt *TopologyTransmogrifier) topologyVarChanged(topology *configuration.Top
 }
 
 // from local command line
-func (tt *TopologyTransmogrifier) initiateChange(config *configuration.Configuration) error {
+func (tt *TopologyTransmogrifier) initiateChange(config *configuration.Configuration, errChan chan error) error {
 	for _, task := range tt.tasks {
-		if accomodated, confErr, fatalErr := task.accomodateTarget(config); fatalErr != nil {
+		if accomodated, confErr, fatalErr := task.accomodateTarget(config, errChan); fatalErr != nil {
+			errChan <- confErr
+			close(errChan)
 			return fatalErr
 		} else if confErr != nil {
 			log.Printf("Ignoring requested changed due to problem with configuration: %v", confErr)
+			errChan <- confErr
+			close(errChan)
 			return nil
 		} else if accomodated {
 			return nil
 		}
 	}
-	tt.tasks = append(tt.tasks, &topologyChange{TopologyTransmogrifier: tt, config: config})
+	tt.tasks = append(tt.tasks, &topologyChange{TopologyTransmogrifier: tt, config: config, errChan: errChan})
 	if len(tt.tasks) == 1 {
 		return tt.tasks[0].start()
 	}
 	return nil
 }
 
-func (tt *TopologyTransmogrifier) taskCompleted(topology *configuration.Topology) error {
+func (tt *TopologyTransmogrifier) taskCompleted(topology *configuration.Topology, setServers bool) error {
 	if topology == nil {
 		return errors.New("Task completed with nil topology.")
 	}
@@ -247,7 +258,7 @@ func (tt *TopologyTransmogrifier) taskCompleted(topology *configuration.Topology
 		}
 		tt.activeTopology = topology
 		tt.connectionManager.SetTopology(topology)
-		if topology.Version > 0 {
+		if setServers {
 			localHost, remoteHosts, err := topology.LocalRemoteHosts(tt.listenPort)
 			if err != nil {
 				return err
@@ -594,7 +605,7 @@ type topologyTask interface {
 	start() error
 	topologyVarChanged(topology *configuration.Topology) error
 	activeConnectionsChange(conns map[common.RMId]paxos.Connection) error
-	accomodateTarget(config *configuration.Configuration) (bool, error, error)
+	accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error)
 	topologyTransmogrifierMsg
 }
 
@@ -604,7 +615,7 @@ type ensureLocalTopology struct {
 	*TopologyTransmogrifier
 	clusterId              string
 	startOnLocalConnection bool
-	established            chan struct{}
+	established            chan error
 }
 
 func (task *ensureLocalTopology) start() error {
@@ -613,24 +624,29 @@ func (task *ensureLocalTopology) start() error {
 		return nil
 	}
 
-	defer close(task.established)
 	topology, err := task.getTopologyFromLocalDatabase()
 	if err != nil {
+		task.established <- err
 		return err
 	}
 
-	if topology == nil && task.clusterId == "" {
-		return errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
+	if (topology == nil || topology.Version == 0) && task.clusterId == "" {
+		err := errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
+		task.established <- err
+		return err
 
 	} else if topology == nil {
 		topology, err = task.createTopologyZero(task.clusterId)
 		if err != nil {
+			task.established <- err
 			return err
 		}
-		return task.taskCompleted(topology)
+		close(task.established)
+		return task.taskCompleted(topology, false)
 
 	} else {
-		return task.taskCompleted(topology)
+		close(task.established)
+		return task.taskCompleted(topology, topology.Version > 0)
 	}
 }
 
@@ -648,7 +664,7 @@ func (task *ensureLocalTopology) activeConnectionsChange(conns map[common.RMId]p
 	return nil
 }
 
-func (task *ensureLocalTopology) accomodateTarget(config *configuration.Configuration) (bool, error, error) {
+func (task *ensureLocalTopology) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
 	return false, nil, nil
 }
 
@@ -658,22 +674,36 @@ func (task *ensureLocalTopology) topologyTransmogrifierMsgWitness() {}
 
 type topologyChange struct {
 	*TopologyTransmogrifier
-	config *configuration.Configuration
+	config  *configuration.Configuration
+	errChan chan error
+}
+
+func (task *topologyChange) error(err error) error {
+	if task.errChan != nil {
+		if err != nil {
+			task.errChan <- err
+		}
+		close(task.errChan)
+		task.errChan = nil
+	}
+	return err
 }
 
 func (task *topologyChange) start() error {
 	if task.activeTopology == nil {
-		return errors.New("Internal logic failure: config change started with nil activeTopology")
+		return task.error(errors.New("Internal logic failure: config change started with nil activeTopology"))
 	}
 	if task.activeTopology.ClusterId != task.config.ClusterId {
-		log.Printf("Ignoring supplied config due to incorrect ClusterId: should be '%v'; is '%v'",
+		err := fmt.Errorf("Ignoring supplied config due to incorrect ClusterId: should be '%v'; is '%v'",
 			task.activeTopology.ClusterId, task.config.ClusterId)
-		return task.taskCompleted(task.activeTopology)
+		task.error(err)
+		return task.taskCompleted(task.activeTopology, true)
 	}
 	if task.activeTopology.Version >= task.config.Version {
-		log.Printf("Ignoring supplied config as version is not greater than current active version (%v)",
+		err := fmt.Errorf("Ignoring supplied config as version is not greater than current active version (%v)",
 			task.activeTopology.Version)
-		return task.taskCompleted(task.activeTopology)
+		task.error(err)
+		return task.taskCompleted(task.activeTopology, true)
 	}
 	log.Printf("Attempting to transition to %v", task.config)
 	if task.activeTopology.Version == 0 {
@@ -694,7 +724,7 @@ func (task *topologyChange) activeConnectionsChange(conns map[common.RMId]paxos.
 	return nil
 }
 
-func (task *topologyChange) accomodateTarget(config *configuration.Configuration) (bool, error, error) {
+func (task *topologyChange) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
 	// The only way we're here is if we're queued up waiting to start.
 	if task.activeTopology != nil {
 		if task.activeTopology.ClusterId != config.ClusterId {
@@ -714,7 +744,9 @@ func (task *topologyChange) accomodateTarget(config *configuration.Configuration
 		return false, fmt.Errorf("Version (%v) is not greater than current scheduled version (%v)",
 			config.Version, task.config.Version), nil
 	}
+	task.error(nil)
 	task.config = config
+	task.errChan = errChan
 	return true, nil, nil
 }
 
@@ -732,7 +764,7 @@ type joinCluster struct {
 func (task *joinCluster) start() error {
 	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
 	if err != nil {
-		return err
+		return task.error(err)
 	}
 	task.localHost = localHost
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
@@ -752,92 +784,31 @@ func (task *joinCluster) maybeBegin() error {
 	}
 
 	// Ok, we know who everyone is. Are we connected to them though?
-	connectedCount := 0
-	oldies := make([]*rmIdAndRootId, 0, len(task.config.Hosts))
+	rmIds := make([]common.RMId, 0, len(task.config.Hosts))
 	var rootId *common.VarUUId
 	for _, host := range task.config.Hosts {
 		if host == task.localHost {
 			continue
 		}
 		rmIdRoot, _ := task.hostRMIds[host]
-		if _, found := task.activeConnections[rmIdRoot.rmId]; found {
-			connectedCount++
-		}
+		rmIds = append(rmIds, rmIdRoot.rmId)
 		switch remoteRootId := rmIdRoot.rootId; {
 		case remoteRootId == nil:
 			// they're joining too
 		case rootId == nil:
 			rootId = remoteRootId
-			oldies = append(oldies, rmIdRoot)
 		case rootId.Equal(remoteRootId):
 			// all good
-			oldies = append(oldies, rmIdRoot)
 		default:
-			return errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting.")
+			err := errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting.")
+			return task.error(err)
 		}
 	}
 
 	allJoining := rootId == nil
 
 	if allJoining {
-		rmIds := make([]common.RMId, 0, len(task.config.Hosts))
-		for _, host := range task.config.Hosts {
-			if host == task.localHost {
-				rmIds = append(rmIds, task.connectionManager.RMId)
-			} else {
-				rmIdRoot := task.hostRMIds[host]
-				rmIds = append(rmIds, rmIdRoot.rmId)
-			}
-		}
-
-		if task.targetTopology == nil {
-			targetTopology := configuration.NewTopology(task.activeTopology.DBVersion, nil, task.config)
-			targetTopology.SetRMs(rmIds)
-		Outer:
-			for {
-				switch resubmit, err := task.attemptCreateRoot(targetTopology); {
-				case err != nil:
-					return err
-				case resubmit:
-					time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-					continue
-				case targetTopology.Root.VarUUId == nil:
-					// We failed; likely we need to wait for connections to change
-					task.maybeBeginOnConnectionChange = true
-					return nil
-				default:
-					task.targetTopology = targetTopology
-					break Outer
-				}
-			}
-		}
-
-		// Finally we need to rewrite the topology. For allJoining, we
-		// must use everyone as active. This is because we could have
-		// seen one of our peers when it had no RootId, but we've since
-		// lost that connection and in fact that peer has gone off and
-		// joined another cluster. So the only way to be instantaneously
-		// sure that all peers are empty and moving to the same topology
-		// is to have all peers as active.
-
-		activeTopology := task.activeTopology
-		for {
-			topology, resubmit, err := task.rewriteTopology(activeTopology, task.targetTopology, rmIds, nil)
-			if err != nil {
-				return err
-			}
-			if resubmit {
-				time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-				continue
-			}
-			// It would be possible for all to be starting from empty,
-			// but some to be being fed a bigger config than
-			// others. Bizzare, but it is possible.
-			if topology.Version < task.targetTopology.Version {
-				task.tasks = append(task.tasks, task.topologyChange)
-			}
-			return task.taskCompleted(topology)
-		}
+		task.allJoining(append(rmIds, task.connectionManager.RMId))
 
 	} else {
 		// If we're not allJoining then we need the previous config
@@ -854,9 +825,69 @@ func (task *joinCluster) maybeBegin() error {
 		// of the oldies and then we ask them to do the config change
 		// for us.
 
+		seg := capn.NewBuffer(nil)
+		msg := msgs.NewRootMessage(seg)
+		msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
+		sender := paxos.NewRepeatingSender(server.SegToBytes(seg), rmIds...)
+		task.connectionManager.AddSender(sender)
+
+		fmt.Println("Hello 1")
 	}
 
 	return nil
+}
+
+func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
+	if task.targetTopology == nil {
+		targetTopology := configuration.NewTopology(task.activeTopology.DBVersion, nil, task.config)
+		targetTopology.SetRMs(allRMIds)
+	Outer:
+		for {
+			switch resubmit, err := task.attemptCreateRoot(targetTopology); {
+			case err != nil:
+				return task.error(err)
+			case resubmit:
+				time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+				continue
+			case targetTopology.Root.VarUUId == nil:
+				// We failed; likely we need to wait for connections to change
+				task.maybeBeginOnConnectionChange = true
+				return nil
+			default:
+				task.targetTopology = targetTopology
+				break Outer
+			}
+		}
+	}
+
+	// Finally we need to rewrite the topology. For allJoining, we
+	// must use everyone as active. This is because we could have
+	// seen one of our peers when it had no RootId, but we've since
+	// lost that connection and in fact that peer has gone off and
+	// joined another cluster. So the only way to be instantaneously
+	// sure that all peers are empty and moving to the same topology
+	// is to have all peers as active.
+
+	activeTopology := task.activeTopology
+	for {
+		topology, resubmit, err := task.rewriteTopology(activeTopology, task.targetTopology, allRMIds, nil)
+		if err != nil {
+			return task.error(err)
+		}
+		if resubmit {
+			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+			continue
+		}
+		// It would be possible for all to be starting from empty,
+		// but some to be being fed a bigger config than
+		// others. Bizzare, but it is possible.
+		if topology.Version < task.targetTopology.Version &&
+			(topology.Next() == nil || topology.Next().Version < task.targetTopology.Version) {
+			task.tasks = append(task.tasks, task.topologyChange)
+		}
+		task.error(nil)
+		return task.taskCompleted(topology, true)
+	}
 }
 
 func (task *joinCluster) topologyVarChanged(topology *configuration.Topology) error {
@@ -872,13 +903,13 @@ func (task *joinCluster) activeConnectionsChange(conns map[common.RMId]paxos.Con
 	return nil
 }
 
-func (task *joinCluster) accomodateTarget(config *configuration.Configuration) (bool, error, error) {
+func (task *joinCluster) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
 	// If we're here then we must be waiting to start or
 	// restart. Perfectly safe then to revert back to the
 	// topologyChange and get that to make the decision. The fact that
 	// we are a joinCluster means our parent topologyChange must have
 	// been started, so we must be at task.tasks[0].
-	accomodated, confErr, fatalErr := task.topologyChange.accomodateTarget(config)
+	accomodated, confErr, fatalErr := task.topologyChange.accomodateTarget(config, errChan)
 	if !accomodated || confErr != nil || fatalErr != nil {
 		return accomodated, confErr, fatalErr
 	}
@@ -893,6 +924,7 @@ func (task *joinCluster) topologyTransmogrifierMsgWitness() {}
 type modifyCluster struct{ *topologyChange }
 
 func (task *modifyCluster) start() error {
+	fmt.Println("Hello 2")
 	return nil
 }
 func (task *modifyCluster) topologyVarChanged(topology *configuration.Topology) error {
@@ -901,7 +933,7 @@ func (task *modifyCluster) topologyVarChanged(topology *configuration.Topology) 
 func (task *modifyCluster) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
 	return nil
 }
-func (task *modifyCluster) accomodateTarget(config *configuration.Configuration) (bool, error, error) {
+func (task *modifyCluster) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
 	return false, nil, nil
 }
 func (task *modifyCluster) topologyTransmogrifierMsgWitness() {}

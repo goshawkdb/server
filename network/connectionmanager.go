@@ -22,6 +22,7 @@ type ConnectionManager struct {
 	RMId                          common.RMId
 	BootCount                     uint32
 	NodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
+	Transmogrifier                *TopologyTransmogrifier
 	topology                      *configuration.Topology
 	cellTail                      *cc.ChanCellTail
 	enqueueQueryInner             func(connectionManagerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
@@ -233,11 +234,11 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 	cm.rmToServer[rmId] = &connectionDetails{connectionSend: cm, bootCount: bootCount}
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
-	localEstablished := NewTopologyTransmogrifier(cm, lc, clusterId, port)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(cm, lc, clusterId, port)
+	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	cm.ClientEstablished(0, lc)
-	transmogrifier, err := localEstablished()
-	return cm, transmogrifier, err
+	return cm, transmogrifier, localEstablished()
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {

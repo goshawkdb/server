@@ -174,7 +174,13 @@ func (s *server) start() {
 	go s.signalHandler()
 
 	if commandLineConfig != nil {
-		transmogrifier.RequestConfigurationChange(commandLineConfig)
+		errChan := transmogrifier.RequestConfigurationChange(commandLineConfig)
+		go func() {
+			err := <-errChan
+			if err != nil {
+				log.Println(err)
+			}
+		}()
 	}
 
 	listener, err := network.NewListener(s.port, cm)
