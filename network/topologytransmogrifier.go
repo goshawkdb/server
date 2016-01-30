@@ -21,10 +21,11 @@ import (
 type TopologyTransmogrifier struct {
 	connectionManager *ConnectionManager
 	localConnection   *client.LocalConnection
-	activeTopology    *configuration.Topology
+	clusterId         string
+	active            *configuration.Topology
 	hostRMIds         map[string]*rmIdAndRootId
 	activeConnections map[common.RMId]paxos.Connection
-	tasks             []topologyTask
+	task              topologyTask
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan topologyTransmogrifierMsg
@@ -47,35 +48,47 @@ func (ttms *topologyTransmogrifierMsgShutdown) topologyTransmogrifierMsgWitness(
 
 var topologyTransmogrifierMsgShutdownInst = &topologyTransmogrifierMsgShutdown{}
 
-type topologyTransmogrifierMsgSetActiveConnections map[common.RMId]paxos.Connection
-
-func (ttmsac topologyTransmogrifierMsgSetActiveConnections) topologyTransmogrifierMsgWitness() {}
-
-type topologyTransmogrifierMsgVarChanged configuration.Topology
-
-func (ttmvc *topologyTransmogrifierMsgVarChanged) topologyTransmogrifierMsgWitness() {}
-
-type topologyTransmogrifierMsgRequestConfigChange struct {
-	config  *configuration.Configuration
-	errChan chan error
-}
-
-func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) topologyTransmogrifierMsgWitness() {}
-
 func (tt *TopologyTransmogrifier) Shutdown() {
 	if tt.enqueueQuery(topologyTransmogrifierMsgShutdownInst) {
 		tt.cellTail.Wait()
 	}
 }
 
-func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) chan error {
+type topologyTransmogrifierMsgRequestConfigChange struct {
+	config  *configuration.Configuration
+	errChan chan error
+}
+
+func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) func() error {
 	errChan := make(chan error, 1)
 	tt.enqueueQuery(&topologyTransmogrifierMsgRequestConfigChange{
 		config:  config,
 		errChan: errChan,
 	})
-	return errChan
+	return func() error {
+		return <-errChan
+	}
 }
+
+func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) finish(err error) {
+	if ttmrcc.errChan != nil {
+		if err != nil {
+			ttmrcc.errChan <- err
+		}
+		close(ttmrcc.errChan)
+		ttmrcc.errChan = nil
+	}
+}
+
+func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) topologyTransmogrifierMsgWitness() {}
+
+type topologyTransmogrifierMsgSetActiveConnections map[common.RMId]paxos.Connection
+
+func (ttmsac topologyTransmogrifierMsgSetActiveConnections) topologyTransmogrifierMsgWitness() {}
+
+type topologyTransmogrifierMsgTopologyObserved configuration.Topology
+
+func (ttmvc *topologyTransmogrifierMsgTopologyObserved) topologyTransmogrifierMsgWitness() {}
 
 func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
 	var f cc.CurCellConsumer
@@ -89,6 +102,7 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
+		clusterId:         clusterId,
 		hostRMIds:         make(map[string]*rmIdAndRootId),
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -122,7 +136,7 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 		v.AddWriteSubscriber(configuration.VersionOne,
 			func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
 				var rootVarPosPtr *msgs.VarIdPos
-				if refs.Len() == 1 {
+				if refs.Len() > 0 {
 					root := refs.At(0)
 					rootVarPosPtr = &root
 				}
@@ -130,52 +144,69 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 				if err != nil {
 					panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 				}
-				tt.enqueueQuery((*topologyTransmogrifierMsgVarChanged)(topology))
+				tt.enqueueQuery((*topologyTransmogrifierMsgTopologyObserved)(topology))
 			})
 		close(subscriberInstalled)
 	}, true, configuration.TopologyVarUUId)
-
 	<-subscriberInstalled
 
-	established := make(chan error)
-	tt.enqueueQuery(&ensureLocalTopology{
-		TopologyTransmogrifier: tt,
-		clusterId:              clusterId,
-		established:            established,
-	})
-
 	cm.AddSender(tt)
-	go tt.actorLoop(head)
+
+	established := make(chan error)
+	go tt.actorLoop(head, established)
 	return tt, func() error {
 		return <-established
 	}
 }
 
-func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
+func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+}
+
+func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+}
+
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+}
+
+func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, established chan error) {
 	var (
 		err       error
 		queryChan <-chan topologyTransmogrifierMsg
 		queryCell *cc.ChanCell
+		oldTask   topologyTask
 	)
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = tt.queryChan, cell }
 	head.WithCell(chanFun)
-	terminate := false
+
+	tt.task = &targetConfig{
+		TopologyTransmogrifier: tt,
+		topologyTransmogrifierMsgRequestConfigChange: &topologyTransmogrifierMsgRequestConfigChange{
+			errChan: established,
+			config:  configuration.BlankTopology(tt.clusterId).Configuration,
+		},
+	}
+
+	terminate := err != nil
 	for !terminate {
-		if msg, ok := <-queryChan; ok {
+		if oldTask != tt.task {
+			oldTask = tt.task
+			if oldTask != nil {
+				err = oldTask.start()
+				terminate = err != nil
+			}
+		} else if msg, ok := <-queryChan; ok {
 			switch msgT := msg.(type) {
 			case *topologyTransmogrifierMsgShutdown:
 				terminate = true
 			case topologyTransmogrifierMsgSetActiveConnections:
 				err = tt.activeConnectionsChange(msgT)
-			case *topologyTransmogrifierMsgVarChanged:
-				err = tt.topologyVarChanged((*configuration.Topology)(msgT))
+			case *topologyTransmogrifierMsgTopologyObserved:
+				err = tt.setActive((*configuration.Topology)(msgT))
 			case *topologyTransmogrifierMsgRequestConfigChange:
-				err = tt.initiateChange(msgT.config, msgT.errChan)
-			case topologyTask:
-				tt.tasks = append(tt.tasks, msgT)
-				if len(tt.tasks) == 1 {
-					err = tt.tasks[0].start()
-				}
+				tt.selectGoal(msgT)
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -205,77 +236,340 @@ func (tt *TopologyTransmogrifier) activeConnectionsChange(conns map[common.RMId]
 		}
 	}
 
-	if len(tt.tasks) == 0 {
-		return nil
-	} else {
-		return tt.tasks[0].activeConnectionsChange(conns)
-	}
-}
-
-// Observer from the db itself.
-func (tt *TopologyTransmogrifier) topologyVarChanged(topology *configuration.Topology) error {
-	if topology.Version > tt.activeTopology.Version {
-		if len(tt.tasks) == 0 {
-			log.Println("TODO: unhandled unexpected topology change")
-			return nil
-		} else {
-			return tt.tasks[0].topologyVarChanged(topology)
-		}
+	if tt.task != nil {
+		return tt.task.activeConnectionsChange()
 	}
 	return nil
 }
 
-// from local command line
-func (tt *TopologyTransmogrifier) initiateChange(config *configuration.Configuration, errChan chan error) error {
-	for _, task := range tt.tasks {
-		if accomodated, confErr, fatalErr := task.accomodateTarget(config, errChan); fatalErr != nil {
-			errChan <- confErr
-			close(errChan)
-			return fatalErr
-		} else if confErr != nil {
-			log.Printf("Ignoring requested changed due to problem with configuration: %v", confErr)
-			errChan <- confErr
-			close(errChan)
+func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) error {
+	if tt.active != nil {
+		if tt.active.ClusterId != topology.ClusterId {
+			log.Printf("Ignoring config with ClusterId change from '%s' to '%s'",
+				tt.active.ClusterId, topology.ClusterId)
 			return nil
-		} else if accomodated {
+		}
+		if tt.active.Version > topology.Version {
+			log.Printf("Ignoring config with version %v as newer version already active (%v)",
+				topology.Version, tt.active.Version)
+			return nil
+		}
+		if tt.active.Version == topology.Version {
+			// silently ignore it
 			return nil
 		}
 	}
-	tt.tasks = append(tt.tasks, &topologyChange{TopologyTransmogrifier: tt, config: config, errChan: errChan})
-	if len(tt.tasks) == 1 {
-		return tt.tasks[0].start()
-	}
-	return nil
-}
 
-func (tt *TopologyTransmogrifier) taskCompleted(topology *configuration.Topology, setServers bool) error {
-	if topology == nil {
-		return errors.New("Task completed with nil topology.")
-	}
-	if topology != tt.activeTopology {
-		if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
-			return errors.New("We have been removed from the topology. Shutting down.")
+	tt.active = topology
+	tt.connectionManager.SetTopology(topology)
+	if topology.Version > 0 {
+		localHost, _, err := topology.LocalRemoteHosts(tt.listenPort)
+		if err != nil {
+			return err
 		}
-		tt.activeTopology = topology
-		tt.connectionManager.SetTopology(topology)
-		if setServers {
-			localHost, remoteHosts, err := topology.LocalRemoteHosts(tt.listenPort)
+		log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
+	}
+	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
+		return errors.New("We have been removed from the cluster. Shutting down.")
+	}
+
+	if tt.task != nil {
+		existingGoal := tt.task.goal()
+		tt.task.abandon()
+		tt.task = nil
+		tt.selectGoal(existingGoal)
+	}
+
+	if next := topology.Next(); next != nil {
+		errChan := make(chan error, 1)
+		go func() {
+			err := <-errChan
 			if err != nil {
-				return err
+				log.Println(err)
 			}
-			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
-			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
+		}()
+		tt.selectGoal(&topologyTransmogrifierMsgRequestConfigChange{
+			config:  next,
+			errChan: errChan,
+		})
+	}
+	return nil
+}
+
+func (tt *TopologyTransmogrifier) selectGoal(goal *topologyTransmogrifierMsgRequestConfigChange) {
+	switch {
+	case tt.active != nil && tt.active.ClusterId != goal.config.ClusterId:
+		goal.finish(fmt.Errorf("Illegal config: ClusterId should be '%s' instead of '%s'",
+			tt.active.ClusterId, goal.config.ClusterId))
+		return
+
+	case tt.active != nil && tt.active.Version >= goal.config.Version:
+		goal.finish(fmt.Errorf("Ignoring config with version %v as newer version already active (%v)",
+			goal.config.Version, tt.active.Version))
+		return
+
+	case tt.task != nil:
+		existingGoal := tt.task.goal()
+		switch {
+		case existingGoal.config.ClusterId != goal.config.ClusterId:
+			goal.finish(fmt.Errorf("Illegal config: ClusterId should be '%s' instead of '%s'",
+				existingGoal.config.ClusterId, goal.config.ClusterId))
+			return
+
+		case existingGoal.config.Version >= goal.config.Version:
+			goal.finish(fmt.Errorf("Ignoring config with version %v as newer version already targetted (%v)",
+				goal.config.Version, existingGoal.config.Version))
+			return
+
+		default:
+			tt.task.abandon()
+			tt.task = nil
+		}
+	}
+	if tt.task == nil {
+		tt.task = &targetConfig{
+			TopologyTransmogrifier:                       tt,
+			topologyTransmogrifierMsgRequestConfigChange: goal,
+		}
+	}
+}
+
+// topologyTask
+
+type topologyTask interface {
+	start() error
+	abandon()
+	activeConnectionsChange() error
+	goal() *topologyTransmogrifierMsgRequestConfigChange
+}
+
+// targetConfig
+
+type targetConfig struct {
+	*TopologyTransmogrifier
+	*topologyTransmogrifierMsgRequestConfigChange
+}
+
+func (task *targetConfig) start() error {
+	switch {
+	case task.active == nil:
+		log.Println("Ensuring local topology.")
+		task.task = &ensureLocalTopology{task}
+		return task.task.start()
+	case task.active.Version == 0:
+		log.Printf("Attempting to join cluster with configuration: %v", task.config)
+		task.task = &joinCluster{targetConfig: task}
+		return task.task.start()
+	default:
+		log.Printf("Attempting to transition cluster to configuration: %v", task.config)
+	}
+	return nil
+}
+
+func (task *targetConfig) finished(active *configuration.Topology, configErr, fatalErr error) error {
+	task.task = nil
+	if task.errChan != nil {
+		if configErr != nil {
+			task.errChan <- configErr
+		} else if fatalErr != nil {
+			task.errChan <- fatalErr
+		}
+		close(task.errChan)
+		task.errChan = nil
+	}
+	if fatalErr != nil {
+		return fatalErr
+	}
+	if active != nil {
+		return task.setActive(active)
+	}
+	return nil
+}
+
+func (task *targetConfig) abandon() {
+}
+
+func (task *targetConfig) activeConnectionsChange() error {
+	return nil
+}
+
+func (task *targetConfig) goal() *topologyTransmogrifierMsgRequestConfigChange {
+	return task.topologyTransmogrifierMsgRequestConfigChange
+}
+
+// ensureLocalTopology
+
+type ensureLocalTopology struct {
+	*targetConfig
+}
+
+func (task *ensureLocalTopology) start() error {
+	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
+		return nil
+	}
+
+	topology, err := task.getTopologyFromLocalDatabase()
+	if err != nil {
+		return task.finished(nil, nil, err)
+	}
+
+	if (topology == nil || topology.Version == 0) && task.clusterId == "" {
+		return task.finished(nil, nil, errors.New("No configuration supplied and no configuration found in local store. Cannot continue"))
+
+	} else if topology == nil {
+		topology, err = task.createTopologyZero(task.clusterId)
+		return task.finished(topology, nil, err)
+
+	} else {
+		return task.finished(topology, nil, nil)
+	}
+}
+
+func (task *ensureLocalTopology) activeConnectionsChange() error {
+	return task.start()
+}
+
+// joinCluster
+
+type joinCluster struct {
+	*targetConfig
+	localHost                    string
+	maybeBeginOnConnectionChange bool
+	targetTopology               *configuration.Topology
+}
+
+func (task *joinCluster) start() error {
+	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
+	if err != nil {
+		return task.finished(nil, err, nil)
+	}
+	task.localHost = localHost
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+
+	return task.maybeBegin()
+}
+
+func (task *joinCluster) maybeBegin() error {
+	for _, host := range task.config.Hosts {
+		if host == task.localHost {
+			continue
+		}
+		if _, found := task.hostRMIds[host]; !found {
+			task.maybeBeginOnConnectionChange = true
+			return nil
 		}
 	}
 
-	if len(tt.tasks) == 1 {
-		tt.tasks = nil
-		return nil
+	// Ok, we know who everyone is. Are we connected to them though?
+	rmIds := make([]common.RMId, 0, len(task.config.Hosts))
+	var rootId *common.VarUUId
+	for _, host := range task.config.Hosts {
+		if host == task.localHost {
+			continue
+		}
+		rmIdRoot, _ := task.hostRMIds[host]
+		rmIds = append(rmIds, rmIdRoot.rmId)
+		switch remoteRootId := rmIdRoot.rootId; {
+		case remoteRootId == nil:
+			// they're joining too
+		case rootId == nil:
+			rootId = remoteRootId
+		case rootId.Equal(remoteRootId):
+			// all good
+		default:
+			err := errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting.")
+			return task.finished(nil, err, nil)
+		}
+	}
+
+	allJoining := rootId == nil
+
+	if allJoining {
+		task.allJoining(append(rmIds, task.connectionManager.RMId))
+
 	} else {
-		tt.tasks = tt.tasks[1:]
-		return tt.tasks[0].start()
+		// If we're not allJoining then we need the previous config
+		// because we need to make sure that everyone in the old config
+		// learns of the change. Consider nodes that are being removed
+		// in this new config. We have no idea who they are. If we
+		// attempted to do discovery and run a txn that reads the
+		// topology from the nodes in common between old and new, we run
+		// the risk that we are asking < F+1 nodes for their opinion on
+		// the old topology so we may get it wrong, and divergency could
+		// happen. Therefore the _only_ safe thing to do is to punt the
+		// topology change off to the nodes in common and allow them to
+		// drive the change. We must wait until we're connected to one
+		// of the oldies and then we ask them to do the config change
+		// for us.
+
+		seg := capn.NewBuffer(nil)
+		msg := msgs.NewRootMessage(seg)
+		msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
+		sender := paxos.NewRepeatingSender(server.SegToBytes(seg), rmIds...)
+		task.connectionManager.AddSender(sender)
+
+		log.Println("Requesting help from existing cluster members for topology change.")
+		return task.finished(nil, nil, nil)
+	}
+
+	return nil
+}
+
+func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
+	if task.targetTopology == nil {
+		targetTopology := configuration.NewTopology(task.active.DBVersion, nil, task.config)
+		targetTopology.SetRMs(allRMIds)
+	Outer:
+		for {
+			switch resubmit, err := task.attemptCreateRoot(targetTopology); {
+			case err != nil:
+				return task.finished(nil, nil, err)
+			case resubmit:
+				time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+				continue
+			case targetTopology.Root.VarUUId == nil:
+				// We failed; likely we need to wait for connections to change
+				task.maybeBeginOnConnectionChange = true
+				return nil
+			default:
+				task.targetTopology = targetTopology
+				break Outer
+			}
+		}
+	}
+
+	// Finally we need to rewrite the topology. For allJoining, we
+	// must use everyone as active. This is because we could have
+	// seen one of our peers when it had no RootId, but we've since
+	// lost that connection and in fact that peer has gone off and
+	// joined another cluster. So the only way to be instantaneously
+	// sure that all peers are empty and moving to the same topology
+	// is to have all peers as active.
+
+	for {
+		topology, resubmit, err := task.rewriteTopology(task.active, task.targetTopology, allRMIds, nil)
+		if err != nil {
+			return task.finished(nil, nil, err)
+		}
+		if resubmit {
+			if topology != nil {
+			}
+			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+			continue
+		}
+		return task.finished(topology, nil, nil)
 	}
 }
+
+func (task *joinCluster) activeConnectionsChange() error {
+	if task.maybeBeginOnConnectionChange {
+		task.maybeBeginOnConnectionChange = false
+		return task.maybeBegin()
+	}
+	return nil
+}
+
+// utils
 
 func (tt *TopologyTransmogrifier) createTopologyTransaction(read, write *configuration.Topology, active, passive common.RMIds) *msgs.Txn {
 	if write == nil && read != nil {
@@ -586,354 +880,3 @@ func (tt *TopologyTransmogrifier) attemptCreateRoot(topology *configuration.Topo
 	}
 	return false, fmt.Errorf("Internal error: creation of root gave rerun outcome")
 }
-
-func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
-}
-
-func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
-}
-
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
-}
-
-// topologyTask
-
-type topologyTask interface {
-	start() error
-	topologyVarChanged(topology *configuration.Topology) error
-	activeConnectionsChange(conns map[common.RMId]paxos.Connection) error
-	accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error)
-	topologyTransmogrifierMsg
-}
-
-// ensureLocalTopology
-
-type ensureLocalTopology struct {
-	*TopologyTransmogrifier
-	clusterId              string
-	startOnLocalConnection bool
-	established            chan error
-}
-
-func (task *ensureLocalTopology) start() error {
-	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
-		task.startOnLocalConnection = true
-		return nil
-	}
-
-	topology, err := task.getTopologyFromLocalDatabase()
-	if err != nil {
-		task.established <- err
-		return err
-	}
-
-	if (topology == nil || topology.Version == 0) && task.clusterId == "" {
-		err := errors.New("No configuration supplied and no configuration found in local store. Cannot continue")
-		task.established <- err
-		return err
-
-	} else if topology == nil {
-		topology, err = task.createTopologyZero(task.clusterId)
-		if err != nil {
-			task.established <- err
-			return err
-		}
-		close(task.established)
-		return task.taskCompleted(topology, false)
-
-	} else {
-		close(task.established)
-		return task.taskCompleted(topology, topology.Version > 0)
-	}
-}
-
-func (task *ensureLocalTopology) topologyVarChanged(topology *configuration.Topology) error {
-	// This should be impossible: we don't have any desired connections
-	// and the listener shouldn't be active yet.
-	return nil
-}
-
-func (task *ensureLocalTopology) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
-	if task.startOnLocalConnection {
-		task.startOnLocalConnection = false
-		return task.start()
-	}
-	return nil
-}
-
-func (task *ensureLocalTopology) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
-	return false, nil, nil
-}
-
-func (task *ensureLocalTopology) topologyTransmogrifierMsgWitness() {}
-
-// topologyChange
-
-type topologyChange struct {
-	*TopologyTransmogrifier
-	config  *configuration.Configuration
-	errChan chan error
-}
-
-func (task *topologyChange) error(err error) error {
-	if task.errChan != nil {
-		if err != nil {
-			task.errChan <- err
-		}
-		close(task.errChan)
-		task.errChan = nil
-	}
-	return err
-}
-
-func (task *topologyChange) start() error {
-	if task.activeTopology == nil {
-		return task.error(errors.New("Internal logic failure: config change started with nil activeTopology"))
-	}
-	if task.activeTopology.ClusterId != task.config.ClusterId {
-		err := fmt.Errorf("Ignoring supplied config due to incorrect ClusterId: should be '%v'; is '%v'",
-			task.activeTopology.ClusterId, task.config.ClusterId)
-		task.error(err)
-		return task.taskCompleted(task.activeTopology, true)
-	}
-	if task.activeTopology.Version >= task.config.Version {
-		err := fmt.Errorf("Ignoring supplied config as version is not greater than current active version (%v)",
-			task.activeTopology.Version)
-		task.error(err)
-		return task.taskCompleted(task.activeTopology, true)
-	}
-	log.Printf("Attempting to transition to %v", task.config)
-	if task.activeTopology.Version == 0 {
-		task.tasks[0] = &joinCluster{topologyChange: task}
-	} else {
-		task.tasks[0] = &modifyCluster{task}
-	}
-	return task.tasks[0].start()
-}
-
-func (task *topologyChange) topologyVarChanged(topology *configuration.Topology) error {
-	// cannot be here because as soon as task starts, it will change to something else
-	return nil
-}
-
-func (task *topologyChange) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
-	// cannot be here because as soon as task starts, it will change to something else
-	return nil
-}
-
-func (task *topologyChange) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
-	// The only way we're here is if we're queued up waiting to start.
-	if task.activeTopology != nil {
-		if task.activeTopology.ClusterId != config.ClusterId {
-			return false, fmt.Errorf("Incorrect ClusterId: should be '%v'; is '%v'",
-				task.activeTopology.ClusterId, config.ClusterId), nil
-		}
-		if task.activeTopology.Version >= config.Version {
-			return false, fmt.Errorf("Version (%v) is not greater than current active version (%v)",
-				config.Version, task.activeTopology.Version), nil
-		}
-	}
-	if task.config.ClusterId != config.ClusterId {
-		return false, fmt.Errorf("Incorrect ClusterId: should be '%v'; is '%v'",
-			task.activeTopology.ClusterId, config.ClusterId), nil
-	}
-	if task.config.Version >= config.Version {
-		return false, fmt.Errorf("Version (%v) is not greater than current scheduled version (%v)",
-			config.Version, task.config.Version), nil
-	}
-	task.error(nil)
-	task.config = config
-	task.errChan = errChan
-	return true, nil, nil
-}
-
-func (task *topologyChange) topologyTransmogrifierMsgWitness() {}
-
-// joinCluster
-
-type joinCluster struct {
-	*topologyChange
-	targetTopology               *configuration.Topology
-	localHost                    string
-	maybeBeginOnConnectionChange bool
-}
-
-func (task *joinCluster) start() error {
-	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
-	if err != nil {
-		return task.error(err)
-	}
-	task.localHost = localHost
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-
-	return task.maybeBegin()
-}
-
-func (task *joinCluster) maybeBegin() error {
-	for _, host := range task.config.Hosts {
-		if host == task.localHost {
-			continue
-		}
-		if _, found := task.hostRMIds[host]; !found {
-			task.maybeBeginOnConnectionChange = true
-			return nil
-		}
-	}
-
-	// Ok, we know who everyone is. Are we connected to them though?
-	rmIds := make([]common.RMId, 0, len(task.config.Hosts))
-	var rootId *common.VarUUId
-	for _, host := range task.config.Hosts {
-		if host == task.localHost {
-			continue
-		}
-		rmIdRoot, _ := task.hostRMIds[host]
-		rmIds = append(rmIds, rmIdRoot.rmId)
-		switch remoteRootId := rmIdRoot.rootId; {
-		case remoteRootId == nil:
-			// they're joining too
-		case rootId == nil:
-			rootId = remoteRootId
-		case rootId.Equal(remoteRootId):
-			// all good
-		default:
-			err := errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting.")
-			return task.error(err)
-		}
-	}
-
-	allJoining := rootId == nil
-
-	if allJoining {
-		task.allJoining(append(rmIds, task.connectionManager.RMId))
-
-	} else {
-		// If we're not allJoining then we need the previous config
-		// because we need to make sure that everyone in the old config
-		// learns of the change. Consider nodes that are being removed
-		// in this new config. We have no idea who they are. If we
-		// attempted to do discovery and run a txn that reads the
-		// topology from the nodes in common between old and new, we run
-		// the risk that we are asking < F+1 nodes for their opinion on
-		// the old topology so we may get it wrong, and divergency could
-		// happen. Therefore the _only_ safe thing to do is to punt the
-		// topology change off to the nodes in common and allow them to
-		// drive the change. We must wait until we're connected to one
-		// of the oldies and then we ask them to do the config change
-		// for us.
-
-		seg := capn.NewBuffer(nil)
-		msg := msgs.NewRootMessage(seg)
-		msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
-		sender := paxos.NewRepeatingSender(server.SegToBytes(seg), rmIds...)
-		task.connectionManager.AddSender(sender)
-
-		fmt.Println("Hello 1")
-	}
-
-	return nil
-}
-
-func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
-	if task.targetTopology == nil {
-		targetTopology := configuration.NewTopology(task.activeTopology.DBVersion, nil, task.config)
-		targetTopology.SetRMs(allRMIds)
-	Outer:
-		for {
-			switch resubmit, err := task.attemptCreateRoot(targetTopology); {
-			case err != nil:
-				return task.error(err)
-			case resubmit:
-				time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-				continue
-			case targetTopology.Root.VarUUId == nil:
-				// We failed; likely we need to wait for connections to change
-				task.maybeBeginOnConnectionChange = true
-				return nil
-			default:
-				task.targetTopology = targetTopology
-				break Outer
-			}
-		}
-	}
-
-	// Finally we need to rewrite the topology. For allJoining, we
-	// must use everyone as active. This is because we could have
-	// seen one of our peers when it had no RootId, but we've since
-	// lost that connection and in fact that peer has gone off and
-	// joined another cluster. So the only way to be instantaneously
-	// sure that all peers are empty and moving to the same topology
-	// is to have all peers as active.
-
-	activeTopology := task.activeTopology
-	for {
-		topology, resubmit, err := task.rewriteTopology(activeTopology, task.targetTopology, allRMIds, nil)
-		if err != nil {
-			return task.error(err)
-		}
-		if resubmit {
-			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-			continue
-		}
-		// It would be possible for all to be starting from empty,
-		// but some to be being fed a bigger config than
-		// others. Bizzare, but it is possible.
-		if topology.Version < task.targetTopology.Version &&
-			(topology.Next() == nil || topology.Next().Version < task.targetTopology.Version) {
-			task.tasks = append(task.tasks, task.topologyChange)
-		}
-		task.error(nil)
-		return task.taskCompleted(topology, true)
-	}
-}
-
-func (task *joinCluster) topologyVarChanged(topology *configuration.Topology) error {
-	// Ignore this because if we're joining then we'll discover directly this change.
-	return nil
-}
-
-func (task *joinCluster) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
-	if task.maybeBeginOnConnectionChange {
-		task.maybeBeginOnConnectionChange = false
-		return task.maybeBegin()
-	}
-	return nil
-}
-
-func (task *joinCluster) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
-	// If we're here then we must be waiting to start or
-	// restart. Perfectly safe then to revert back to the
-	// topologyChange and get that to make the decision. The fact that
-	// we are a joinCluster means our parent topologyChange must have
-	// been started, so we must be at task.tasks[0].
-	accomodated, confErr, fatalErr := task.topologyChange.accomodateTarget(config, errChan)
-	if !accomodated || confErr != nil || fatalErr != nil {
-		return accomodated, confErr, fatalErr
-	}
-	task.tasks[0] = task.topologyChange
-	return true, nil, task.tasks[0].start()
-}
-
-func (task *joinCluster) topologyTransmogrifierMsgWitness() {}
-
-// modifyCluster
-
-type modifyCluster struct{ *topologyChange }
-
-func (task *modifyCluster) start() error {
-	fmt.Println("Hello 2")
-	return nil
-}
-func (task *modifyCluster) topologyVarChanged(topology *configuration.Topology) error {
-	return nil
-}
-func (task *modifyCluster) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
-	return nil
-}
-func (task *modifyCluster) accomodateTarget(config *configuration.Configuration, errChan chan error) (bool, error, error) {
-	return false, nil, nil
-}
-func (task *modifyCluster) topologyTransmogrifierMsgWitness() {}

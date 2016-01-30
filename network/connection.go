@@ -202,26 +202,22 @@ func (conn *Connection) start() {
 
 func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	var (
-		err          error
-		stateChanged bool
-		oldState     connectionStateMachineComponent
-		queryChan    <-chan connectionMsg
-		queryCell    *cc.ChanCell
+		err       error
+		oldState  connectionStateMachineComponent
+		queryChan <-chan connectionMsg
+		queryCell *cc.ChanCell
 	)
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = conn.queryChan, cell }
 	head.WithCell(chanFun)
 	terminate := false
 	for !terminate {
-		stateChanged = oldState != conn.currentState
-		if stateChanged {
+		if oldState != conn.currentState {
 			oldState = conn.currentState
 			terminate, err = conn.currentState.start()
+		} else if msg, ok := <-queryChan; ok {
+			terminate, err = conn.handleMsg(msg)
 		} else {
-			if msg, ok := <-queryChan; ok {
-				terminate, err = conn.handleMsg(msg)
-			} else {
-				head.Next(queryCell, chanFun)
-			}
+			head.Next(queryCell, chanFun)
 		}
 		terminate = terminate || err != nil
 	}
@@ -808,9 +804,9 @@ func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
 		configCap := msg.TopologyChangeRequest()
 		config := configuration.ConfigurationFromCap(&configCap)
-		errChan := cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
+		resultPromise := cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
 		go func() {
-			err := <-errChan
+			err := resultPromise()
 			if err != nil {
 				seg := capn.NewBuffer(nil)
 				msg := msgs.NewRootMessage(seg)

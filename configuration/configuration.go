@@ -146,6 +146,9 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
 	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.AsyncFlush == b.AsyncFlush && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
 		return false
 	}

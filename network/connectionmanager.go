@@ -234,11 +234,11 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 	cm.rmToServer[rmId] = &connectionDetails{connectionSend: cm, bootCount: bootCount}
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(cm, lc, clusterId, port)
+	transmogrifier, localEstablishedPromise := NewTopologyTransmogrifier(cm, lc, clusterId, port)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	cm.ClientEstablished(0, lc)
-	return cm, transmogrifier, localEstablished()
+	return cm, transmogrifier, localEstablishedPromise()
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {

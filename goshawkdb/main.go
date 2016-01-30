@@ -174,9 +174,9 @@ func (s *server) start() {
 	go s.signalHandler()
 
 	if commandLineConfig != nil {
-		errChan := transmogrifier.RequestConfigurationChange(commandLineConfig)
+		resultPromise := transmogrifier.RequestConfigurationChange(commandLineConfig)
 		go func() {
-			err := <-errChan
+			err := resultPromise()
 			if err != nil {
 				log.Println(err)
 			}
