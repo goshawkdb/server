@@ -181,13 +181,10 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, established c
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = tt.queryChan, cell }
 	head.WithCell(chanFun)
 
-	tt.task = &targetConfig{
-		TopologyTransmogrifier: tt,
-		topologyTransmogrifierMsgRequestConfigChange: &topologyTransmogrifierMsgRequestConfigChange{
-			errChan: established,
-			config:  configuration.BlankTopology(tt.clusterId).Configuration,
-		},
-	}
+	tt.selectGoal(&topologyTransmogrifierMsgRequestConfigChange{
+		errChan: established,
+		config:  configuration.BlankTopology(tt.clusterId).Configuration,
+	})
 
 	terminate := err != nil
 	for !terminate {
@@ -263,11 +260,12 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	tt.active = topology
 	tt.connectionManager.SetTopology(topology)
 	if topology.Version > 0 {
-		localHost, _, err := topology.LocalRemoteHosts(tt.listenPort)
+		localHost, remoteHosts, err := topology.LocalRemoteHosts(tt.listenPort)
 		if err != nil {
 			return err
 		}
 		log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
+		tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
 		return errors.New("We have been removed from the cluster. Shutting down.")
@@ -298,14 +296,23 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *topologyTransmogrifierMsgRequestConfigChange) {
 	switch {
-	case tt.active != nil && tt.active.ClusterId != goal.config.ClusterId:
+	case tt.active != nil && tt.active.ClusterId != goal.config.ClusterId && goal.config.Version > 0:
 		goal.finish(fmt.Errorf("Illegal config: ClusterId should be '%s' instead of '%s'",
 			tt.active.ClusterId, goal.config.ClusterId))
 		return
 
-	case tt.active != nil && tt.active.Version >= goal.config.Version:
+	case tt.active != nil && tt.active.Version > goal.config.Version && goal.config.Version > 0:
 		goal.finish(fmt.Errorf("Ignoring config with version %v as newer version already active (%v)",
 			goal.config.Version, tt.active.Version))
+		return
+
+	case tt.active != nil && tt.active.Version > goal.config.Version:
+		// special case for goal.config.Version == 0 - not an error
+		goal.finish(nil)
+		return
+
+	case tt.active != nil && tt.active.Version == goal.config.Version:
+		goal.finish(nil) // goal achieved
 		return
 
 	case tt.task != nil:
@@ -316,9 +323,13 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *topologyTransmogrifierMsgRequ
 				existingGoal.config.ClusterId, goal.config.ClusterId))
 			return
 
-		case existingGoal.config.Version >= goal.config.Version:
+		case existingGoal.config.Version > goal.config.Version:
 			goal.finish(fmt.Errorf("Ignoring config with version %v as newer version already targetted (%v)",
 				goal.config.Version, existingGoal.config.Version))
+			return
+
+		case existingGoal.config.Version == goal.config.Version:
+			goal.finish(nil) // goal achieved
 			return
 
 		default:
@@ -367,15 +378,10 @@ func (task *targetConfig) start() error {
 }
 
 func (task *targetConfig) finished(active *configuration.Topology, configErr, fatalErr error) error {
-	task.task = nil
-	if task.errChan != nil {
-		if configErr != nil {
-			task.errChan <- configErr
-		} else if fatalErr != nil {
-			task.errChan <- fatalErr
-		}
-		close(task.errChan)
-		task.errChan = nil
+	if configErr != nil {
+		task.finish(configErr)
+	} else if fatalErr != nil {
+		task.finish(fatalErr)
 	}
 	if fatalErr != nil {
 		return fatalErr
@@ -552,8 +558,6 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 			return task.finished(nil, nil, err)
 		}
 		if resubmit {
-			if topology != nil {
-			}
 			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
 			continue
 		}
