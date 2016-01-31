@@ -38,6 +38,10 @@ type rmIdAndRootId struct {
 	rootId *common.VarUUId
 }
 
+func (rr *rmIdAndRootId) String() string {
+	return fmt.Sprintf("%v(%v)", rr.rmId, rr.rootId)
+}
+
 type topologyTransmogrifierMsg interface {
 	topologyTransmogrifierMsgWitness()
 }
@@ -371,10 +375,17 @@ func (task *targetConfig) start() error {
 		log.Printf("Attempting to join cluster with configuration: %v", task.config)
 		task.task = &joinCluster{targetConfig: task}
 		return task.task.start()
+	case task.active.Next() == nil || task.active.Next().Version < task.config.Version:
+		log.Printf("Attempting to install topology change target: %v", task.config)
+		task.task = &installTarget{targetConfig: task}
+		return task.task.start()
+	case task.active.Next() != nil && task.active.Next().Version == task.config.Version:
+		log.Printf("Attempting to perform object migration for topology target: %v", task.config)
+		return nil
 	default:
-		log.Printf("Attempting to transition cluster to configuration: %v", task.config)
+		return fmt.Errorf("Confused about what to do. Active topology is: %v; goal is %v",
+			task.active, task.config)
 	}
-	return nil
 }
 
 func (task *targetConfig) finished(active *configuration.Topology, configErr, fatalErr error) error {
@@ -571,6 +582,152 @@ func (task *joinCluster) activeConnectionsChange() error {
 		return task.maybeBegin()
 	}
 	return nil
+}
+
+// installTarget
+
+type installTarget struct {
+	*targetConfig
+	startOnConnectionChange bool
+	localHost               string
+	targetTopology          *configuration.Topology
+}
+
+func (task *installTarget) start() error {
+	if err := task.calculateTargetTopology(); err != nil {
+		return err
+	}
+	log.Println("Calculated target topology:", task.targetTopology.Next())
+	return nil
+}
+
+func (task *installTarget) calculateTargetTopology() error {
+	localHost, _, err := task.active.LocalRemoteHosts(task.listenPort)
+	if err != nil {
+		return task.finished(nil, nil, err)
+	}
+	task.localHost = localHost
+
+	hostsSurvived, hostsRemoved, hostsAdded :=
+		make(map[string]server.EmptyStruct),
+		make(map[string]server.EmptyStruct),
+		make(map[string]server.EmptyStruct)
+
+	allRemoteHosts := make([]string, 0, len(task.active.Hosts)+len(task.config.Hosts))
+
+	for _, host := range task.active.Hosts {
+		hostsRemoved[host] = server.EmptyStructVal
+		if host != localHost {
+			allRemoteHosts = append(allRemoteHosts, host)
+		}
+	}
+
+	for _, host := range task.config.Hosts {
+		if _, found := hostsRemoved[host]; found {
+			hostsSurvived[host] = server.EmptyStructVal
+			delete(hostsRemoved, host)
+		} else {
+			hostsAdded[host] = server.EmptyStructVal
+			if host != localHost {
+				allRemoteHosts = append(allRemoteHosts, host)
+			}
+		}
+	}
+	task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
+	for _, host := range allRemoteHosts {
+		if _, found := task.hostRMIds[host]; !found {
+			task.startOnConnectionChange = true
+			return nil
+		}
+	}
+
+	log.Printf("allRemoteHosts: %v\nhostsRemoved: %v\nhostsSurvived: %v\nhostsAdded: %v\n%v",
+		allRemoteHosts, hostsRemoved, hostsSurvived, hostsAdded, task.hostRMIds)
+
+	rmIdsSurvived, rmIdsAdded, rmIdsRemoved :=
+		make(map[common.RMId]server.EmptyStruct),
+		make(map[common.RMId]server.EmptyStruct),
+		make(map[common.RMId]server.EmptyStruct)
+
+	// ok, we've figured out changes to hosts, but we also need to xref
+	// with RMIds because we could have a host that has changed RMId
+	// (i.e. it's been wiped and re-added).
+	for _, rmId := range task.active.RMs() {
+		rmIdsRemoved[rmId] = server.EmptyStructVal
+	}
+	var rmId common.RMId
+	for host := range hostsSurvived {
+		if host == task.localHost {
+			rmId = task.connectionManager.RMId
+		} else {
+			rmId = task.hostRMIds[host].rmId
+		}
+		if _, found := rmIdsRemoved[rmId]; found {
+			// the rmId of host hasn't changed
+			rmIdsSurvived[rmId] = server.EmptyStructVal
+			delete(rmIdsRemoved, rmId)
+		} else {
+			// the rmId of host must have changed
+			delete(hostsSurvived, host)
+			hostsAdded[host] = server.EmptyStructVal
+			hostsRemoved[host] = server.EmptyStructVal
+			rmIdsAdded[rmId] = server.EmptyStructVal
+		}
+	}
+	// removed and added are much simpler
+	for host := range hostsRemoved {
+		if host == task.localHost {
+			rmId = task.connectionManager.RMId
+		} else {
+			rmId = task.hostRMIds[host].rmId
+		}
+		rmIdsRemoved[rmId] = server.EmptyStructVal
+	}
+	for host := range hostsAdded {
+		if host == task.localHost {
+			rmId = task.connectionManager.RMId
+		} else {
+			rmId = task.hostRMIds[host].rmId
+		}
+		rmIdsAdded[rmId] = server.EmptyStructVal
+	}
+
+	rmIdsNew := make([]common.RMId, 0, len(allRemoteHosts)+1)
+	for _, rmId := range task.active.RMs() {
+		if _, found := rmIdsSurvived[rmId]; found {
+			rmIdsNew = append(rmIdsNew, rmId)
+		} else {
+			rmIdsNew = append(rmIdsNew, common.RMIdEmpty)
+		}
+	}
+	idx := 0
+	for rmIdAdded := range rmIdsAdded {
+		for ; idx < len(rmIdsNew) && rmIdsNew[idx] != common.RMIdEmpty; idx++ {
+		}
+		if idx == len(rmIdsNew) {
+			rmIdsNew = append(rmIdsNew, rmIdAdded)
+		} else {
+			rmIdsNew[idx] = rmIdAdded
+		}
+	}
+	task.targetTopology = task.active.Clone()
+	next := task.config.Clone()
+	next.SetRMs(rmIdsNew)
+	// pointer semantics, so we need to copy into our new set
+	alreadyRemoved := task.targetTopology.RMsRemoved()
+	for rmId := range alreadyRemoved {
+		rmIdsRemoved[rmId] = server.EmptyStructVal
+	}
+	next.SetRMsRemoved(rmIdsRemoved)
+	task.targetTopology.SetNext(next)
+	return nil
+}
+
+func (task *installTarget) activeConnectionsChange() error {
+	if task.startOnConnectionChange {
+		task.startOnConnectionChange = false
+	}
+	return task.start()
 }
 
 // utils

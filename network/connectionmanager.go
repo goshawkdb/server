@@ -326,15 +326,18 @@ func (cm *ConnectionManager) serverEstablished(conn *Connection) {
 	if !established {
 		return
 	}
+	// argh this needs reworking due to the fact rmid can change!
 	if c, found := cm.servers[host]; found && c == conn {
 		cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host, rootId: rootId}
 		cm.rmToServer[rmId] = cwbc
 		cm.sendersConnectionEstablished(rmId, cwbc)
 		return
 	} else if found {
-		establishedC, _, _, _, bootCountC, tiebreakC := c.RemoteDetails()
+		establishedC, _, rmIdC, _, bootCountC, tiebreakC := c.RemoteDetails()
 		killOld, killNew := false, false
 		switch {
+		case rmId != rmIdC:
+			killOld, killNew = true, true
 		case !establishedC || bootCountC < bootCount:
 			killOld = true
 		case bootCountC > bootCount:
@@ -350,15 +353,15 @@ func (cm *ConnectionManager) serverEstablished(conn *Connection) {
 			conn.Shutdown(false)
 			c.Shutdown(false)
 			cm.servers[host] = NewConnectionToDial(host, cm)
-			if c2, found := cm.rmToServer[rmId]; found && c2.connectionSend == c {
-				delete(cm.rmToServer, rmId)
-				cm.sendersConnectionLost(rmId)
+			if c2, found := cm.rmToServer[rmIdC]; found && c2.connectionSend == c {
+				delete(cm.rmToServer, rmIdC)
+				cm.sendersConnectionLost(rmIdC)
 			}
 		case killOld:
 			c.Shutdown(false)
 			cm.servers[host] = conn
 			cwbc := &connectionDetails{connectionSend: conn, bootCount: bootCount, host: host, rootId: rootId}
-			cm.rmToServer[rmId] = cwbc
+			cm.rmToServer[rmIdC] = cwbc
 			cm.sendersConnectionEstablished(rmId, cwbc)
 		case killNew:
 			conn.Shutdown(false)

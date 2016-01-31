@@ -207,6 +207,10 @@ func (config *Configuration) RMsRemoved() map[common.RMId]server.EmptyStruct {
 	return config.rmsRemoved
 }
 
+func (config *Configuration) SetRMsRemoved(removed map[common.RMId]server.EmptyStruct) {
+	config.rmsRemoved = removed
+}
+
 func (config *Configuration) Clone() *Configuration {
 	clone := &Configuration{
 		ClusterId:                     config.ClusterId,
