@@ -25,8 +25,6 @@ import (
 )
 
 type Connection struct {
-	sync.RWMutex
-	established       bool
 	remoteHost        string
 	remoteRMId        common.RMId
 	remoteBootCount   uint32
@@ -109,18 +107,6 @@ func (conn *Connection) Status(sc *server.StatusConsumer) {
 	conn.enqueueQuery((*connectionMsgStatus)(sc))
 }
 
-func (conn *Connection) RemoteDetails() (bool, string, common.RMId, *common.VarUUId, uint32, uint32) {
-	conn.RLock()
-	defer conn.RUnlock()
-	return conn.established, conn.remoteHost, conn.remoteRMId, conn.remoteRootId, conn.remoteBootCount, conn.combinedTieBreak
-}
-
-func (conn *Connection) IsServer() bool {
-	conn.RLock()
-	defer conn.RUnlock()
-	return conn.isServer
-}
-
 func (conn *Connection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
 	conn.enqueueQuery(connectionMsgDisableHashCodes(servers))
 }
@@ -140,6 +126,9 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 }
 
 func NewConnectionToDial(host string, cm *ConnectionManager) *Connection {
+	if host == "" {
+		panic("empty host")
+	}
 	conn := &Connection{
 		remoteHost:        host,
 		connectionManager: cm,
@@ -182,7 +171,6 @@ func (conn *Connection) start() {
 		})
 
 	conn.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	conn.established = false
 
 	conn.connectionDelay.init(conn)
 	conn.connectionDial.init(conn)
@@ -259,9 +247,6 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 }
 
 func (conn *Connection) handleShutdown(err error) {
-	conn.Lock()
-	conn.established = false
-	conn.Unlock()
 	if err != nil {
 		log.Println(err)
 	}
@@ -275,7 +260,7 @@ func (conn *Connection) handleShutdown(err error) {
 		}
 	}
 	if conn.isServer {
-		conn.connectionManager.ServerLost(conn)
+		conn.connectionManager.ServerLost(conn, conn.remoteRMId)
 	}
 }
 
@@ -309,7 +294,6 @@ func (conn *Connection) nextState(requestedState connectionStateMachineComponent
 func (conn *Connection) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Connection to %v (%v, %v)", conn.remoteHost, conn.remoteRMId, conn.remoteBootCount))
 	sc.Emit(fmt.Sprintf("- Current State: %v", conn.currentState))
-	sc.Emit(fmt.Sprintf("- Established? %v", conn.established))
 	sc.Emit(fmt.Sprintf("- IsServer? %v", conn.isServer))
 	sc.Emit(fmt.Sprintf("- IsClient? %v", conn.isClient))
 	if conn.submitter != nil {
@@ -335,11 +319,8 @@ func (cd *connectionDelay) init(conn *Connection) {
 func (cd *connectionDelay) start() (bool, error) {
 	cd.maybeStopReaderAndCloseSocket()
 	cd.maybeStopBeater()
-	cd.Lock()
-	cd.established = false
 	cd.isServer = false
 	cd.isClient = false
-	cd.Unlock()
 	if cd.delay == nil {
 		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
 		cd.delay = time.AfterFunc(delay, func() {
@@ -417,15 +398,11 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 		hello := cmsgs.ReadRootHello(seg)
 		if cah.verifyHello(&hello) {
 			if hello.IsClient() {
-				cah.Lock()
 				cah.isClient = true
-				cah.Unlock()
 				cah.nextState(&cah.connectionAwaitClientHandshake)
 
 			} else {
-				cah.Lock()
 				cah.isServer = true
-				cah.Unlock()
 				cah.nextState(&cah.connectionAwaitServerHandshake)
 			}
 			return false, nil
@@ -555,8 +532,6 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	if seg, err := cash.readOne(); err == nil {
 		hello := msgs.ReadRootHelloServerFromServer(seg)
 		if cash.verifyTopology(topology, &hello) {
-			cash.Lock()
-			cash.established = true
 			cash.remoteHost = hello.LocalHost()
 			cash.remoteRMId = common.RMId(hello.RmId())
 			rootId := hello.RootId()
@@ -565,7 +540,6 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 			}
 			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
-			cash.Unlock()
 			if _, found := topology.RMsRemoved()[cash.remoteRMId]; found {
 				return false, cash.serverError(
 					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
@@ -592,9 +566,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 	hello.SetRmId(uint32(cash.connectionManager.RMId))
 	hello.SetBootCount(cash.connectionManager.BootCount)
 	tieBreak := cash.rng.Uint32()
-	cash.Lock()
 	cash.combinedTieBreak = tieBreak
-	cash.Unlock()
 	hello.SetTieBreak(tieBreak)
 	hello.SetClusterId(topology.ClusterId)
 	if topology.Root.VarUUId == nil {
@@ -651,10 +623,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
 		return false, err
 	}
-	cach.Lock()
-	cach.established = true
 	cach.remoteHost = cach.socket.RemoteAddr().String()
-	cach.Unlock()
 	cach.nextState(nil)
 	return false, nil
 }
@@ -712,7 +681,7 @@ func (cr *connectionRun) start() (bool, error) {
 	cr.beatBytes = server.SegToBytes(seg)
 
 	if cr.isServer {
-		cr.connectionManager.ServerEstablished(cr.Connection)
+		cr.connectionManager.ServerEstablished(cr.Connection, cr.remoteHost, cr.remoteRMId, cr.remoteBootCount, cr.combinedTieBreak, cr.remoteRootId)
 	}
 	if cr.isClient {
 		topology, servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
@@ -851,7 +820,7 @@ func (cr *connectionRun) maybeRestartConnection(err error) error {
 	case cr.isServer:
 		log.Printf("Error on server connection to %v: %v", cr.remoteRMId, err)
 		cr.nextState(&cr.connectionDelay)
-		cr.connectionManager.ServerLost(cr.Connection)
+		cr.connectionManager.ServerLost(cr.Connection, cr.remoteRMId)
 		return nil
 
 	case cr.isClient:

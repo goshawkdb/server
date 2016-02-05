@@ -21,10 +21,12 @@ type Sender interface {
 }
 
 type Connection interface {
-	BootCount() uint32
 	Host() string
-	Send(msg []byte)
+	RMId() common.RMId
+	BootCount() uint32
+	TieBreak() uint32
 	RootId() *common.VarUUId
+	Send(msg []byte)
 }
 
 type ClientConnection interface {
