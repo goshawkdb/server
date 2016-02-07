@@ -16,7 +16,10 @@ struct Configuration {
   rmsRemoved         @7: List(UInt32);
   fingerprints       @8: List(Data);
   union {
-    transitioningTo  @9: Configuration;
-    stable          @10: Void;
+    transitioningTo :group {
+      configuration  @9: Configuration;
+      installedOnAll @10: Bool;
+    }
+    stable           @11: Void;
   }
 }

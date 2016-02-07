@@ -11,6 +11,7 @@ import (
 )
 
 type Configuration C.Struct
+type ConfigurationTransitioningTo Configuration
 type Configuration_Which uint16
 
 const (
@@ -42,14 +43,19 @@ func (s Configuration) RmsRemoved() C.UInt32List       { return C.UInt32List(C.S
 func (s Configuration) SetRmsRemoved(v C.UInt32List)   { C.Struct(s).SetObject(3, C.Object(v)) }
 func (s Configuration) Fingerprints() C.DataList       { return C.DataList(C.Struct(s).GetObject(4)) }
 func (s Configuration) SetFingerprints(v C.DataList)   { C.Struct(s).SetObject(4, C.Object(v)) }
-func (s Configuration) TransitioningTo() Configuration {
+func (s Configuration) TransitioningTo() ConfigurationTransitioningTo {
+	return ConfigurationTransitioningTo(s)
+}
+func (s Configuration) SetTransitioningTo() { C.Struct(s).Set16(8, 0) }
+func (s ConfigurationTransitioningTo) Configuration() Configuration {
 	return Configuration(C.Struct(s).GetObject(5).ToStruct())
 }
-func (s Configuration) SetTransitioningTo(v Configuration) {
-	C.Struct(s).Set16(8, 0)
+func (s ConfigurationTransitioningTo) SetConfiguration(v Configuration) {
 	C.Struct(s).SetObject(5, C.Object(v))
 }
-func (s Configuration) SetStable() { C.Struct(s).Set16(8, 1) }
+func (s ConfigurationTransitioningTo) InstalledOnAll() bool     { return C.Struct(s).Get1(49) }
+func (s ConfigurationTransitioningTo) SetInstalledOnAll(v bool) { C.Struct(s).Set1(49, v) }
+func (s Configuration) SetStable()                              { C.Struct(s).Set16(8, 1) }
 func (s Configuration) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -305,7 +311,41 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 		}
 		{
 			s := s.TransitioningTo()
-			err = s.WriteJSON(b)
+			err = b.WriteByte('{')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("\"configuration\":")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.Configuration()
+				err = s.WriteJSON(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(',')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("\"installedOnAll\":")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.InstalledOnAll()
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte('}')
 			if err != nil {
 				return err
 			}
@@ -589,7 +629,41 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 		}
 		{
 			s := s.TransitioningTo()
-			err = s.WriteCapLit(b)
+			err = b.WriteByte('(')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("configuration = ")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.Configuration()
+				err = s.WriteCapLit(b)
+				if err != nil {
+					return err
+				}
+			}
+			_, err = b.WriteString(", ")
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("installedOnAll = ")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.InstalledOnAll()
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(')')
 			if err != nil {
 				return err
 			}

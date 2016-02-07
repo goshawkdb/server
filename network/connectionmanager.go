@@ -540,7 +540,9 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Active Server Connections: %v", serverConnections))
 	sc.Emit(fmt.Sprintf("Desired Server Connections: %v", cm.desired))
 	for _, conn := range cm.servers {
-		conn.Status(sc.Fork())
+		if conn.Connection != nil {
+			conn.Connection.Status(sc.Fork())
+		}
 	}
 	sc.Emit(fmt.Sprintf("Client Connection Count: %v", len(cm.connCountToClient)))
 	cm.connCountToClient[0].(*client.LocalConnection).Status(sc.Fork())

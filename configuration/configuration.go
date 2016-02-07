@@ -26,7 +26,12 @@ type Configuration struct {
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
 	fingerprints                  map[[sha256.Size]byte]server.EmptyStruct
-	nextConfiguration             *Configuration
+	nextConfiguration             *NextConfiguration
+}
+
+type NextConfiguration struct {
+	*Configuration
+	InstalledOnAll bool
 }
 
 func LoadConfigurationFromPath(path string) (*Configuration, error) {
@@ -138,8 +143,12 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	c.fingerprints = fingerprintsMap
 
 	if config.Which() == msgs.CONFIGURATION_TRANSITIONINGTO {
-		nextConfig := config.TransitioningTo()
-		c.nextConfiguration = ConfigurationFromCap(&nextConfig)
+		next := config.TransitioningTo()
+		nextConfig := next.Configuration()
+		c.nextConfiguration = &NextConfiguration{
+			Configuration:  ConfigurationFromCap(&nextConfig),
+			InstalledOnAll: next.InstalledOnAll(),
+		}
 	}
 
 	return c
@@ -175,7 +184,8 @@ func (a *Configuration) Equal(b *Configuration) bool {
 	if a.nextConfiguration == nil || b.nextConfiguration == nil {
 		return a.nextConfiguration == b.nextConfiguration
 	}
-	return a.nextConfiguration.Equal(b.nextConfiguration)
+	return a.nextConfiguration.InstalledOnAll == b.nextConfiguration.InstalledOnAll &&
+		a.nextConfiguration.Configuration.Equal(b.nextConfiguration.Configuration)
 }
 
 func (config *Configuration) String() string {
@@ -187,11 +197,11 @@ func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptySt
 	return config.fingerprints
 }
 
-func (config *Configuration) Next() *Configuration {
+func (config *Configuration) Next() *NextConfiguration {
 	return config.nextConfiguration
 }
 
-func (config *Configuration) SetNext(next *Configuration) {
+func (config *Configuration) SetNext(next *NextConfiguration) {
 	config.nextConfiguration = next
 }
 
@@ -220,10 +230,9 @@ func (config *Configuration) Clone() *Configuration {
 		MaxRMCount:                    config.MaxRMCount,
 		AsyncFlush:                    config.AsyncFlush,
 		ClientCertificateFingerprints: make([]string, len(config.ClientCertificateFingerprints)),
-		rms:               make([]common.RMId, len(config.rms)),
-		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
-		fingerprints:      make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
-		nextConfiguration: config.nextConfiguration,
+		rms:          make([]common.RMId, len(config.rms)),
+		rmsRemoved:   make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
+		fingerprints: make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
 	}
 
 	copy(clone.Hosts, config.Hosts)
@@ -235,8 +244,11 @@ func (config *Configuration) Clone() *Configuration {
 	for k, v := range config.fingerprints {
 		clone.fingerprints[k] = v
 	}
-	if clone.nextConfiguration != nil {
-		clone.nextConfiguration = clone.nextConfiguration.Clone()
+	if config.nextConfiguration != nil {
+		clone.nextConfiguration = &NextConfiguration{
+			Configuration:  config.nextConfiguration.Configuration.Clone(),
+			InstalledOnAll: config.nextConfiguration.InstalledOnAll,
+		}
 	}
 	return clone
 }
@@ -282,7 +294,10 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 	if config.nextConfiguration == nil {
 		cap.SetStable()
 	} else {
-		cap.SetTransitioningTo(config.nextConfiguration.AddToSegAutoRoot(seg))
+		cap.SetTransitioningTo()
+		next := cap.TransitioningTo()
+		next.SetConfiguration(config.nextConfiguration.Configuration.AddToSegAutoRoot(seg))
+		next.SetInstalledOnAll(config.nextConfiguration.InstalledOnAll)
 	}
 	return cap
 }
