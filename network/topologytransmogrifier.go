@@ -23,7 +23,7 @@ type TopologyTransmogrifier struct {
 	localConnection   *client.LocalConnection
 	clusterId         string
 	active            *configuration.Topology
-	hostRMIds         map[string]*rmIdAndRootId
+	hostToConnection  map[string]paxos.Connection
 	activeConnections map[common.RMId]paxos.Connection
 	task              topologyTask
 	cellTail          *cc.ChanCellTail
@@ -31,15 +31,6 @@ type TopologyTransmogrifier struct {
 	queryChan         <-chan topologyTransmogrifierMsg
 	listenPort        uint16
 	rng               *rand.Rand
-}
-
-type rmIdAndRootId struct {
-	rmId   common.RMId
-	rootId *common.VarUUId
-}
-
-func (rr *rmIdAndRootId) String() string {
-	return fmt.Sprintf("%v(%v)", rr.rmId, rr.rootId)
 }
 
 type topologyTransmogrifierMsg interface {
@@ -107,7 +98,7 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 		connectionManager: cm,
 		localConnection:   lc,
 		clusterId:         clusterId,
-		hostRMIds:         make(map[string]*rmIdAndRootId),
+		hostToConnection:  make(map[string]paxos.Connection),
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -224,17 +215,9 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, established c
 func (tt *TopologyTransmogrifier) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
 	tt.activeConnections = conns
 
-	for rmId, conn := range conns {
-		host := conn.Host()
-		if rmIdRoot, found := tt.hostRMIds[host]; found {
-			rmIdRoot.rmId = rmId
-			rmIdRoot.rootId = conn.RootId()
-		} else {
-			tt.hostRMIds[host] = &rmIdAndRootId{
-				rmId:   rmId,
-				rootId: conn.RootId(),
-			}
-		}
+	for _, cd := range conns {
+		host := cd.Host()
+		tt.hostToConnection[host] = cd
 	}
 
 	if tt.task != nil {
@@ -468,10 +451,7 @@ func (task *joinCluster) start() error {
 
 func (task *joinCluster) maybeBegin() error {
 	for _, host := range task.config.Hosts {
-		if host == task.localHost {
-			continue
-		}
-		if _, found := task.hostRMIds[host]; !found {
+		if _, found := task.hostToConnection[host]; !found {
 			task.maybeBeginOnConnectionChange = true
 			return nil
 		}
@@ -484,9 +464,9 @@ func (task *joinCluster) maybeBegin() error {
 		if host == task.localHost {
 			continue
 		}
-		rmIdRoot, _ := task.hostRMIds[host]
-		rmIds = append(rmIds, rmIdRoot.rmId)
-		switch remoteRootId := rmIdRoot.rootId; {
+		cd, _ := task.hostToConnection[host]
+		rmIds = append(rmIds, cd.RMId())
+		switch remoteRootId := cd.RootId(); {
 		case remoteRootId == nil:
 			// they're joining too
 		case rootId == nil:
@@ -635,14 +615,11 @@ func (task *installTarget) calculateTargetTopology() error {
 	}
 	task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
 	for _, host := range allRemoteHosts {
-		if _, found := task.hostRMIds[host]; !found {
+		if _, found := task.hostToConnection[host]; !found {
 			task.startOnConnectionChange = true
 			return nil
 		}
 	}
-
-	log.Printf("allRemoteHosts: %v\nhostsRemoved: %v\nhostsSurvived: %v\nhostsAdded: %v\n%v",
-		allRemoteHosts, hostsRemoved, hostsSurvived, hostsAdded, task.hostRMIds)
 
 	rmIdsSurvived, rmIdsAdded, rmIdsRemoved :=
 		make(map[common.RMId]server.EmptyStruct),
@@ -657,11 +634,7 @@ func (task *installTarget) calculateTargetTopology() error {
 	}
 	var rmId common.RMId
 	for host := range hostsSurvived {
-		if host == task.localHost {
-			rmId = task.connectionManager.RMId
-		} else {
-			rmId = task.hostRMIds[host].rmId
-		}
+		rmId = task.hostToConnection[host].RMId()
 		if _, found := rmIdsRemoved[rmId]; found {
 			// the rmId of host hasn't changed
 			rmIdsSurvived[rmId] = server.EmptyStructVal
@@ -676,19 +649,11 @@ func (task *installTarget) calculateTargetTopology() error {
 	}
 	// removed and added are much simpler
 	for host := range hostsRemoved {
-		if host == task.localHost {
-			rmId = task.connectionManager.RMId
-		} else {
-			rmId = task.hostRMIds[host].rmId
-		}
+		rmId = task.hostToConnection[host].RMId()
 		rmIdsRemoved[rmId] = server.EmptyStructVal
 	}
 	for host := range hostsAdded {
-		if host == task.localHost {
-			rmId = task.connectionManager.RMId
-		} else {
-			rmId = task.hostRMIds[host].rmId
-		}
+		rmId = task.hostToConnection[host].RMId()
 		rmIdsAdded[rmId] = server.EmptyStructVal
 	}
 
@@ -720,6 +685,10 @@ func (task *installTarget) calculateTargetTopology() error {
 	}
 	next.SetRMsRemoved(rmIdsRemoved)
 	task.targetTopology.SetNext(next)
+
+	log.Printf("allRemoteHosts: %v\nhostsRemoved: %v\nhostsSurvived: %v\nhostsAdded: %v",
+		allRemoteHosts, hostsRemoved, hostsSurvived, hostsAdded)
+
 	return nil
 }
 
@@ -939,26 +908,20 @@ func (tt *TopologyTransmogrifier) chooseRMIdsForTopology(localHost string, topol
 	twoFInc := len(topology.Hosts)
 	fInc := (twoFInc >> 1) + 1
 	f := twoFInc - fInc
-	if len(tt.hostRMIds) < twoFInc {
+	if len(tt.hostToConnection) < twoFInc {
 		return nil, nil
 	}
 	active := make([]common.RMId, 0, fInc)
 	passive := make([]common.RMId, 0, f)
 	for _, host := range topology.Hosts {
-		if rmIdRoot, found := tt.hostRMIds[host]; found {
-			rmId := rmIdRoot.rmId
+		if cd, found := tt.hostToConnection[host]; found {
+			rmId := cd.RMId()
 			if _, found := tt.activeConnections[rmId]; found && len(active) < cap(active) {
 				active = append(active, rmId)
 			} else if len(passive) < cap(passive) {
 				passive = append(passive, rmId)
 			} else { // not found in activeConnections, and passive is full
 				return nil, nil
-			}
-		} else if host == localHost {
-			if len(active) < cap(active) {
-				active = append(active, tt.connectionManager.RMId)
-			} else {
-				passive = append(passive, tt.connectionManager.RMId)
 			}
 		} else {
 			return nil, nil
