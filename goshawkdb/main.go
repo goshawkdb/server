@@ -158,12 +158,12 @@ func (s *server) start() {
 
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
-	clusterId := ""
-	if commandLineConfig != nil {
-		clusterId = commandLineConfig.ClusterId
+
+	if commandLineConfig == nil {
+		commandLineConfig = configuration.BlankTopology("").Configuration
 	}
 
-	cm, transmogrifier, err := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, clusterId, s.port)
+	cm, transmogrifier, err := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, s.port, commandLineConfig)
 	s.addOnShutdown(cm.Shutdown)
 	s.addOnShutdown(transmogrifier.Shutdown)
 	s.maybeShutdown(err)
@@ -172,16 +172,6 @@ func (s *server) start() {
 
 	s.Add(1)
 	go s.signalHandler()
-
-	if commandLineConfig != nil {
-		resultPromise := transmogrifier.RequestConfigurationChange(commandLineConfig)
-		go func() {
-			err := resultPromise()
-			if err != nil {
-				log.Println(err)
-			}
-		}()
-	}
 
 	listener, err := network.NewListener(s.port, cm)
 	s.addOnShutdown(listener.Shutdown)
@@ -249,38 +239,6 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	}
 	return nil, nil
 }
-
-/*
-func (s *server) chooseTopology(topology *configuration.Topology) (*configuration.Topology, error) {
-	var config *configuration.Configuration
-	if s.configFile != "" {
-		var err error
-		config, err = configuration.LoadConfigurationFromPath(s.configFile)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	switch {
-	case topology == nil && config == nil:
-		return nil, fmt.Errorf("Local data store is empty and no external config supplied. Must supply config with -config")
-	case topology == nil:
-		return configuration.NewTopology(config), nil
-	case config == nil:
-		return topology, nil
-	case topology.Configuration.Equal(config):
-		return topology, nil
-	case topology.ClusterId != config.ClusterId:
-		return nil, fmt.Errorf("Local data store is configured for cluster '%v', but supplied config is for cluster '%v'. Cannot continue. Either adjust config or use clean data directory", topology.ClusterId, config.ClusterId)
-	case topology.Version > config.Version:
-		return topology, nil
-	case topology.Version == config.Version:
-		return nil, fmt.Errorf("Configuration has same version number but different contents. Did you forget to increase the version number? (%v)", topology.Version)
-	default:
-		return configuration.NewTopology(config), nil
-	}
-}
-*/
 
 func (s *server) signalShutdown() {
 	log.Println("Shutting down.")
