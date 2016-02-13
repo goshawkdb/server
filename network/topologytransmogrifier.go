@@ -30,6 +30,7 @@ type TopologyTransmogrifier struct {
 	queryChan         <-chan topologyTransmogrifierMsg
 	listenPort        uint16
 	rng               *rand.Rand
+	localEstablished  chan struct{}
 }
 
 type topologyTransmogrifierMsg interface {
@@ -48,30 +49,11 @@ func (tt *TopologyTransmogrifier) Shutdown() {
 	}
 }
 
-type topologyTransmogrifierMsgRequestConfigChange struct {
-	config  *configuration.NextConfiguration
-	errChan chan error
-}
+type topologyTransmogrifierMsgRequestConfigChange configuration.NextConfiguration
 
-func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) func() error {
-	errChan := make(chan error, 1)
-	tt.enqueueQuery(&topologyTransmogrifierMsgRequestConfigChange{
-		config:  &configuration.NextConfiguration{Configuration: config},
-		errChan: errChan,
-	})
-	return func() error {
-		return <-errChan
-	}
-}
-
-func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) finish(err error) {
-	if ttmrcc.errChan != nil {
-		if err != nil {
-			ttmrcc.errChan <- err
-		}
-		close(ttmrcc.errChan)
-		ttmrcc.errChan = nil
-	}
+func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
+	tt.enqueueQuery((*topologyTransmogrifierMsgRequestConfigChange)(
+		&configuration.NextConfiguration{Configuration: config}))
 }
 
 func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) topologyTransmogrifierMsgWitness() {}
@@ -92,13 +74,18 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, func() error) {
+func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
 		connectionManager: cm,
 		localConnection:   lc,
 		hostToConnection:  make(map[string]paxos.Connection),
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		localEstablished:  make(chan struct{}),
+	}
+	tt.task = &targetConfig{
+		TopologyTransmogrifier: tt,
+		config:                 &configuration.NextConfiguration{Configuration: config},
 	}
 
 	var head *cc.ChanCellHead
@@ -145,11 +132,8 @@ func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection
 
 	cm.AddSender(tt)
 
-	established := make(chan error)
-	go tt.actorLoop(head, established, config)
-	return tt, func() error {
-		return <-established
-	}
+	go tt.actorLoop(head, config)
+	return tt, tt.localEstablished
 }
 
 func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -164,7 +148,7 @@ func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn p
 	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
 }
 
-func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, established chan error, config *configuration.Configuration) {
+func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *configuration.Configuration) {
 	var (
 		err       error
 		queryChan <-chan topologyTransmogrifierMsg
@@ -173,11 +157,6 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, established c
 	)
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = tt.queryChan, cell }
 	head.WithCell(chanFun)
-
-	tt.selectGoal(&topologyTransmogrifierMsgRequestConfigChange{
-		errChan: established,
-		config:  &configuration.NextConfiguration{Configuration: config},
-	})
 
 	terminate := err != nil
 	for !terminate {
@@ -196,7 +175,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, established c
 			case *topologyTransmogrifierMsgTopologyObserved:
 				err = tt.setActive((*configuration.Topology)(msgT))
 			case *topologyTransmogrifierMsgRequestConfigChange:
-				tt.selectGoal(msgT)
+				tt.selectGoal((*configuration.NextConfiguration)(msgT))
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -246,6 +225,10 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
 		return errors.New("We have been removed from the cluster. Shutting down.")
 	}
+	if tt.active == nil && tt.localEstablished != nil {
+		close(tt.localEstablished)
+		tt.localEstablished = nil
+	}
 	tt.active = topology
 
 	if tt.task != nil {
@@ -264,57 +247,45 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
 
 		} else {
-			errChan := make(chan error, 1)
-			go func() {
-				err := <-errChan
-				if err != nil {
-					log.Println(err)
-				}
-			}()
-			tt.selectGoal(&topologyTransmogrifierMsgRequestConfigChange{
-				config:  next,
-				errChan: errChan,
-			})
+			tt.selectGoal(next)
 		}
 	}
 	return nil
 }
 
-func (tt *TopologyTransmogrifier) selectGoal(goal *topologyTransmogrifierMsgRequestConfigChange) {
+func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
 	if tt.active != nil {
 		switch {
-		case goal.config.ClusterId != tt.active.ClusterId:
-			goal.finish(fmt.Errorf("Illegal config: ClusterId should be '%s' instead of '%s'",
-				tt.active.ClusterId, goal.config.ClusterId))
+		case goal.ClusterId != tt.active.ClusterId:
+			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'",
+				tt.active.ClusterId, goal.ClusterId)
 			return
 
-		case goal.config.Version < tt.active.Version:
-			goal.finish(fmt.Errorf("Ignoring config with version %v as newer version already active (%v)",
-				goal.config.Version, tt.active.Version))
+		case goal.Version < tt.active.Version:
+			log.Printf("Ignoring config with version %v as newer version already active (%v)",
+				goal.Version, tt.active.Version)
 			return
 
-		case goal.config.Version == tt.active.Version:
-			goal.finish(nil) // goal already achieved
-			return
+		case goal.Version == tt.active.Version:
+			return // goal already achieved
 		}
 	}
 
 	if tt.task != nil {
 		existingGoal := tt.task.goal()
 		switch {
-		case goal.config.ClusterId != existingGoal.config.ClusterId:
-			goal.finish(fmt.Errorf("Illegal config: ClusterId should be '%s' instead of '%s'",
-				existingGoal.config.ClusterId, goal.config.ClusterId))
+		case goal.ClusterId != existingGoal.ClusterId:
+			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'",
+				existingGoal.ClusterId, goal.ClusterId)
 			return
 
-		case goal.config.Version < existingGoal.config.Version:
-			goal.finish(fmt.Errorf("Ignoring config with version %v as newer version already targetted (%v)",
-				goal.config.Version, existingGoal.config.Version))
+		case goal.Version < existingGoal.Version:
+			log.Printf("Ignoring config with version %v as newer version already targetted (%v)",
+				goal.Version, existingGoal.Version)
 			return
 
-		case goal.config.Version == existingGoal.config.Version:
-			goal.finish(nil) // goal already in progress
-			return
+		case goal.Version == existingGoal.Version:
+			return // goal already in progress
 
 		default:
 			tt.task.abandon()
@@ -324,8 +295,8 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *topologyTransmogrifierMsgRequ
 
 	if tt.task == nil {
 		tt.task = &targetConfig{
-			TopologyTransmogrifier:                       tt,
-			topologyTransmogrifierMsgRequestConfigChange: goal,
+			TopologyTransmogrifier: tt,
+			config:                 goal,
 		}
 	}
 }
@@ -335,14 +306,14 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *topologyTransmogrifierMsgRequ
 type topologyTask interface {
 	tick() error
 	abandon()
-	goal() *topologyTransmogrifierMsgRequestConfigChange
+	goal() *configuration.NextConfiguration
 }
 
 // targetConfig
 
 type targetConfig struct {
 	*TopologyTransmogrifier
-	*topologyTransmogrifierMsgRequestConfigChange
+	config *configuration.NextConfiguration
 }
 
 func (task *targetConfig) tick() error {
@@ -371,31 +342,27 @@ func (task *targetConfig) tick() error {
 
 func (task *targetConfig) abandon() {}
 
-func (task *targetConfig) goal() *topologyTransmogrifierMsgRequestConfigChange {
-	return task.topologyTransmogrifierMsgRequestConfigChange
+func (task *targetConfig) goal() *configuration.NextConfiguration {
+	return task.config
 }
 
 func (task *targetConfig) fatal(err error) error {
 	task.task = nil
-	task.finish(err)
 	return err
 }
 
 func (task *targetConfig) error(err error) error {
 	task.task = nil
-	task.finish(err)
+	log.Println(err)
 	return nil
 }
 
 func (task *targetConfig) completed() error {
 	task.task = nil
-	task.finish(nil)
 	return nil
 }
 
 func (task *targetConfig) activeChange(active *configuration.Topology) error {
-	task.finish(nil)
-	log.Println("activeChange -> setactive")
 	return task.setActive(active)
 }
 

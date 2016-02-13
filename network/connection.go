@@ -773,16 +773,7 @@ func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
 		configCap := msg.TopologyChangeRequest()
 		config := configuration.ConfigurationFromCap(&configCap)
-		resultPromise := cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
-		go func() {
-			err := resultPromise()
-			if err != nil {
-				seg := capn.NewBuffer(nil)
-				msg := msgs.NewRootMessage(seg)
-				msg.SetConnectionError(err.Error())
-				cr.Send(server.SegToBytes(seg))
-			}
-		}()
+		cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
 	default:
 		cr.connectionManager.Dispatchers.DispatchMessage(cr.remoteRMId, which, msg)
 	}

@@ -163,10 +163,9 @@ func (s *server) start() {
 		commandLineConfig = configuration.BlankTopology("").Configuration
 	}
 
-	cm, transmogrifier, err := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, s.port, commandLineConfig)
+	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, s.port, commandLineConfig)
 	s.addOnShutdown(cm.Shutdown)
 	s.addOnShutdown(transmogrifier.Shutdown)
-	s.maybeShutdown(err)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
@@ -266,12 +265,7 @@ func (s *server) signalReloadConfig() {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	errFunc := s.transmogrifier.RequestConfigurationChange(config)
-	go func() {
-		if err := errFunc(); err != nil {
-			log.Println(err)
-		}
-	}()
+	s.transmogrifier.RequestConfigurationChange(config)
 }
 
 func (s *server) signalDumpStacks() {
