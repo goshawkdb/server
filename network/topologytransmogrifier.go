@@ -207,11 +207,11 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	if tt.active != nil {
 		switch {
 		case tt.active.ClusterId != topology.ClusterId:
-			return fmt.Errorf("Fatal: config with ClusterId change from '%s' to '%s'",
+			return fmt.Errorf("Fatal: config with ClusterId change from '%s' to '%s'.",
 				tt.active.ClusterId, topology.ClusterId)
 
 		case topology.Version < tt.active.Version:
-			log.Printf("Ignoring config with version %v as newer version already active (%v)",
+			log.Printf("Ignoring config with version %v as newer version already active (%v).",
 				topology.Version, tt.active.Version)
 			return nil
 
@@ -256,18 +256,22 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
 	if tt.active != nil {
 		switch {
+		case goal.Version == 0:
+			return // done.
+
 		case goal.ClusterId != tt.active.ClusterId:
-			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'",
+			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'.",
 				tt.active.ClusterId, goal.ClusterId)
 			return
 
 		case goal.Version < tt.active.Version:
-			log.Printf("Ignoring config with version %v as newer version already active (%v)",
+			log.Printf("Ignoring config with version %v as newer version already active (%v).",
 				goal.Version, tt.active.Version)
 			return
 
 		case goal.Version == tt.active.Version:
-			return // goal already achieved
+			log.Printf("Config transition to version %v completed.", goal.Version)
+			return
 		}
 	}
 
@@ -275,16 +279,17 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 		existingGoal := tt.task.goal()
 		switch {
 		case goal.ClusterId != existingGoal.ClusterId:
-			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'",
+			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'.",
 				existingGoal.ClusterId, goal.ClusterId)
 			return
 
 		case goal.Version < existingGoal.Version:
-			log.Printf("Ignoring config with version %v as newer version already targetted (%v)",
+			log.Printf("Ignoring config with version %v as newer version already targetted (%v).",
 				goal.Version, existingGoal.Version)
 			return
 
 		case goal.Version == existingGoal.Version:
+			log.Printf("Config transition to version %v already in progress.", goal.Version)
 			return // goal already in progress
 
 		default:
@@ -376,7 +381,14 @@ func (task *ensureLocalTopology) tick() error {
 	if task.active != nil {
 		// the fact we're here means we're done - there is a topology
 		// discovered one way or another.
-		return task.completed()
+		if err := task.completed(); err != nil {
+			return err
+		}
+		// However, just because we have a local config doesn't mean it
+		// actually satisfies the goal. Essentially, we're pretending
+		// that the goal is in Next().
+		task.selectGoal(task.config)
+		return nil
 	}
 
 	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
@@ -541,7 +553,7 @@ func (task *installTargetOld) tick() error {
 	if err != nil || targetTopology == nil {
 		return err
 	}
-	log.Println("Calculated target topology:", targetTopology.Next())
+	log.Printf("Calculated target topology: %v", targetTopology.Next())
 
 	active, passive := task.chooseRMIdsForTopology(localHost, task.active)
 	if active == nil {
