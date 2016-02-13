@@ -266,7 +266,12 @@ func (s *server) signalReloadConfig() {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	s.transmogrifier.RequestConfigurationChange(config)
+	errFunc := s.transmogrifier.RequestConfigurationChange(config)
+	go func() {
+		if err := errFunc(); err != nil {
+			log.Println(err)
+		}
+	}()
 }
 
 func (s *server) signalDumpStacks() {
