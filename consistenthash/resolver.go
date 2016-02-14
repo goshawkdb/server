@@ -43,8 +43,17 @@ func NewResolver(rng *rand.Rand, hashCodes []common.RMId) *Resolver {
 
 type intKey int
 
-func (a intKey) LessThan(b sl.Comparable) bool { return a < b.(intKey) }
-func (a intKey) Equal(b sl.Comparable) bool    { return a == b.(intKey) }
+func (a intKey) Compare(bC sl.Comparable) sl.Cmp {
+	b := bC.(intKey)
+	switch {
+	case a < b:
+		return sl.LT
+	case a > b:
+		return sl.GT
+	default:
+		return sl.EQ
+	}
+}
 
 func (res *Resolver) AddHashCode(hashCode common.RMId) {
 	// 1. make this idempotent.

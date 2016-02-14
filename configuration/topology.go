@@ -147,11 +147,11 @@ func (a *Topology) Equal(b *Topology) bool {
 		return a == b
 	}
 	if !(a.Configuration.Equal(b.Configuration) &&
-		a.DBVersion.Equal(b.DBVersion) &&
+		a.DBVersion.Compare(b.DBVersion) == common.EQ &&
 		len(a.AllRMs) == len(b.AllRMs)) {
 		return false
 	}
-	if !a.Root.VarUUId.Equal(b.Root.VarUUId) {
+	if a.Root.VarUUId.Compare(b.Root.VarUUId) != common.EQ {
 		return false
 	}
 	for idx, aRM := range a.AllRMs {

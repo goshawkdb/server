@@ -159,7 +159,7 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v ReadRetry called for %v with frame in state %v", fo.v, txn, fo.currentState))
 		return false
-	case fo.frameTxnActions == nil || fo.frameTxnId.Equal(action.readVsn):
+	case fo.frameTxnActions == nil || fo.frameTxnId.Compare(action.readVsn) == common.EQ:
 		return false
 	default:
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
@@ -174,16 +174,16 @@ func (fo *frameOpen) AddRead(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writeVoteClock != nil || (fo.writes.Len() != 0 && fo.writes.First().Key.LessThan(action)) || fo.frameTxnActions == nil || fo.isLocked():
+	case fo.writeVoteClock != nil || (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil || fo.isLocked():
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		action.VoteDeadlock(fo.frameTxnClock)
-	case !fo.frameTxnId.Equal(action.readVsn):
+	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
 		fo.v.maybeMakeInactive()
 	case fo.reads.Get(action) == nil:
 		fo.uncommittedReads++
 		fo.reads.Insert(action, uncommitted)
-		if fo.maxUncommittedRead == nil || fo.maxUncommittedRead.LessThan(action) {
+		if fo.maxUncommittedRead == nil || fo.maxUncommittedRead.Compare(action) == sl.LT {
 			fo.maxUncommittedRead = action
 		}
 		action.frame = fo.frame
@@ -236,7 +236,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.rwPresent || (fo.maxUncommittedRead != nil && action.LessThan(fo.maxUncommittedRead)) || found || len(fo.learntFutureReads) != 0 || fo.isLocked():
+	case fo.rwPresent || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || found || len(fo.learntFutureReads) != 0 || fo.isLocked():
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.writes.Get(action) == nil:
 		fo.uncommittedWrites++
@@ -303,9 +303,9 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddReadWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writeVoteClock != nil || fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.LessThan(fo.maxUncommittedRead)) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0 || (!action.IsRoll() && fo.isLocked()):
+	case fo.writeVoteClock != nil || fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0 || (!action.IsRoll() && fo.isLocked()):
 		action.VoteDeadlock(fo.frameTxnClock)
-	case !fo.frameTxnId.Equal(action.readVsn):
+	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
 		fo.v.maybeMakeInactive()
 	case fo.writes.Get(action) == nil:
@@ -374,7 +374,7 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 	}
 	actClockElem := action.outcomeClock.Clock[*fo.v.UUId] - 1
 	reqClockElem := fo.frameTxnClock.Clock[*fo.v.UUId]
-	if !action.readVsn.Equal(fo.frameTxnId) {
+	if action.readVsn.Compare(fo.frameTxnId) != common.EQ {
 		// The write would be one less than the read. We want to know if
 		// this read is of a write before or after our current frame
 		// write. If the clock elems are equal then the read _must_ be
@@ -426,7 +426,7 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	}
 	actClockElem := action.outcomeClock.Clock[*fo.v.UUId]
 	reqClockElem := fo.frameTxnClock.Clock[*fo.v.UUId]
-	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.LessThan(fo.frameTxnId)) {
+	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
 		server.Log(fo.frame, "WriteLearnt", txn, "ignored, too old")
 		return false
 	}
@@ -525,7 +525,7 @@ func (fo *frameOpen) calculateReadVoteClock() {
 			}
 		}
 		for k, v := range written.Clock {
-			if m, found := fo.mask.Clock[k]; k.Equal(fo.v.UUId) || !found || m < v {
+			if m, found := fo.mask.Clock[k]; fo.v.UUId.Compare(&k) == common.EQ || !found || m < v {
 				clock.SetVarIdMax(k, v+1)
 			}
 		}
@@ -892,7 +892,7 @@ func maxTxnByOutcomeClock(a, b *localAction) *localAction {
 		bgt := a.outcomeClockCopy.LessThan(b.outcomeClockCopy)
 		switch {
 		case agt == bgt:
-			if a.Id.LessThan(b.Id) {
+			if a.Id.Compare(b.Id) == common.LT {
 				return b
 			} else {
 				return a

@@ -42,12 +42,16 @@ type Txn struct {
 	currentState txnStateMachineComponent
 }
 
-func (txnA *Txn) LessThan(txnB *Txn) bool {
+func (txnA *Txn) Compare(txnB *Txn) common.Cmp {
 	switch {
+	case txnA == txnB:
+		return common.EQ
+	case txnA == nil:
+		return common.LT
 	case txnB == nil:
-		return false
+		return common.GT
 	default:
-		return txnA == nil || txnA.Id.LessThan(txnB.Id)
+		return txnA.Id.Compare(txnB.Id)
 	}
 }
 
@@ -100,22 +104,25 @@ func (action *localAction) VoteCommit(clock *VectorClock) bool {
 }
 
 // sl.Comparable interface
-func (a *localAction) Equal(b sl.Comparable) bool {
-	actionB, ok := b.(*localAction)
-	return ok && a == actionB
-}
-
-// sl.Comparable interface
-func (a *localAction) LessThan(b sl.Comparable) bool {
-	actionB, ok := b.(*localAction)
-	switch {
-	case b == nil || (ok && actionB == nil):
-		return false
-	case !ok:
-		panic(fmt.Sprintf("localAction.LessThan passed not a localAction! (%v)", b))
-		return false
-	default:
-		return a == nil || a.Txn.LessThan(actionB.Txn)
+func (a *localAction) Compare(bC sl.Comparable) sl.Cmp {
+	if bC == nil {
+		if a == nil {
+			return sl.EQ
+		} else {
+			return sl.GT
+		}
+	} else {
+		b := bC.(*localAction)
+		switch {
+		case a == b:
+			return sl.EQ
+		case a == nil:
+			return sl.LT
+		case b == nil:
+			return sl.GT
+		default:
+			return sl.Cmp(a.Txn.Compare(b.Txn))
+		}
 	}
 }
 

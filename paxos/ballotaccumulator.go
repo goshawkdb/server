@@ -5,8 +5,8 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
 	"sort"
 )
@@ -417,7 +417,7 @@ func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *c
 	switch {
 	case braActionType != msgs.ACTION_READ && newActionType != msgs.ACTION_READ:
 		// They're both writes in some way. Just order the txns
-		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.LessThan(txnId)) {
+		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
 			bra.set(action, rmBal, txnId, clockElem)
 		}
 
