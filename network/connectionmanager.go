@@ -496,7 +496,7 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
 	}
 	cm.topology = topology
 	cd := cm.rmToServer[cm.RMId]
-	if !topology.Root.VarUUId.Equal(cd.rootId) {
+	if topology.Root.VarUUId.Compare(cd.rootId) != common.EQ {
 		cm.sendersConnectionLost(cd.rmId)
 		cd = cd.clone()
 		cd.rootId = topology.Root.VarUUId

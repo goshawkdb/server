@@ -454,7 +454,7 @@ func (task *joinCluster) tick() error {
 			// they're joining too
 		case rootId == nil:
 			rootId = remoteRootId
-		case rootId.Equal(remoteRootId):
+		case rootId.Compare(remoteRootId) == common.EQ:
 			// all good
 		default:
 			return task.fatal(
