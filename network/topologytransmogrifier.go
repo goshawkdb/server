@@ -337,7 +337,7 @@ func (task *targetConfig) tick() error {
 		task.task = &installTargetNew{targetConfig: task}
 	case task.active.Next() != nil && task.active.Next().Version == task.config.Version:
 		log.Printf("Attempting to perform object migration for topology target: %v", task.config)
-		return nil
+		task.task = &migrate{targetConfig: task}
 	default:
 		return fmt.Errorf("Confused about what to do. Active topology is: %v; goal is %v",
 			task.active, task.config)
@@ -791,6 +791,17 @@ func (task *installTargetNew) tick() error {
 		}
 		return nil
 	}
+}
+
+type migrate struct {
+	*targetConfig
+}
+
+func (task *migrate) tick() error {
+	if !(task.active.Next() != nil && task.active.Next().Version == task.config.Version) {
+		return task.completed()
+	}
+	return nil
 }
 
 // utils
