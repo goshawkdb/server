@@ -162,11 +162,7 @@ func TestMain(m *testing.M) {
 		positions := make([]uint8, len(hashcodes))
 		randomPositions[idx] = positions
 		for idy := range positions {
-			if idy == 0 {
-				positions[idy] = uint8(idy)
-			} else {
-				positions[idy] = uint8(rand.Intn(idy))
-			}
+			positions[idy] = uint8(rand.Intn(idy + 1))
 		}
 	}
 	os.Exit(m.Run())
