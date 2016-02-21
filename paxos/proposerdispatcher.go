@@ -7,6 +7,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
@@ -61,6 +62,13 @@ func (pd *ProposerDispatcher) TxnGloballyCompleteReceived(sender common.RMId, tg
 func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa *msgs.TxnSubmissionAbort) {
 	txnId := common.MakeTxnId(tsa.TxnId())
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnSubmissionAbortReceived(sender, txnId) })
+}
+
+func (pd *ProposerDispatcher) SetTopology(topology *configuration.Topology) {
+	for idx, exe := range pd.Executors {
+		mgr := pd.proposermanagers[idx]
+		exe.Enqueue(func() { mgr.SetTopology(topology) })
+	}
 }
 
 func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {

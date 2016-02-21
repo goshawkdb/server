@@ -9,6 +9,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
@@ -33,6 +34,7 @@ type ProposerManager struct {
 	Disk              *mdbs.MDBServer
 	proposals         map[instanceIdPrefix]*proposal
 	proposers         map[common.TxnId]*Proposer
+	topology          *configuration.Topology
 }
 
 func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerManager {
@@ -44,6 +46,7 @@ func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatche
 		Exe:               exe,
 		ConnectionManager: cm,
 		Disk:              server,
+		topology:          nil,
 	}
 	return pm
 }
@@ -60,6 +63,10 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
+func (pm *ProposerManager) SetTopology(topology *configuration.Topology) {
+	pm.topology = topology
+}
+
 func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other
@@ -68,9 +75,25 @@ func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 	// ignore this message.
 	if _, found := pm.proposers[*txnId]; !found {
 		server.Log(txnId, "Received")
-		proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter)
-		pm.proposers[*txnId] = proposer
-		proposer.Start()
+		if pm.topology == nil ||
+			(pm.topology.Next() == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
+			(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion()) {
+			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter)
+			pm.proposers[*txnId] = proposer
+			proposer.Start()
+
+		} else {
+			server.Log(txnId, "Aborting received txn due to non-matching topology.")
+			acceptors := GetAcceptorsFromTxn(txnCap)
+			fInc := int(txnCap.FInc())
+			alloc := AllocForRMId(txnCap, pm.RMId)
+			ballots := MakeAbortBallots(txnCap, alloc)
+			pm.NewPaxosProposals(txnId, txnCap, fInc, ballots, acceptors, pm.RMId, true)
+
+			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveLearner)
+			pm.proposers[*txnId] = proposer
+			proposer.Start()
+		}
 	}
 }
 

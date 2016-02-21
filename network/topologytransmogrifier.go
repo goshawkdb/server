@@ -66,6 +66,10 @@ type topologyTransmogrifierMsgTopologyObserved configuration.Topology
 
 func (ttmvc *topologyTransmogrifierMsgTopologyObserved) topologyTransmogrifierMsgWitness() {}
 
+type topologyTransmogrifierMsgExe func() error
+
+func (ttme topologyTransmogrifierMsgExe) topologyTransmogrifierMsgWitness() {}
+
 func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
 	var f cc.CurCellConsumer
 	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
@@ -176,6 +180,8 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 				err = tt.setActive((*configuration.Topology)(msgT))
 			case *topologyTransmogrifierMsgRequestConfigChange:
 				tt.selectGoal((*configuration.NextConfiguration)(msgT))
+			case topologyTransmogrifierMsgExe:
+				err = msgT()
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -304,6 +310,18 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			config:                 goal,
 		}
 	}
+}
+
+func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask) {
+	go func() {
+		time.Sleep(time.Duration(tt.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+		tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			if tt.task == task {
+				return tt.task.tick()
+			}
+			return nil
+		}))
+	}()
 }
 
 // topologyTask
@@ -495,20 +513,15 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	targetTopology := configuration.NewTopology(task.active.DBVersion, nil, task.config.Configuration)
 	targetTopology.SetRMs(allRMIds)
 
-Outer:
-	for {
-		switch resubmit, err := task.attemptCreateRoot(targetTopology); {
-		case err != nil:
-			return task.fatal(err)
-		case resubmit:
-			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-			continue
-		case targetTopology.Root.VarUUId == nil:
-			// We failed; likely we need to wait for connections to change
-			return nil
-		default:
-			break Outer
-		}
+	switch resubmit, err := task.attemptCreateRoot(targetTopology); {
+	case err != nil:
+		return task.fatal(err)
+	case resubmit:
+		task.enqueueTick(task)
+		return nil
+	case targetTopology.Root.VarUUId == nil:
+		// We failed; likely we need to wait for connections to change
+		return nil
 	}
 
 	// Finally we need to rewrite the topology. For allJoining, we
@@ -519,21 +532,19 @@ Outer:
 	// sure that all peers are empty and moving to the same topology
 	// is to have all peers as active.
 
-	for {
-		_, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
-		if err != nil {
-			return task.fatal(err)
-		}
-		if resubmit {
-			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-			continue
-		}
-		// !resubmit, so MUST be a BadRead, or success. By definition,
-		// if allJoining, everyone is active. So even if we weren't
-		// successful rewriting ourself, we're guaranteed to be sent
-		// someone else's write through the observer.
+	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
+	if err != nil {
+		return task.fatal(err)
+	}
+	if resubmit {
+		task.enqueueTick(task)
 		return nil
 	}
+	// !resubmit, so MUST be a BadRead, or success. By definition,
+	// if allJoining, everyone is active. So even if we weren't
+	// successful rewriting ourself, we're guaranteed to be sent
+	// someone else's write through the observer.
+	return nil
 }
 
 // installTargetOld
@@ -559,19 +570,18 @@ func (task *installTargetOld) tick() error {
 	if active == nil {
 		return nil
 	}
-	for {
-		_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
-		if err != nil {
-			return task.fatal(err)
-		}
-		if resubmit {
-			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-			continue
-		}
-		// Must be badread, which means again we should receive the
-		// updated topology through the observer.
+
+	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
+	if err != nil {
+		return task.fatal(err)
+	}
+	if resubmit {
+		task.enqueueTick(task)
 		return nil
 	}
+	// Must be badread, which means again we should receive the
+	// updated topology through the observer.
+	return nil
 }
 
 func (task *installTargetOld) calculateTargetTopology() (string, *configuration.Topology, error) {
@@ -780,17 +790,16 @@ func (task *installTargetNew) tick() error {
 	log.Printf("Extending topology. Actives: %v; Passives: %v", active, passive)
 	topology := task.active.Clone()
 	topology.Next().InstalledOnAll = true
-	for {
-		_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
-		if err != nil {
-			return task.fatal(err)
-		}
-		if resubmit {
-			time.Sleep(time.Duration(task.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
-			continue
-		}
-		return nil
+
+	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
+	if err != nil {
+		return task.fatal(err)
 	}
+	if resubmit {
+		task.enqueueTick(task)
+	}
+	return nil
+
 }
 
 type migrate struct {
@@ -877,8 +886,10 @@ func (tt *TopologyTransmogrifier) createTopologyTransaction(read, write *configu
 	txn.SetFInc(uint8(len(active)))
 	if read == nil {
 		txn.SetTopologyVersion(0)
-	} else {
+	} else if read.Next() == nil {
 		txn.SetTopologyVersion(read.Version)
+	} else {
+		txn.SetTopologyVersion(read.Next().Version)
 	}
 
 	return &txn

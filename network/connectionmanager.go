@@ -509,6 +509,7 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
 	}
+	cm.Dispatchers.ProposerDispatcher.SetTopology(topology)
 }
 
 func (cm *ConnectionManager) getTopology(msg *connectionManagerMsgGetTopology) {
@@ -528,6 +529,9 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Address: %v", cm.localHost))
 	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.BootCount))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", cm.topology))
+	if cm.topology != nil && cm.topology.Next() != nil {
+		sc.Emit(fmt.Sprintf("Next Topology: %v", cm.topology.Next()))
+	}
 	serverConnections := make([]string, 0, len(cm.servers))
 	for server := range cm.servers {
 		serverConnections = append(serverConnections, server)
