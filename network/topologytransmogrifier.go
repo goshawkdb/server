@@ -19,19 +19,19 @@ import (
 )
 
 type TopologyTransmogrifier struct {
-	connectionManager *ConnectionManager
-	localConnection   *client.LocalConnection
-	active            *configuration.Topology
-	proposersDrained  *configuration.Topology
-	hostToConnection  map[string]paxos.Connection
-	activeConnections map[common.RMId]paxos.Connection
-	task              topologyTask
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan topologyTransmogrifierMsg
-	listenPort        uint16
-	rng               *rand.Rand
-	localEstablished  chan struct{}
+	connectionManager    *ConnectionManager
+	localConnection      *client.LocalConnection
+	active               *configuration.Topology
+	installedOnProposers *configuration.Topology
+	hostToConnection     map[string]paxos.Connection
+	activeConnections    map[common.RMId]paxos.Connection
+	task                 topologyTask
+	cellTail             *cc.ChanCellTail
+	enqueueQueryInner    func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan            <-chan topologyTransmogrifierMsg
+	listenPort           uint16
+	rng                  *rand.Rand
+	localEstablished     chan struct{}
 }
 
 type topologyTransmogrifierMsg interface {
@@ -66,10 +66,6 @@ func (ttmsac topologyTransmogrifierMsgSetActiveConnections) topologyTransmogrifi
 type topologyTransmogrifierMsgTopologyObserved configuration.Topology
 
 func (ttmvc *topologyTransmogrifierMsgTopologyObserved) topologyTransmogrifierMsgWitness() {}
-
-type topologyTransmogrifierMsgProposersDrained configuration.Topology
-
-func (ttmvc *topologyTransmogrifierMsgProposersDrained) topologyTransmogrifierMsgWitness() {}
 
 type topologyTransmogrifierMsgExe func() error
 
@@ -187,11 +183,6 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 				tt.selectGoal((*configuration.NextConfiguration)(msgT))
 			case topologyTransmogrifierMsgExe:
 				err = msgT()
-			case *topologyTransmogrifierMsgProposersDrained:
-				tt.proposersDrained = (*configuration.Topology)(msgT)
-				if tt.task != nil {
-					err = tt.task.tick()
-				}
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -237,14 +228,19 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 		}
 	}
 
-	var emptyFun func()
+	var installedOnProposers func()
 	if topology.Next() != nil {
-		tt.proposersDrained = nil
-		emptyFun = func() {
-			tt.enqueueQuery((*topologyTransmogrifierMsgProposersDrained)(topology))
+		installedOnProposers = func() {
+			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				tt.installedOnProposers = topology
+				if tt.task != nil {
+					return tt.task.tick()
+				}
+				return nil
+			}))
 		}
 	}
-	tt.connectionManager.SetTopology(topology, emptyFun)
+	tt.connectionManager.SetTopology(topology, installedOnProposers)
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
 		return errors.New("We have been removed from the cluster. Shutting down.")
 	}
@@ -821,15 +817,30 @@ func (task *installTargetNew) tick() error {
 
 type migrate struct {
 	*targetConfig
+	varBarrierReached *configuration.Topology
 }
 
 func (task *migrate) tick() error {
 	if !(task.active.Next() != nil && task.active.Next().Version == task.config.Version) {
 		return task.completed()
+
+	} else if task.varBarrierReached != nil && task.varBarrierReached.Configuration.Equal(task.active.Configuration) {
+		log.Println("Var barrier achieved. Migration can proceed.")
+
+	} else if task.installedOnProposers != nil && task.installedOnProposers.Configuration.Equal(task.active.Configuration) {
+		log.Println("Topology installed on proposers.")
+		topology := task.active
+		task.connectionManager.Dispatchers.VarDispatcher.OnAllCommitted(func() {
+			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				task.varBarrierReached = topology
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			}))
+		})
 	}
-	if task.proposersDrained != nil && task.proposersDrained.Configuration.Equal(task.active.Configuration) {
-		log.Println("Proporsers drained. Starting migration.")
-	}
+
 	return nil
 }
 

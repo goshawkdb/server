@@ -4,10 +4,11 @@ import (
 	"fmt"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
+	"sync/atomic"
 )
 
 type VarDispatcher struct {
@@ -28,6 +29,19 @@ func NewVarDispatcher(count uint8, server *mdbs.MDBServer, lc LocalConnection) *
 
 func (vd *VarDispatcher) ApplyToVar(fun func(*Var, error), createIfMissing bool, vUUId *common.VarUUId) {
 	vd.withVarManager(vUUId, func(vm *VarManager) { vm.ApplyToVar(fun, createIfMissing, vUUId) })
+}
+
+func (vd *VarDispatcher) OnAllCommitted(f func()) {
+	count := int32(vd.ExecutorCount)
+	g := func() {
+		if atomic.AddInt32(&count, -1) == 0 {
+			f()
+		}
+	}
+	for idx, exe := range vd.Executors {
+		mgr := vd.varmanagers[idx]
+		exe.Enqueue(func() { mgr.OnAllCommitted(g) })
+	}
 }
 
 func (vd *VarDispatcher) Status(sc *server.StatusConsumer) {

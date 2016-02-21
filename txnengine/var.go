@@ -324,5 +324,6 @@ func (v *Var) Status(sc *server.StatusConsumer) {
 	v.curFrame.Status(sc.Fork())
 	sc.Emit(fmt.Sprintf("- Subscribers: %v", len(v.subscribers)))
 	sc.Emit(fmt.Sprintf("- Idle? %v", v.isIdle()))
+	sc.Emit(fmt.Sprintf("- OnDisk? %v", v.curFrame.IsOnDisk()))
 	sc.Join()
 }

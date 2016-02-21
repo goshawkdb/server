@@ -35,7 +35,6 @@ type ProposerManager struct {
 	proposals         map[instanceIdPrefix]*proposal
 	proposers         map[common.TxnId]*Proposer
 	topology          *configuration.Topology
-	onDrained         func()
 }
 
 func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerManager {
@@ -48,7 +47,6 @@ func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatche
 		ConnectionManager: cm,
 		Disk:              server,
 		topology:          nil,
-		onDrained:         nil,
 	}
 	return pm
 }
@@ -65,12 +63,10 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (pm *ProposerManager) SetTopology(topology *configuration.Topology, emptyFun func()) {
+func (pm *ProposerManager) SetTopology(topology *configuration.Topology, installed func()) {
 	pm.topology = topology
-	pm.onDrained = emptyFun
-	if pm.onDrained != nil && len(pm.proposers) == 0 {
-		pm.onDrained()
-		pm.onDrained = nil
+	if installed != nil {
+		installed()
 	}
 }
 
@@ -250,10 +246,6 @@ func (pm *ProposerManager) TxnSubmissionAbortReceived(sender common.RMId, txnId 
 // from proposer
 func (pm *ProposerManager) TxnFinished(txnId *common.TxnId) {
 	delete(pm.proposers, *txnId)
-	if pm.onDrained != nil && len(pm.proposers) == 0 {
-		pm.onDrained()
-		pm.onDrained = nil
-	}
 }
 
 // We have an outcome by this point, so we should stop sending proposals.

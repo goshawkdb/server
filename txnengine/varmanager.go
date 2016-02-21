@@ -14,12 +14,13 @@ import (
 
 type VarManager struct {
 	LocalConnection
-	disk       *mdbs.MDBServer
-	active     map[common.VarUUId]*Var
-	exe        *dispatcher.Executor
-	lc         LocalConnection
-	callbacks  []func()
-	beaterLive bool
+	disk           *mdbs.MDBServer
+	active         map[common.VarUUId]*Var
+	exe            *dispatcher.Executor
+	onAllCommitted func()
+	lc             LocalConnection
+	callbacks      []func()
+	beaterLive     bool
 }
 
 func init() {
@@ -50,6 +51,28 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
 	}
+	if vm.onAllCommitted != nil {
+		// this is horrible. WIP. FIXME etc.
+		for uuid, v := range vm.active {
+			if !v.curFrame.IsOnDisk() {
+				fmt.Println(uuid)
+				return
+			}
+		}
+		vm.onAllCommitted()
+		vm.onAllCommitted = nil
+	}
+}
+
+func (vm *VarManager) OnAllCommitted(f func()) {
+	for uuid, v := range vm.active {
+		if !v.curFrame.IsOnDisk() {
+			fmt.Println(uuid)
+			vm.onAllCommitted = f
+			return
+		}
+	}
+	f()
 }
 
 // var.VarLifecycle interface

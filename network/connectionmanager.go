@@ -99,8 +99,8 @@ type connectionManagerMsgGetTopology struct {
 func (cmmgt *connectionManagerMsgGetTopology) connectionManagerMsgWitness() {}
 
 type connectionManagerMsgSetTopology struct {
-	topology *configuration.Topology
-	emptyFun func()
+	topology           *configuration.Topology
+	proposersInstalled func()
 }
 
 func (cmmst *connectionManagerMsgSetTopology) connectionManagerMsgWitness() {}
@@ -186,10 +186,10 @@ func (cm *ConnectionManager) Topology() *configuration.Topology {
 	return nil
 }
 
-func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, emptyFun func()) {
+func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, proposersInstalled func()) {
 	cm.enqueueQuery(&connectionManagerMsgSetTopology{
-		topology: topology,
-		emptyFun: emptyFun,
+		topology:           topology,
+		proposersInstalled: proposersInstalled,
 	})
 }
 
@@ -306,7 +306,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgSenderFinished:
 				cm.removeSender(msgT.Sender, msgT.resultChan)
 			case *connectionManagerMsgSetTopology:
-				cm.updateTopology(msgT.topology, msgT.emptyFun)
+				cm.updateTopology(msgT.topology, msgT.proposersInstalled)
 			case *connectionManagerMsgGetTopology:
 				cm.getTopology(msgT)
 			case *connectionManagerMsgClientEstablished:
@@ -496,7 +496,7 @@ func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
 	}
 }
 
-func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, emptyFun func()) {
+func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, proposersInstalled func()) {
 	if cm.topology != nil && cm.topology.Configuration.Equal(topology.Configuration) {
 		return
 	}
@@ -515,7 +515,7 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, em
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
 	}
-	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, emptyFun)
+	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, proposersInstalled)
 }
 
 func (cm *ConnectionManager) getTopology(msg *connectionManagerMsgGetTopology) {
