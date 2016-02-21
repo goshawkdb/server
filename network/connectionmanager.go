@@ -98,7 +98,10 @@ type connectionManagerMsgGetTopology struct {
 
 func (cmmgt *connectionManagerMsgGetTopology) connectionManagerMsgWitness() {}
 
-type connectionManagerMsgSetTopology configuration.Topology
+type connectionManagerMsgSetTopology struct {
+	topology *configuration.Topology
+	emptyFun func()
+}
 
 func (cmmst *connectionManagerMsgSetTopology) connectionManagerMsgWitness() {}
 
@@ -183,8 +186,11 @@ func (cm *ConnectionManager) Topology() *configuration.Topology {
 	return nil
 }
 
-func (cm *ConnectionManager) SetTopology(topology *configuration.Topology) {
-	cm.enqueueQuery((*connectionManagerMsgSetTopology)(topology))
+func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, emptyFun func()) {
+	cm.enqueueQuery(&connectionManagerMsgSetTopology{
+		topology: topology,
+		emptyFun: emptyFun,
+	})
 }
 
 func (cm *ConnectionManager) AddSender(sender paxos.Sender) {
@@ -300,7 +306,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgSenderFinished:
 				cm.removeSender(msgT.Sender, msgT.resultChan)
 			case *connectionManagerMsgSetTopology:
-				cm.updateTopology((*configuration.Topology)(msgT))
+				cm.updateTopology(msgT.topology, msgT.emptyFun)
 			case *connectionManagerMsgGetTopology:
 				cm.getTopology(msgT)
 			case *connectionManagerMsgClientEstablished:
@@ -490,7 +496,7 @@ func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
 	}
 }
 
-func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
+func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, emptyFun func()) {
 	if cm.topology != nil && cm.topology.Configuration.Equal(topology.Configuration) {
 		return
 	}
@@ -509,7 +515,7 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
 	}
-	cm.Dispatchers.ProposerDispatcher.SetTopology(topology)
+	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, emptyFun)
 }
 
 func (cm *ConnectionManager) getTopology(msg *connectionManagerMsgGetTopology) {

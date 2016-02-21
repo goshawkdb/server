@@ -12,6 +12,7 @@ import (
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
+	"sync/atomic"
 )
 
 type ProposerDispatcher struct {
@@ -64,10 +65,20 @@ func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnSubmissionAbortReceived(sender, txnId) })
 }
 
-func (pd *ProposerDispatcher) SetTopology(topology *configuration.Topology) {
+func (pd *ProposerDispatcher) SetTopology(topology *configuration.Topology, emptyFun func()) {
+	if emptyFun != nil {
+		count := int32(pd.ExecutorCount)
+		orig := emptyFun
+		emptyFun = func() {
+			if atomic.AddInt32(&count, -1) == 0 {
+				orig()
+			}
+		}
+	}
+
 	for idx, exe := range pd.Executors {
 		mgr := pd.proposermanagers[idx]
-		exe.Enqueue(func() { mgr.SetTopology(topology) })
+		exe.Enqueue(func() { mgr.SetTopology(topology, emptyFun) })
 	}
 }
 
