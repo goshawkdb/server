@@ -260,25 +260,24 @@ func (ba *BallotAccumulator) Status(sc *server.StatusConsumer) {
 func (vb *varBallot) CalculateResult(br badReads, clock *eng.VectorClock) {
 	vb.result = eng.NewBallot(vb.vUUId, eng.Commit, eng.NewVectorClock())
 	for _, rmBal := range vb.rmToBallot {
-		vb.combineVote(rmBal, br)
+		vb.combineVote(rmBal)
+	}
+	if vb.result.Vote == eng.AbortBadRead {
+		br.combine(vb.result)
 	}
 	if !vb.result.Aborted() {
 		clock.MergeInMax(vb.result.Clock)
 	}
 }
 
-func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
+func (vb *varBallot) combineVote(rmBal *rmBallot) {
 	cur := vb.result
 	new := rmBal.ballot
 
-	if new.Vote == eng.AbortBadRead {
-		br.combine(rmBal)
-	}
+	curVCElem := cur.Clock.Clock[*vb.vUUId]
+	newVCElem := new.Clock.Clock[*vb.vUUId]
 
 	switch {
-	case cur.Vote == eng.Commit && new.Vote == eng.Commit:
-		cur.Clock.MergeInMax(new.Clock)
-
 	case cur.Vote == eng.AbortDeadlock && len(cur.Clock.Clock) == 0:
 		// Do nothing - ignore the new ballot
 	case new.Vote == eng.AbortDeadlock && len(new.Clock.Clock) == 0:
@@ -286,43 +285,41 @@ func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
 		cur.Vote = eng.AbortDeadlock
 		cur.Clock = new.Clock
 
-	case cur.Vote == eng.Commit:
-		// new.Vote != eng.Commit otherwise we'd have hit first case.
-		cur.Vote = new.Vote
-		cur.Clock = new.Clock.Clone()
+	case cur.Vote == eng.AbortBadRead && new.Vote == eng.AbortBadRead:
+		// special case because we have the exact frames
+		curBRTxnId := common.MakeTxnId(cur.VoteCap.AbortBadRead().TxnId())
+		newBRTxnId := common.MakeTxnId(new.VoteCap.AbortBadRead().TxnId())
+		if newVCElem > curVCElem || (newVCElem == curVCElem && newBRTxnId.Compare(curBRTxnId) == common.GT) {
+			cur.Clock = new.Clock
+		}
 
-	case new.Vote == eng.Commit:
-		// But we know cur.Vote != eng.Commit. Do nothing.
+	case cur.Vote == new.Vote:
+		if newVCElem > curVCElem {
+			cur.Clock = new.Clock
+		}
 
-	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortDeadlock:
-		cur.Clock.MergeInMax(new.Clock)
+		// commit vs (deadlock || badread)
+	case cur.Vote == eng.Commit && new.Vote != eng.Commit:
+		// new will carry the frametxn. new wins if it's the same frame (ish)
+		curVCElem--
+		if newVCElem >= curVCElem {
+			// technically, may not be the same frame, but safe to go with abort
+			cur.Vote = new.Vote
+			cur.Clock = new.Clock
+		}
+	case cur.Vote != eng.Commit && new.Vote == eng.Commit:
+		newVCElem--
+		if newVCElem > curVCElem { // very deliberately > and not >=
+			cur.Vote = new.Vote
+			cur.Clock = new.Clock
+		}
 
-	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortBadRead &&
-		new.Clock.Clock[*vb.vUUId] < cur.Clock.Clock[*vb.vUUId]:
-		// The new Deadlock is strictly in the past of the current
-		// BadRead, so we stay on the badread.
-		cur.Clock.MergeInMax(new.Clock)
-
-	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortBadRead:
-		// The new Deadlock is equal or greater than (by clock local
-		// elem) than the current Badread. We should switch to the
-		// Deadlock
-		cur.Vote = eng.AbortDeadlock
-		cur.Clock.MergeInMax(new.Clock)
-
-	case cur.Vote == eng.AbortBadRead: // && new.Vote == eng.AbortBadRead
-		cur.Clock.MergeInMax(new.Clock)
-
-	case new.Clock.Clock[*vb.vUUId] > cur.Clock.Clock[*vb.vUUId]:
-		// && cur.Vote == AbortDeadlock && new.Vote == AbortBadRead. The
-		// new BadRead is strictly in the future of the cur Deadlock, so
-		// we should switch to the BadRead.
-		cur.Vote = eng.AbortBadRead
-		cur.Clock.MergeInMax(new.Clock)
-
+		// deadlock vs badread
 	default:
-		// cur.Vote == AbortDeadlock && new.Vote == AbortBadRead.
-		cur.Clock.MergeInMax(new.Clock)
+		if newVCElem > curVCElem || (newVCElem == curVCElem && new.Vote == eng.AbortBadRead) {
+			cur.Vote = new.Vote
+			cur.Clock = new.Clock
+		}
 	}
 }
 
@@ -363,9 +360,9 @@ func NewBadReads() badReads {
 	return make(map[common.VarUUId]*badReadAction)
 }
 
-func (br badReads) combine(rmBal *rmBallot) {
-	clock := rmBal.ballot.Clock
-	badRead := rmBal.ballot.VoteCap.AbortBadRead()
+func (br badReads) combine(ballot *eng.Ballot) {
+	clock := ballot.Clock
+	badRead := ballot.VoteCap.AbortBadRead()
 	txnId := common.MakeTxnId(badRead.TxnId())
 	actions := badRead.TxnActions()
 
@@ -374,10 +371,10 @@ func (br badReads) combine(rmBal *rmBallot) {
 		vUUId := common.MakeVarUUId(action.VarId())
 
 		if bra, found := br[*vUUId]; found {
-			bra.combine(&action, rmBal, txnId, clock.Clock[*vUUId])
+			bra.combine(&action, ballot, txnId, clock.Clock[*vUUId])
 		} else if action.Which() == msgs.ACTION_READ {
 			br[*vUUId] = &badReadAction{
-				rmBallot:  rmBal,
+				Ballot:    ballot,
 				vUUId:     vUUId,
 				txnId:     common.MakeTxnId(action.Read().Version()),
 				clockElem: clock.Clock[*vUUId] - 1,
@@ -385,7 +382,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 			}
 		} else {
 			br[*vUUId] = &badReadAction{
-				rmBallot:  rmBal,
+				Ballot:    ballot,
 				vUUId:     vUUId,
 				txnId:     txnId,
 				clockElem: clock.Clock[*vUUId],
@@ -396,21 +393,21 @@ func (br badReads) combine(rmBal *rmBallot) {
 }
 
 type badReadAction struct {
-	*rmBallot
+	*eng.Ballot
 	vUUId     *common.VarUUId
 	txnId     *common.TxnId
 	clockElem uint64
 	action    *msgs.Action
 }
 
-func (bra *badReadAction) set(action *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
-	bra.rmBallot = rmBal
+func (bra *badReadAction) set(action *msgs.Action, ballot *eng.Ballot, txnId *common.TxnId, clockElem uint64) {
+	bra.Ballot = ballot
 	bra.txnId = txnId
 	bra.clockElem = clockElem
 	bra.action = action
 }
 
-func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
+func (bra *badReadAction) combine(action *msgs.Action, ballot *eng.Ballot, txnId *common.TxnId, clockElem uint64) {
 	newActionType := action.Which()
 	braActionType := bra.action.Which()
 
@@ -418,7 +415,7 @@ func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *c
 	case braActionType != msgs.ACTION_READ && newActionType != msgs.ACTION_READ:
 		// They're both writes in some way. Just order the txns
 		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
-			bra.set(action, rmBal, txnId, clockElem)
+			bra.set(action, ballot, txnId, clockElem)
 		}
 
 	case braActionType == msgs.ACTION_READ && newActionType == msgs.ACTION_READ:
@@ -429,7 +426,7 @@ func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *c
 		if !bytes.Equal(braRead.Version(), newRead.Version()) {
 			// They read different versions, but which version was the latter?
 			if clockElem > bra.clockElem {
-				bra.set(action, rmBal, common.MakeTxnId(newRead.Version()), clockElem)
+				bra.set(action, ballot, common.MakeTxnId(newRead.Version()), clockElem)
 			}
 		}
 
@@ -439,10 +436,10 @@ func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *c
 			// existing read, but it's better to have the write
 			// as we can update the client with the actual
 			// value.
-			bra.set(action, rmBal, txnId, clockElem)
+			bra.set(action, ballot, txnId, clockElem)
 		} else if clockElem > bra.clockElem {
 			// The write is after than the read
-			bra.set(action, rmBal, txnId, clockElem)
+			bra.set(action, ballot, txnId, clockElem)
 		}
 
 	default: // Existing is not a read, but new is a read.
@@ -452,7 +449,7 @@ func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *c
 		if !bytes.Equal(bra.txnId[:], newRead.Version()) {
 			if clockElem > bra.clockElem {
 				// The read must be of some value which was written after our existing write.
-				bra.set(action, rmBal, common.MakeTxnId(newRead.Version()), clockElem)
+				bra.set(action, ballot, common.MakeTxnId(newRead.Version()), clockElem)
 			}
 		}
 	}
