@@ -95,13 +95,17 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	txnId := common.MakeTxnId(txnCap.Id())
 	server.Log(txnId, "Submitting txn")
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
+	var removeSenderCh chan server.EmptyStruct
 	if delay == 0 {
 		sts.connectionManager.AddSender(txnSender)
 	} else {
+		removeSenderCh = make(chan server.EmptyStruct)
 		go func() {
 			// fmt.Printf("%v ", delay)
 			time.Sleep(delay)
 			sts.connectionManager.AddSender(txnSender)
+			<-removeSenderCh
+			sts.connectionManager.RemoveSenderAsync(txnSender)
 		}()
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
@@ -109,7 +113,11 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	shutdownFun := func(shutdown bool) {
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
-		sts.connectionManager.RemoveSenderAsync(txnSender)
+		if delay == 0 {
+			sts.connectionManager.RemoveSenderAsync(txnSender)
+		} else {
+			close(removeSenderCh)
+		}
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connectionManager, acceptors...)
 		if shutdown {
 			if txnCap.Retry() {
