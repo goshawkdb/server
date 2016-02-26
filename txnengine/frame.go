@@ -12,6 +12,8 @@ import (
 	"sort"
 )
 
+var AbortRollError = fmt.Errorf("Not leading hashcode")
+
 type frame struct {
 	parent           *frame
 	child            *frame
@@ -679,7 +681,7 @@ func (fo *frameOpen) maybeStartRoll() {
 			if outcome == nil || outcome.Which() != msgs.OUTCOME_COMMIT {
 				fo.v.applyToVar(func() {
 					fo.rollActive = false
-					if outcome != nil {
+					if err != AbortRollError {
 						fo.maybeScheduleRoll()
 					}
 				})

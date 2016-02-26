@@ -214,6 +214,9 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// that state/proposer. We should now immediately reply
 				// with a TLC.
 				server.Log(txnId, "Sending immediate TLC for unknown abort learner")
+				// We have no state here, and if we receive further 2Bs
+				// from the repeating sender at the acceptor then we will
+				// send further TLCs. So the use of OSS here is correct.
 				NewOneShotSender(MakeTxnLocallyCompleteMsg(txnId), pm.ConnectionManager, sender)
 			}
 		}

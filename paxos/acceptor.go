@@ -230,19 +230,14 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	allocs := aalc.ballotAccumulator.Txn.Allocations()
 	aalc.pendingTLC = make(map[common.RMId]server.EmptyStruct, allocs.Len())
 	aalc.tgcRecipients = make([]common.RMId, 0, allocs.Len())
-	twoBRecipients := make([]common.RMId, 0, allocs.Len())
-	aborted := (*msgs.Outcome)(aalc.outcomeOnDisk).Which() == msgs.OUTCOME_ABORT
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
 		active := alloc.Active() != 0
 		rmId := common.RMId(alloc.RmId())
 		if aalc.sendToAllOnDisk || active {
-			twoBRecipients = append(twoBRecipients, rmId)
 			if _, found := aalc.tlcsReceived[rmId]; !found {
 				aalc.pendingTLC[rmId] = server.EmptyStructVal
 			}
-		}
-		if !aborted || active {
 			aalc.tgcRecipients = append(aalc.tgcRecipients, rmId)
 		}
 	}
@@ -253,7 +248,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	} else {
 		server.Log(aalc.txnId, "Adding sender for 2B")
 		submitter := common.RMId(aalc.ballotAccumulator.Txn.Submitter())
-		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, twoBRecipients...)
+		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, aalc.tgcRecipients...)
 		aalc.acceptorManager.ConnectionManager.AddSender(aalc.twoBSender)
 	}
 }
@@ -330,6 +325,8 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() {
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(adfd.txnId[:])
 		server.Log(adfd.txnId, "Sending TGC to", adfd.tgcRecipients)
+		// If this gets lost it doesn't matter - the TLC will eventually
+		// get resent and we'll then send out another TGC.
 		NewOneShotSender(server.SegToBytes(seg), adfd.acceptorManager.ConnectionManager, adfd.tgcRecipients...)
 	}
 }

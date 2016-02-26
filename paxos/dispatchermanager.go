@@ -50,6 +50,7 @@ func (d *Dispatchers) DispatchMessage(sender common.RMId, msgType msgs.Message_W
 		connNumber := binary.BigEndian.Uint32(txnId[8:12])
 		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
 		if conn := d.connectionManager.GetClient(bootNumber, connNumber); conn == nil {
+			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
 			NewOneShotSender(MakeTxnSubmissionCompleteMsg(txnId), d.connectionManager, sender)
 		} else {
 			conn.SubmissionOutcomeReceived(sender, txnId, &outcome)
