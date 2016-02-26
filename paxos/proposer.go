@@ -279,6 +279,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			pro.proposerManager.FinishProposers(pro.txnId)
 			pro.proposerManager.TxnFinished(pro.txnId)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
+			// This is wrong - should be repeating sender. FIXME.
 			NewOneShotSender(tlcMsg, pro.proposerManager.ConnectionManager, knownAcceptors...)
 			return
 		}

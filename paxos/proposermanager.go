@@ -188,6 +188,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// that state/proposer. We should now immediately reply
 				// with a TLC.
 				server.Log(txnId, "Sending immediate TLC for unknown abort learner")
+				// This is wrong - should be a repeating sender. FIXME.
 				NewOneShotSender(MakeTxnLocallyCompleteMsg(txnId), pm.ConnectionManager, sender)
 			}
 		}

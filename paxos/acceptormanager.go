@@ -157,6 +157,7 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 		am.ensureInstance(txnId, &instId, vUUId).OneATxnVotesReceived(&proposal, &promise)
 	}
 
+	// The proposal senders are repeating, so this use of OSS is fine.
 	NewOneShotSender(server.SegToBytes(replySeg), am.ConnectionManager, sender)
 }
 
@@ -206,6 +207,7 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *commo
 			failure.SetRoundNumberTooLow(uint32(inst.promiseNum >> 32))
 		}
 		server.Log(txnId, "Sending 2B failures to", sender, "; instance:", instanceRMId)
+		// The proposal senders are repeating, so this use of OSS is fine.
 		NewOneShotSender(server.SegToBytes(replySeg), am.ConnectionManager, sender)
 	}
 }
@@ -227,6 +229,8 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(txnId[:])
 		server.Log(txnId, "Sending single TGC to", sender)
+		// Use of OSS here is ok because this is the default action on
+		// not finding state.
 		NewOneShotSender(server.SegToBytes(seg), am.ConnectionManager, sender)
 	}
 }
@@ -339,7 +343,7 @@ func (i *instance) TwoATxnVotesReceived(request *msgs.TxnVoteAcceptRequest) (acc
 	if roundNumber == i.acceptedNum && i.accepted != nil {
 		// duplicate 2a. Don't issue any response.
 		return
-	} else if roundNumber == i.promiseNum || i.promiseNum == 0 {
+	} else if roundNumber >= i.promiseNum || i.promiseNum == 0 {
 		i.promiseNum = roundNumber
 		i.acceptedNum = roundNumber
 		ballot := request.Ballot()

@@ -330,6 +330,8 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() {
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(adfd.txnId[:])
 		server.Log(adfd.txnId, "Sending TGC to", adfd.tgcRecipients)
+		// If this gets lost it doesn't matter - the TLC will eventually
+		// get resent and we'll then send out another TGC.
 		NewOneShotSender(server.SegToBytes(seg), adfd.acceptorManager.ConnectionManager, adfd.tgcRecipients...)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"math/rand"
 	"sort"
 	"time"
@@ -29,8 +30,6 @@ type SimpleTxnSubmitter struct {
 	rng                 *rand.Rand
 	bufferedSubmissions []func()
 }
-
-var AbortRollError = fmt.Errorf("Not leading hashcode")
 
 type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
 type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
@@ -83,6 +82,7 @@ func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn
 	if consumer, found := sts.outcomeConsumers[*txnId]; found {
 		consumer(sender, txnId, outcome)
 	} else {
+		// OSS is safe here - it's the default action on receipt of an unknown txnid
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connectionManager, sender)
 	}
 }
@@ -118,9 +118,13 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		} else {
 			close(removeSenderCh)
 		}
+		// OSS is safe here - see above.
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connectionManager, acceptors...)
 		if shutdown {
 			if txnCap.Retry() {
+				// Don't like this. What happens if this msg doesn't make
+				// it? I guess worst case is it's a leak. This needs
+				// fixing eventually.
 				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connectionManager, activeRMs...)
 			}
 			continuation(txnId, nil)
@@ -297,7 +301,7 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 			}
 
 			if clientAction.Which() == cmsgs.CLIENTACTION_ROLL && hashCodes[0] != sts.rmId {
-				return nil, AbortRollError
+				return nil, eng.AbortRollError
 			}
 		}
 		hashCodes = hashCodes[:sts.topology.TwoFInc]
