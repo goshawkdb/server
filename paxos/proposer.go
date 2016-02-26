@@ -279,7 +279,10 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			pro.proposerManager.FinishProposers(pro.txnId)
 			pro.proposerManager.TxnFinished(pro.txnId)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
-			// This is wrong - should be repeating sender. FIXME.
+			// We are destroying out state here. Thus even if this msg
+			// goes missing, if the acceptor sends us further 2Bs then
+			// we'll send back further TLCs from proposer manager. So the
+			// use of OSS here is correct.
 			NewOneShotSender(tlcMsg, pro.proposerManager.ConnectionManager, knownAcceptors...)
 			return
 		}
