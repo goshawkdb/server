@@ -32,6 +32,7 @@ type Configuration struct {
 type NextConfiguration struct {
 	*Configuration
 	InstalledOnAll bool
+	Pending        Conds
 }
 
 func LoadConfigurationFromPath(path string) (*Configuration, error) {
@@ -145,9 +146,11 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	if config.Which() == msgs.CONFIGURATION_TRANSITIONINGTO {
 		next := config.TransitioningTo()
 		nextConfig := next.Configuration()
+		pending := next.Pending()
 		c.nextConfiguration = &NextConfiguration{
 			Configuration:  ConfigurationFromCap(&nextConfig),
 			InstalledOnAll: next.InstalledOnAll(),
+			Pending:        ConditionsFromCap(&pending),
 		}
 	}
 
@@ -185,6 +188,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 		return a.nextConfiguration == b.nextConfiguration
 	}
 	return a.nextConfiguration.InstalledOnAll == b.nextConfiguration.InstalledOnAll &&
+		a.nextConfiguration.Pending.Equal(b.nextConfiguration.Pending) &&
 		a.nextConfiguration.Configuration.Equal(b.nextConfiguration.Configuration)
 }
 
@@ -245,9 +249,15 @@ func (config *Configuration) Clone() *Configuration {
 		clone.fingerprints[k] = v
 	}
 	if config.nextConfiguration != nil {
+		// Assumption is that conditions are immutable. So the only
+		// thing we'll want to do is shrink the list, so we do a copy of
+		// the list, not a deep copy of the conditions.
+		pending := make([]Cond, len(config.nextConfiguration.Pending))
+		copy(pending, config.nextConfiguration.Pending)
 		clone.nextConfiguration = &NextConfiguration{
 			Configuration:  config.nextConfiguration.Configuration.Clone(),
 			InstalledOnAll: config.nextConfiguration.InstalledOnAll,
+			Pending:        pending,
 		}
 	}
 	return clone
@@ -298,6 +308,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		next := cap.TransitioningTo()
 		next.SetConfiguration(config.nextConfiguration.Configuration.AddToSegAutoRoot(seg))
 		next.SetInstalledOnAll(config.nextConfiguration.InstalledOnAll)
+		next.SetPending(config.nextConfiguration.Pending.AddToSeg(seg))
 	}
 	return cap
 }
@@ -372,4 +383,212 @@ func LocalAddresses() ([]net.IP, error) {
 		result[idx] = ip
 	}
 	return result, nil
+}
+
+type Conds []Cond
+
+func (a Conds) Equal(b Conds) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for idx, aCond := range a {
+		bCond := b[idx]
+		if !aCond.Equal(bCond) {
+			return false
+		}
+	}
+	return true
+}
+func (c Conds) AddToSeg(seg *capn.Segment) msgs.Condition_List {
+	cap := msgs.NewConditionList(seg, len(c))
+	for idx, cond := range c {
+		cap.Set(idx, cond.AddToSeg(seg))
+	}
+	return cap
+}
+
+func (c Conds) String() string {
+	str := ""
+	for k, v := range c {
+		str += fmt.Sprintf("\n  %v: %v", k, v)
+	}
+	if str == "" {
+		return ""
+	}
+	return str[1:]
+}
+
+type Cond interface {
+	Equal(Cond) bool
+	AddToSeg(seg *capn.Segment) msgs.Condition
+	condWitness()
+}
+
+func ConditionsFromCap(condsCap *msgs.Condition_List) Conds {
+	conds := make([]Cond, condsCap.Len())
+	for idx := range conds {
+		condCap := condsCap.At(idx)
+		conds[idx] = conditionFromCap(&condCap)
+	}
+	return conds
+}
+
+func conditionFromCap(condCap *msgs.Condition) Cond {
+	switch condCap.Which() {
+	case msgs.CONDITION_AND:
+		condAnd := condCap.And()
+		left := condAnd.Left()
+		right := condAnd.Right()
+		return &Conjunction{
+			Left:  conditionFromCap(&left),
+			Right: conditionFromCap(&right),
+		}
+	case msgs.CONDITION_OR:
+		condOr := condCap.Or()
+		left := condOr.Left()
+		right := condOr.Right()
+		return &Disjunction{
+			Left:  conditionFromCap(&left),
+			Right: conditionFromCap(&right),
+		}
+	case msgs.CONDITION_GENERATOR:
+		condGen := condCap.Generator()
+		gen := &Generator{
+			RMId:     common.RMId(condGen.RmId()),
+			PermLen:  condGen.PermLen(),
+			Start:    condGen.Start(),
+			Includes: condGen.Includes(),
+		}
+		if condGen.Which() == msgs.GENERATOR_LENSIMPLE {
+			gen.Len = condGen.LenSimple()
+		} else {
+			lai := condGen.LenAdjustIntersect()
+			gen.LenAdjustIntersect = make([]common.RMId, lai.Len())
+			for idx := range gen.LenAdjustIntersect {
+				gen.LenAdjustIntersect[idx] = common.RMId(lai.At(idx))
+			}
+		}
+		return gen
+	default:
+		panic(fmt.Sprintf("Unexpected Condition type (%v)", condCap.Which()))
+		return nil
+	}
+}
+
+type Conjunction struct {
+	Left  Cond
+	Right Cond
+}
+
+func (c *Conjunction) condWitness()   {}
+func (c *Conjunction) String() string { return fmt.Sprintf("(%v ∧ %v)", c.Left, c.Right) }
+
+func (a *Conjunction) Equal(b Cond) bool {
+	bConj, ok := b.(*Conjunction)
+	if !ok {
+		return false
+	}
+	if a == nil || b == nil || bConj == nil {
+		return a == b || a == bConj
+	}
+	return a.Left.Equal(bConj.Left) && a.Right.Equal(bConj.Right)
+}
+
+func (c *Conjunction) AddToSeg(seg *capn.Segment) msgs.Condition {
+	conjCap := msgs.NewConjunction(seg)
+	conjCap.SetLeft(c.Left.AddToSeg(seg))
+	conjCap.SetRight(c.Right.AddToSeg(seg))
+	condCap := msgs.NewCondition(seg)
+	condCap.SetAnd(conjCap)
+	return condCap
+}
+
+type Disjunction struct {
+	Left  Cond
+	Right Cond
+}
+
+func (d *Disjunction) condWitness()   {}
+func (d *Disjunction) String() string { return fmt.Sprintf("(%v ∨ %v)", d.Left, d.Right) }
+
+func (a *Disjunction) Equal(b Cond) bool {
+	bDisj, ok := b.(*Disjunction)
+	if !ok {
+		return false
+	}
+	if a == nil || b == nil || bDisj == nil {
+		return a == b || a == bDisj
+	}
+	return a.Left.Equal(bDisj.Left) && a.Right.Equal(bDisj.Right)
+}
+
+func (d *Disjunction) AddToSeg(seg *capn.Segment) msgs.Condition {
+	disjCap := msgs.NewDisjunction(seg)
+	disjCap.SetLeft(d.Left.AddToSeg(seg))
+	disjCap.SetRight(d.Right.AddToSeg(seg))
+	condCap := msgs.NewCondition(seg)
+	condCap.SetOr(disjCap)
+	return condCap
+}
+
+type Generator struct {
+	RMId               common.RMId
+	PermLen            uint8
+	Start              uint8
+	Len                uint8
+	LenAdjustIntersect common.RMIds
+	Includes           bool
+}
+
+func (g *Generator) condWitness() {}
+func (g *Generator) String() string {
+	op := "∈"
+	if !g.Includes {
+		op = "∉"
+	}
+	start := ""
+	if g.Start > 0 {
+		start = fmt.Sprintf("%v", g.Start)
+	}
+	end := fmt.Sprintf("%v", g.Start+g.Len)
+	if len(g.LenAdjustIntersect) > 0 {
+		set := ""
+		for _, rmId := range g.LenAdjustIntersect {
+			set += fmt.Sprintf(",%s", rmId)
+		}
+		end = fmt.Sprintf("%v+|(p,%v)[:%v] ∩ {%v}|", g.Start, g.PermLen, g.Start+g.Len, set[1:])
+	}
+	return fmt.Sprintf("%v %v (p,%v)[%s:%v]", g.RMId, op, g.PermLen, start, end)
+}
+
+func (a *Generator) Equal(b Cond) bool {
+	bGen, ok := b.(*Generator)
+	if !ok {
+		return false
+	}
+	if a == nil || b == nil || bGen == nil {
+		return a == b || a == bGen
+	}
+	return a.RMId == bGen.RMId && a.PermLen == bGen.PermLen && a.Start == bGen.Start && a.Len == bGen.Len &&
+		a.Includes == bGen.Includes && a.LenAdjustIntersect.Equal(bGen.LenAdjustIntersect)
+}
+
+func (g *Generator) AddToSeg(seg *capn.Segment) msgs.Condition {
+	genCap := msgs.NewGenerator(seg)
+	genCap.SetRmId(uint32(g.RMId))
+	genCap.SetPermLen(g.PermLen)
+	genCap.SetStart(g.Start)
+	genCap.SetIncludes(g.Includes)
+	if len(g.LenAdjustIntersect) > 0 {
+		rmIds := seg.NewUInt32List(len(g.LenAdjustIntersect))
+		for idx, rmId := range g.LenAdjustIntersect {
+			rmIds.Set(idx, uint32(rmId))
+		}
+		genCap.SetLenAdjustIntersect(rmIds)
+	} else {
+		genCap.SetLenSimple(g.Len)
+	}
+	condCap := msgs.NewCondition(seg)
+	condCap.SetGenerator(genCap)
+	return condCap
 }
