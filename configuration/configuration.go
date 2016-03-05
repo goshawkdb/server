@@ -31,13 +31,65 @@ type Configuration struct {
 
 type NextConfiguration struct {
 	*Configuration
-	InstalledOnAll bool
+	AllHosts       []string
+	NewRMIds       common.RMIds
+	PendingInstall common.RMIds
 	Pending        Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n InstalledOnAll: %v;\n Pending:%v;\n Configuration: %v",
-		next.InstalledOnAll, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n PendingInstall: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.PendingInstall, next.Pending, next.Configuration)
+}
+
+func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	aAllHosts, bAllHosts := a.AllHosts, b.AllHosts
+	if len(aAllHosts) != len(bAllHosts) {
+		return false
+	}
+	for idx, aHost := range aAllHosts {
+		if aHost != bAllHosts[idx] {
+			return false
+		}
+	}
+	return a.NewRMIds.Equal(b.NewRMIds) &&
+		a.PendingInstall.Equal(b.PendingInstall) &&
+		a.Pending.Equal(b.Pending) &&
+		a.Configuration.Equal(b.Configuration)
+}
+
+func (next *NextConfiguration) Clone() *NextConfiguration {
+	if next == nil {
+		return nil
+	}
+
+	allHosts := make([]string, len(next.AllHosts))
+	copy(allHosts, next.AllHosts)
+
+	newRMIds := make([]common.RMId, len(next.NewRMIds))
+	copy(newRMIds, next.NewRMIds)
+
+	pendingInstall := make([]common.RMId, len(next.PendingInstall))
+	copy(pendingInstall, next.PendingInstall)
+
+	// Assumption is that conditions are immutable. So the only thing
+	// we'll want to do is shrink the map, so we do a copy of the map,
+	// not a deep copy of the conditions.
+	pending := make(map[common.RMId]Cond, len(next.Pending))
+	for k, v := range next.Pending {
+		pending[k] = v
+	}
+
+	return &NextConfiguration{
+		Configuration:  next.Configuration.Clone(),
+		AllHosts:       allHosts,
+		NewRMIds:       newRMIds,
+		PendingInstall: pendingInstall,
+		Pending:        pending,
+	}
 }
 
 func LoadConfigurationFromPath(path string) (*Configuration, error) {
@@ -151,10 +203,26 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	if config.Which() == msgs.CONFIGURATION_TRANSITIONINGTO {
 		next := config.TransitioningTo()
 		nextConfig := next.Configuration()
+
+		newRMIdsCap := next.NewRMIds()
+		newRMIds := make([]common.RMId, newRMIdsCap.Len())
+		for idx := range newRMIds {
+			newRMIds[idx] = common.RMId(newRMIdsCap.At(idx))
+		}
+
+		pendingInstallCap := next.PendingInstall()
+		pendingInstall := make([]common.RMId, pendingInstallCap.Len())
+		for idx := range pendingInstall {
+			pendingInstall[idx] = common.RMId(pendingInstallCap.At(idx))
+		}
+
 		pending := next.Pending()
+
 		c.nextConfiguration = &NextConfiguration{
 			Configuration:  ConfigurationFromCap(&nextConfig),
-			InstalledOnAll: next.InstalledOnAll(),
+			AllHosts:       next.AllHosts().ToArray(),
+			NewRMIds:       newRMIds,
+			PendingInstall: pendingInstall,
 			Pending:        ConditionsFromCap(&pending),
 		}
 	}
@@ -189,12 +257,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			return false
 		}
 	}
-	if a.nextConfiguration == nil || b.nextConfiguration == nil {
-		return a.nextConfiguration == b.nextConfiguration
-	}
-	return a.nextConfiguration.InstalledOnAll == b.nextConfiguration.InstalledOnAll &&
-		a.nextConfiguration.Pending.Equal(b.nextConfiguration.Pending) &&
-		a.nextConfiguration.Configuration.Equal(b.nextConfiguration.Configuration)
+	return a.nextConfiguration.Equal(b.nextConfiguration)
 }
 
 func (config *Configuration) String() string {
@@ -239,9 +302,10 @@ func (config *Configuration) Clone() *Configuration {
 		MaxRMCount:                    config.MaxRMCount,
 		AsyncFlush:                    config.AsyncFlush,
 		ClientCertificateFingerprints: make([]string, len(config.ClientCertificateFingerprints)),
-		rms:          make([]common.RMId, len(config.rms)),
-		rmsRemoved:   make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
-		fingerprints: make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
+		rms:               make([]common.RMId, len(config.rms)),
+		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
+		fingerprints:      make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
+		nextConfiguration: config.nextConfiguration.Clone(),
 	}
 
 	copy(clone.Hosts, config.Hosts)
@@ -252,20 +316,6 @@ func (config *Configuration) Clone() *Configuration {
 	}
 	for k, v := range config.fingerprints {
 		clone.fingerprints[k] = v
-	}
-	if config.nextConfiguration != nil {
-		// Assumption is that conditions are immutable. So the only
-		// thing we'll want to do is shrink the map, so we do a copy of
-		// the map, not a deep copy of the conditions.
-		pending := make(map[common.RMId]Cond, len(config.nextConfiguration.Pending))
-		for k, v := range config.nextConfiguration.Pending {
-			pending[k] = v
-		}
-		clone.nextConfiguration = &NextConfiguration{
-			Configuration:  config.nextConfiguration.Configuration.Clone(),
-			InstalledOnAll: config.nextConfiguration.InstalledOnAll,
-			Pending:        pending,
-		}
 	}
 	return clone
 }
@@ -311,11 +361,30 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 	if config.nextConfiguration == nil {
 		cap.SetStable()
 	} else {
+		nextConfig := config.nextConfiguration
 		cap.SetTransitioningTo()
 		next := cap.TransitioningTo()
-		next.SetConfiguration(config.nextConfiguration.Configuration.AddToSegAutoRoot(seg))
-		next.SetInstalledOnAll(config.nextConfiguration.InstalledOnAll)
-		next.SetPending(config.nextConfiguration.Pending.AddToSeg(seg))
+		next.SetConfiguration(nextConfig.Configuration.AddToSegAutoRoot(seg))
+
+		allHostsCap := seg.NewTextList(len(nextConfig.AllHosts))
+		for idx, host := range nextConfig.AllHosts {
+			allHostsCap.Set(idx, host)
+		}
+		next.SetAllHosts(allHostsCap)
+
+		newRMIdsCap := seg.NewUInt32List(len(nextConfig.NewRMIds))
+		for idx, rmId := range nextConfig.NewRMIds {
+			newRMIdsCap.Set(idx, uint32(rmId))
+		}
+		next.SetNewRMIds(newRMIdsCap)
+
+		pendingInstallCap := seg.NewUInt32List(len(nextConfig.PendingInstall))
+		for idx, rmId := range nextConfig.PendingInstall {
+			pendingInstallCap.Set(idx, uint32(rmId))
+		}
+		next.SetPendingInstall(pendingInstallCap)
+
+		next.SetPending(nextConfig.Pending.AddToSeg(seg))
 	}
 	return cap
 }

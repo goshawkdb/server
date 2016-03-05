@@ -18,10 +18,12 @@ struct Configuration {
   union {
     transitioningTo :group {
       configuration  @9: Configuration;
-      installedOnAll @10: Bool;
-      pending        @11: List(ConditionPair);
+      allHosts       @10: List(Text);
+      newRMIds       @11: List(UInt32);
+      pendingInstall @12: List(UInt32);
+      pending        @13: List(ConditionPair);
     }
-    stable           @12: Void;
+    stable           @14: Void;
   }
 }
 

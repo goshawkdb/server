@@ -19,9 +19,9 @@ const (
 	CONFIGURATION_STABLE          Configuration_Which = 1
 )
 
-func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(16, 7)) }
-func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(16, 7)) }
-func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(16, 7)) }
+func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(16, 10)) }
+func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(16, 10)) }
+func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(16, 10)) }
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
 func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(8)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
@@ -53,13 +53,27 @@ func (s ConfigurationTransitioningTo) Configuration() Configuration {
 func (s ConfigurationTransitioningTo) SetConfiguration(v Configuration) {
 	C.Struct(s).SetObject(5, C.Object(v))
 }
-func (s ConfigurationTransitioningTo) InstalledOnAll() bool     { return C.Struct(s).Get1(49) }
-func (s ConfigurationTransitioningTo) SetInstalledOnAll(v bool) { C.Struct(s).Set1(49, v) }
+func (s ConfigurationTransitioningTo) AllHosts() C.TextList {
+	return C.TextList(C.Struct(s).GetObject(6))
+}
+func (s ConfigurationTransitioningTo) SetAllHosts(v C.TextList) { C.Struct(s).SetObject(6, C.Object(v)) }
+func (s ConfigurationTransitioningTo) NewRMIds() C.UInt32List {
+	return C.UInt32List(C.Struct(s).GetObject(7))
+}
+func (s ConfigurationTransitioningTo) SetNewRMIds(v C.UInt32List) {
+	C.Struct(s).SetObject(7, C.Object(v))
+}
+func (s ConfigurationTransitioningTo) PendingInstall() C.UInt32List {
+	return C.UInt32List(C.Struct(s).GetObject(8))
+}
+func (s ConfigurationTransitioningTo) SetPendingInstall(v C.UInt32List) {
+	C.Struct(s).SetObject(8, C.Object(v))
+}
 func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
-	return ConditionPair_List(C.Struct(s).GetObject(6))
+	return ConditionPair_List(C.Struct(s).GetObject(9))
 }
 func (s ConfigurationTransitioningTo) SetPending(v ConditionPair_List) {
-	C.Struct(s).SetObject(6, C.Object(v))
+	C.Struct(s).SetObject(9, C.Object(v))
 }
 func (s Configuration) SetStable() { C.Struct(s).Set16(8, 1) }
 func (s Configuration) WriteJSON(w io.Writer) error {
@@ -336,17 +350,109 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("\"installedOnAll\":")
+			_, err = b.WriteString("\"allHosts\":")
 			if err != nil {
 				return err
 			}
 			{
-				s := s.InstalledOnAll()
-				buf, err = json.Marshal(s)
+				s := s.AllHosts()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
 				if err != nil {
 					return err
 				}
-				_, err = b.Write(buf)
+			}
+			err = b.WriteByte(',')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("\"newRMIds\":")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.NewRMIds()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(',')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("\"pendingInstall\":")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.PendingInstall()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
 				if err != nil {
 					return err
 				}
@@ -687,17 +793,109 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("installedOnAll = ")
+			_, err = b.WriteString("allHosts = ")
 			if err != nil {
 				return err
 			}
 			{
-				s := s.InstalledOnAll()
-				buf, err = json.Marshal(s)
+				s := s.AllHosts()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
 				if err != nil {
 					return err
 				}
-				_, err = b.Write(buf)
+			}
+			_, err = b.WriteString(", ")
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("newRMIds = ")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.NewRMIds()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
+				if err != nil {
+					return err
+				}
+			}
+			_, err = b.WriteString(", ")
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("pendingInstall = ")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.PendingInstall()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
 				if err != nil {
 					return err
 				}
@@ -768,7 +966,7 @@ func (s Configuration) MarshalCapLit() ([]byte, error) {
 type Configuration_List C.PointerList
 
 func NewConfigurationList(s *C.Segment, sz int) Configuration_List {
-	return Configuration_List(s.NewCompositeList(16, 7, sz))
+	return Configuration_List(s.NewCompositeList(16, 10, sz))
 }
 func (s Configuration_List) Len() int { return C.PointerList(s).Len() }
 func (s Configuration_List) At(i int) Configuration {
