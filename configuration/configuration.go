@@ -35,6 +35,11 @@ type NextConfiguration struct {
 	Pending        Conds
 }
 
+func (next *NextConfiguration) String() string {
+	return fmt.Sprintf("Next Configuration:\n InstalledOnAll: %v;\n Pending:%v;\n Configuration: %v",
+		next.InstalledOnAll, next.Pending, next.Configuration)
+}
+
 func LoadConfigurationFromPath(path string) (*Configuration, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -193,8 +198,8 @@ func (a *Configuration) Equal(b *Configuration) bool {
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, AsyncFlush: %v, RMs: %v}",
-		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.AsyncFlush, config.rms)
+	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, AsyncFlush: %v, RMs: %v, Removed: %v}",
+		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.AsyncFlush, config.rms, config.rmsRemoved)
 }
 
 func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
@@ -250,10 +255,12 @@ func (config *Configuration) Clone() *Configuration {
 	}
 	if config.nextConfiguration != nil {
 		// Assumption is that conditions are immutable. So the only
-		// thing we'll want to do is shrink the list, so we do a copy of
-		// the list, not a deep copy of the conditions.
-		pending := make([]Cond, len(config.nextConfiguration.Pending))
-		copy(pending, config.nextConfiguration.Pending)
+		// thing we'll want to do is shrink the map, so we do a copy of
+		// the map, not a deep copy of the conditions.
+		pending := make(map[common.RMId]Cond, len(config.nextConfiguration.Pending))
+		for k, v := range config.nextConfiguration.Pending {
+			pending[k] = v
+		}
 		clone.nextConfiguration = &NextConfiguration{
 			Configuration:  config.nextConfiguration.Configuration.Clone(),
 			InstalledOnAll: config.nextConfiguration.InstalledOnAll,
@@ -385,52 +392,66 @@ func LocalAddresses() ([]net.IP, error) {
 	return result, nil
 }
 
-type Conds []Cond
+type Conds map[common.RMId]Cond
+
+func ConditionsFromCap(condsCap *msgs.ConditionPair_List) Conds {
+	conds := make(map[common.RMId]Cond, condsCap.Len())
+	for idx, l := 0, condsCap.Len(); idx < l; idx++ {
+		pairCap := condsCap.At(idx)
+		condCap := pairCap.Condition()
+		conds[common.RMId(pairCap.RmId())] = conditionFromCap(&condCap)
+	}
+	return conds
+}
+
+func (cs Conds) DisjoinWith(rmId common.RMId, c Cond) {
+	if cond, found := cs[rmId]; found {
+		cs[rmId] = &Disjunction{
+			Left:  cond,
+			Right: c,
+		}
+	} else {
+		cs[rmId] = c
+	}
+}
 
 func (a Conds) Equal(b Conds) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for idx, aCond := range a {
-		bCond := b[idx]
-		if !aCond.Equal(bCond) {
+	for rmId, aCond := range a {
+		if bCond, found := b[rmId]; !found || !aCond.Equal(bCond) {
 			return false
 		}
 	}
 	return true
 }
-func (c Conds) AddToSeg(seg *capn.Segment) msgs.Condition_List {
-	cap := msgs.NewConditionList(seg, len(c))
-	for idx, cond := range c {
-		cap.Set(idx, cond.AddToSeg(seg))
-	}
-	return cap
-}
 
 func (c Conds) String() string {
 	str := ""
 	for k, v := range c {
-		str += fmt.Sprintf("\n  %v: %v", k, v)
+		str += fmt.Sprintf("\n  %v requests all objects satisfying %v", k, v)
 	}
-	if str == "" {
-		return ""
+	return str
+}
+
+func (c Conds) AddToSeg(seg *capn.Segment) msgs.ConditionPair_List {
+	cap := msgs.NewConditionPairList(seg, len(c))
+	idx := 0
+	for rmId, cond := range c {
+		pair := msgs.NewConditionPair(seg)
+		pair.SetRmId(uint32(rmId))
+		pair.SetCondition(cond.AddToSeg(seg))
+		cap.Set(idx, pair)
+		idx++
 	}
-	return str[1:]
+	return cap
 }
 
 type Cond interface {
 	Equal(Cond) bool
 	AddToSeg(seg *capn.Segment) msgs.Condition
 	condWitness()
-}
-
-func ConditionsFromCap(condsCap *msgs.Condition_List) Conds {
-	conds := make([]Cond, condsCap.Len())
-	for idx := range conds {
-		condCap := condsCap.At(idx)
-		conds[idx] = conditionFromCap(&condCap)
-	}
-	return conds
 }
 
 func conditionFromCap(condCap *msgs.Condition) Cond {

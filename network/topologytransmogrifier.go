@@ -178,8 +178,10 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 			case topologyTransmogrifierMsgSetActiveConnections:
 				err = tt.activeConnectionsChange(msgT)
 			case *topologyTransmogrifierMsgTopologyObserved:
+				log.Println("Observed")
 				err = tt.setActive((*configuration.Topology)(msgT))
 			case *topologyTransmogrifierMsgRequestConfigChange:
+				log.Println("Request change")
 				tt.selectGoal((*configuration.NextConfiguration)(msgT))
 			case topologyTransmogrifierMsgExe:
 				err = msgT()
@@ -228,6 +230,41 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 		}
 	}
 
+	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
+		return errors.New("We have been removed from the cluster. Shutting down.")
+	}
+	oldActive := tt.active
+	tt.active = topology
+
+	if tt.task != nil {
+		if err := tt.task.tick(); err != nil {
+			return err
+		}
+	}
+
+	if tt.task == nil {
+		if next := topology.Next(); next == nil {
+			tt.installTopology(topology)
+			localHost, remoteHosts, err := tt.active.LocalRemoteHosts(tt.listenPort)
+			if err != nil {
+				return err
+			}
+			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
+			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
+
+		} else {
+			tt.selectGoal(next)
+		}
+	}
+	if oldActive == nil && tt.localEstablished != nil {
+		close(tt.localEstablished)
+		tt.localEstablished = nil
+	}
+	return nil
+}
+
+func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology) {
+	log.Println("Installing on proposers")
 	var installedOnProposers func()
 	if topology.Next() != nil {
 		installedOnProposers = func() {
@@ -241,35 +278,6 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 		}
 	}
 	tt.connectionManager.SetTopology(topology, installedOnProposers)
-	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
-		return errors.New("We have been removed from the cluster. Shutting down.")
-	}
-	if tt.active == nil && tt.localEstablished != nil {
-		close(tt.localEstablished)
-		tt.localEstablished = nil
-	}
-	tt.active = topology
-
-	if tt.task != nil {
-		if err := tt.task.tick(); err != nil {
-			return err
-		}
-	}
-
-	if tt.task == nil {
-		if next := topology.Next(); next == nil {
-			localHost, remoteHosts, err := tt.active.LocalRemoteHosts(tt.listenPort)
-			if err != nil {
-				return err
-			}
-			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
-			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
-
-		} else {
-			tt.selectGoal(next)
-		}
-	}
-	return nil
 }
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
@@ -312,12 +320,14 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			return // goal already in progress
 
 		default:
+			log.Println("Abandoning old task")
 			tt.task.abandon()
 			tt.task = nil
 		}
 	}
 
 	if tt.task == nil {
+		log.Println("Creating new task")
 		tt.task = &targetConfig{
 			TopologyTransmogrifier: tt,
 			config:                 goal,
@@ -350,6 +360,7 @@ type topologyTask interface {
 type targetConfig struct {
 	*TopologyTransmogrifier
 	config *configuration.NextConfiguration
+	sender paxos.Sender
 }
 
 func (task *targetConfig) tick() error {
@@ -376,24 +387,46 @@ func (task *targetConfig) tick() error {
 	return nil
 }
 
-func (task *targetConfig) abandon() {}
+func (task *targetConfig) shareGoalWith(rmIds []common.RMId) {
+	log.Println("Adding sender")
+	task.ensureRemoveTaskSender()
+	seg := capn.NewBuffer(nil)
+	msg := msgs.NewRootMessage(seg)
+	msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
+	task.sender = paxos.NewRepeatingSender(server.SegToBytes(seg), rmIds...)
+	task.connectionManager.AddSender(task.sender)
+}
+
+func (task *targetConfig) ensureRemoveTaskSender() {
+	if task.sender != nil {
+		task.connectionManager.RemoveSenderAsync(task.sender)
+		task.sender = nil
+	}
+}
+
+func (task *targetConfig) abandon() {
+	task.ensureRemoveTaskSender()
+}
 
 func (task *targetConfig) goal() *configuration.NextConfiguration {
 	return task.config
 }
 
 func (task *targetConfig) fatal(err error) error {
+	task.ensureRemoveTaskSender()
 	task.task = nil
 	return err
 }
 
 func (task *targetConfig) error(err error) error {
+	task.ensureRemoveTaskSender()
 	task.task = nil
 	log.Println(err)
 	return nil
 }
 
 func (task *targetConfig) completed() error {
+	task.ensureRemoveTaskSender()
 	task.task = nil
 	return nil
 }
@@ -463,6 +496,7 @@ func (task *joinCluster) tick() error {
 		// for joining, it's fatal if we can't find ourself
 		return task.fatal(err)
 	}
+	task.installTopology(task.active)
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 
 	for _, host := range task.config.Hosts {
@@ -493,6 +527,11 @@ func (task *joinCluster) tick() error {
 		}
 	}
 
+	// It's possible that different members of our goal are trying to
+	// achieve different goals, so in all cases, we should share our
+	// goal with them and there should only be one winner.
+	task.shareGoalWith(rmIds)
+
 	if allJoining := rootId == nil; allJoining {
 		return task.allJoining(append(rmIds, task.connectionManager.RMId))
 
@@ -511,14 +550,8 @@ func (task *joinCluster) tick() error {
 		// of the oldies and then we ask them to do the config change
 		// for us.
 
-		seg := capn.NewBuffer(nil)
-		msg := msgs.NewRootMessage(seg)
-		msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
-		sender := paxos.NewRepeatingSender(server.SegToBytes(seg), rmIds...)
-		task.connectionManager.AddSender(sender)
-
 		log.Println("Requesting help from existing cluster members for topology change.")
-		return task.completed()
+		return nil
 	}
 }
 
@@ -530,10 +563,12 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	case err != nil:
 		return task.fatal(err)
 	case resubmit:
+		log.Println("Root creation needs resubmit")
 		task.enqueueTick(task)
 		return nil
 	case targetTopology.Root.VarUUId == nil:
 		// We failed; likely we need to wait for connections to change
+		log.Println("Root creation failed")
 		return nil
 	}
 
@@ -545,11 +580,16 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// sure that all peers are empty and moving to the same topology
 	// is to have all peers as active.
 
-	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
+	activeWithNext := task.active.Clone()
+	activeWithNext.SetNext(&configuration.NextConfiguration{Configuration: targetTopology.Configuration})
+	task.installTopology(activeWithNext)
+
+	result, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
+		log.Println("Topology rewrite needs resubmit", allRMIds, result)
 		task.enqueueTick(task)
 		return nil
 	}
@@ -572,6 +612,8 @@ func (task *installTargetOld) tick() error {
 	if next := task.active.Next(); !(next == nil || next.Version < task.config.Version) {
 		return task.completed()
 	}
+
+	task.shareGoalWith(task.active.RMs().NonEmpty())
 
 	localHost, targetTopology, err := task.calculateTargetTopology()
 	if err != nil || targetTopology == nil {
@@ -612,6 +654,7 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 
 	allRemoteHosts := make([]string, 0, len(task.active.Hosts)+len(task.config.Hosts))
 
+	// 1. Start by assuming all old hosts have been removed
 	for _, host := range task.active.Hosts {
 		hostsRemoved[host] = server.EmptyStructVal
 		if host != localHost {
@@ -619,10 +662,12 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 		}
 	}
 
+	// 2. For each new host, if it is in the removed set, it's
+	// "survived". Else it's new. Don't care about correcting
+	// hostsRemoved.
 	for _, host := range task.config.Hosts {
 		if _, found := hostsRemoved[host]; found {
 			hostsSurvived[host] = server.EmptyStructVal
-			delete(hostsRemoved, host)
 		} else {
 			hostsAdded[host] = server.EmptyStructVal
 			if host != localHost {
@@ -631,78 +676,167 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 		}
 	}
 	task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
+	rootId := task.active.Root.VarUUId
 	for _, host := range allRemoteHosts {
-		if _, found := task.hostToConnection[host]; !found {
+		if cd, found := task.hostToConnection[host]; found {
+			switch remoteRootId := cd.RootId(); {
+			case remoteRootId == nil:
+				// they're joining
+			case rootId.Compare(remoteRootId) == common.EQ:
+				// all good
+			default:
+				return "", nil, task.error(
+					errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting topology change."))
+			}
+		} else {
 			return "", nil, nil
 		}
 	}
 
-	rmIdsSurvived, rmIdsAdded, rmIdsRemoved :=
-		make(map[common.RMId]server.EmptyStruct),
-		make(map[common.RMId]server.EmptyStruct),
-		make(map[common.RMId]server.EmptyStruct)
+	// map(old -> new)
+	rmIdsTranslation := make(map[common.RMId]common.RMId)
+	added := make([]common.RMId, 0, len(hostsAdded))
 
-	// ok, we've figured out changes to hosts, but we also need to xref
-	// with RMIds because we could have a host that has changed RMId
-	// (i.e. it's been wiped and re-added).
-	for _, rmId := range task.active.RMs() {
-		rmIdsRemoved[rmId] = server.EmptyStructVal
+	// 3. Assume all old RMIds have been removed (so map to RMIdEmpty)
+	rmIdsOld := task.active.RMs().NonEmpty()
+	for _, rmId := range rmIdsOld {
+		rmIdsTranslation[rmId] = common.RMIdEmpty
 	}
-	var rmId common.RMId
-	for host := range hostsSurvived {
-		rmId = task.hostToConnection[host].RMId()
-		if _, found := rmIdsRemoved[rmId]; found {
-			// the rmId of host hasn't changed
-			rmIdsSurvived[rmId] = server.EmptyStructVal
-			delete(rmIdsRemoved, rmId)
-		} else {
-			// the rmId of host must have changed
-			delete(hostsSurvived, host)
-			hostsAdded[host] = server.EmptyStructVal
-			hostsRemoved[host] = server.EmptyStructVal
-			rmIdsAdded[rmId] = server.EmptyStructVal
-		}
-	}
-	// removed and added are much simpler
-	for host := range hostsRemoved {
-		rmId = task.hostToConnection[host].RMId()
-		rmIdsRemoved[rmId] = server.EmptyStructVal
-	}
+	// 4. All new hosts must have new RMIds.
 	for host := range hostsAdded {
-		rmId = task.hostToConnection[host].RMId()
-		rmIdsAdded[rmId] = server.EmptyStructVal
+		rmId := task.hostToConnection[host].RMId()
+		added = append(added, rmId)
+	}
+	// 5. Problem is that hostsAdded may be missing entries for hosts
+	// that have been wiped and thus changed RMId
+	for host := range hostsSurvived {
+		rmId := task.hostToConnection[host].RMId()
+		if _, found := rmIdsTranslation[rmId]; found {
+			// Hasn't changed RMId, so it maps to itself.
+			rmIdsTranslation[rmId] = rmId
+		} else {
+			// It has changed RMId! The old RMId is already in
+			// rmIdsTranslation somewhere, but we don't know where, nor
+			// care until we order the RMIds
+			added = append(added, rmId)
+		}
 	}
 
+	addedCopy := added
+	rmIdsRemoved := make(map[common.RMId]server.EmptyStruct)
+
+	// Now construct the new RMId list.
 	rmIdsNew := make([]common.RMId, 0, len(allRemoteHosts)+1)
-	for _, rmId := range task.active.RMs() {
-		if _, found := rmIdsSurvived[rmId]; found {
-			rmIdsNew = append(rmIdsNew, rmId)
-		} else {
+	for _, rmIdOld := range rmIdsOld {
+		rmIdNew := rmIdsTranslation[rmIdOld]
+		// If rmIdOld is RMIdEmpty then it's a gap in the old list which
+		// we can fill in with added RMIds.
+		// If rmIdNew is RMIdEmpty then it's the removal of an old RMId,
+		// which again we can fill in with added RMIds.
+		switch {
+		case rmIdOld == common.RMIdEmpty && len(addedCopy) > 0:
+			rmIdsNew = append(rmIdsNew, addedCopy[0])
+			addedCopy = addedCopy[1:]
+		case rmIdOld == common.RMIdEmpty:
 			rmIdsNew = append(rmIdsNew, common.RMIdEmpty)
+		case rmIdNew == common.RMIdEmpty && len(addedCopy) > 0:
+			rmIdsNew = append(rmIdsNew, addedCopy[0])
+			rmIdsTranslation[rmIdOld] = addedCopy[0]
+			addedCopy = addedCopy[1:]
+			rmIdsRemoved[rmIdOld] = server.EmptyStructVal
+		default:
+			rmIdsNew = append(rmIdsNew, rmIdNew)
+			if rmIdOld != rmIdNew {
+				rmIdsRemoved[rmIdOld] = server.EmptyStructVal
+			}
 		}
 	}
-	idx := 0
-	for rmIdAdded := range rmIdsAdded {
-		for ; idx < len(rmIdsNew) && rmIdsNew[idx] != common.RMIdEmpty; idx++ {
-		}
-		if idx == len(rmIdsNew) {
-			rmIdsNew = append(rmIdsNew, rmIdAdded)
-		} else {
-			rmIdsNew[idx] = rmIdAdded
-		}
-	}
+	// Finally, we may still have some new RMIds we never found space
+	// for.
+	rmIdsNew = append(rmIdsNew, addedCopy...)
+
 	targetTopology := task.active.Clone()
 	next := task.config.Clone()
 	next.SetRMs(rmIdsNew)
-	// pointer semantics, so we need to copy into our new set
+	// Pointer semantics, so we need to copy into our new set
 	alreadyRemoved := targetTopology.RMsRemoved()
 	for rmId := range alreadyRemoved {
 		rmIdsRemoved[rmId] = server.EmptyStructVal
 	}
 	next.SetRMsRemoved(rmIdsRemoved)
-	targetTopology.SetNext(&configuration.NextConfiguration{Configuration: next})
+	conds := calculateMigrationConditions(rmIdsTranslation, added, task.active.Configuration, next)
+	targetTopology.SetNext(&configuration.NextConfiguration{
+		Configuration: next,
+		Pending:       conds,
+	})
 
 	return localHost, targetTopology, nil
+}
+
+func calculateMigrationConditions(translation map[common.RMId]common.RMId, added []common.RMId, from, to *configuration.Configuration) configuration.Conds {
+	survivors := []common.RMId{}
+	removed := []common.RMId{}
+	conditions := configuration.Conds(make(map[common.RMId]configuration.Cond))
+	twoFIncNew := to.F + to.F + 1
+	twoFIncOld := from.F + from.F + 1
+
+	for _, rmIdNew := range added {
+		conditions.DisjoinWith(rmIdNew, &configuration.Generator{
+			RMId:     rmIdNew,
+			PermLen:  uint8(to.RMs().NonEmptyLen()),
+			Start:    0,
+			Len:      twoFIncNew,
+			Includes: true,
+		})
+	}
+
+	for rmIdOld, rmIdNew := range translation {
+		// We ignore "changed" here because the newRMId will be in
+		// added.
+		switch {
+		case rmIdOld == rmIdNew: // survivor
+			survivors = append(survivors, rmIdOld)
+		case rmIdNew == common.RMIdEmpty: // removed
+			removed = append(removed, rmIdOld)
+		}
+	}
+
+	if len(removed) > 0 {
+		if int(twoFIncOld) < from.RMs().NonEmptyLen() && len(survivors) > 1 {
+			for _, rmId := range survivors {
+				conditions.DisjoinWith(rmId, &configuration.Generator{
+					RMId:               rmId,
+					PermLen:            uint8(from.RMs().NonEmptyLen()),
+					Start:              twoFIncOld,
+					LenAdjustIntersect: removed,
+					Includes:           true,
+				})
+			}
+		}
+	}
+
+	if from.F < to.F {
+		for _, rmId := range survivors {
+			conditions.DisjoinWith(rmId, &configuration.Conjunction{
+				Left: &configuration.Generator{
+					RMId:     rmId,
+					PermLen:  uint8(to.RMs().NonEmptyLen()),
+					Start:    0,
+					Len:      twoFIncNew,
+					Includes: true,
+				},
+				Right: &configuration.Generator{
+					RMId:     rmId,
+					PermLen:  uint8(from.RMs().NonEmptyLen()),
+					Start:    0,
+					Len:      twoFIncOld,
+					Includes: false,
+				},
+			})
+		}
+	}
+	log.Println("Conditions:", conditions)
+	return conditions
 }
 
 // installTargetNew
@@ -728,8 +862,8 @@ func (task *installTargetNew) tick() error {
 	for _, host := range remoteHosts {
 		remoteHostsMap[host] = server.EmptyStructVal
 	}
-	localHostNew, _, _ := task.config.LocalRemoteHosts(task.listenPort)
-	for _, host := range task.config.Hosts {
+	localHostNew, _, _ := task.active.Next().LocalRemoteHosts(task.listenPort)
+	for _, host := range task.active.Next().Hosts {
 		if host == localHostNew {
 			continue
 		}
@@ -739,8 +873,19 @@ func (task *installTargetNew) tick() error {
 		}
 	}
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	rootId := task.active.Root.VarUUId
 	for _, host := range remoteHosts {
-		if _, found := task.hostToConnection[host]; !found {
+		if cd, found := task.hostToConnection[host]; found {
+			switch remoteRootId := cd.RootId(); {
+			case remoteRootId == nil:
+				// they're joining
+			case rootId.Compare(remoteRootId) == common.EQ:
+				// all good
+			default:
+				return task.error(
+					errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting topology change."))
+			}
+		} else {
 			return nil
 		}
 	}
@@ -753,6 +898,8 @@ func (task *installTargetNew) tick() error {
 	passive := make([]common.RMId, 0, f)
 	idx := 0
 	curRMs, nextRMs := task.active.RMs(), task.active.Next().RMs()
+	task.shareGoalWith(task.active.Next().RMs().NonEmpty())
+	log.Println("cur, next:", curRMs, nextRMs)
 	for ; idx < len(curRMs) && idx < len(nextRMs); idx++ {
 		cur, next := curRMs[idx], nextRMs[idx]
 		switch {
@@ -803,12 +950,14 @@ func (task *installTargetNew) tick() error {
 	log.Printf("Extending topology. Actives: %v; Passives: %v", active, passive)
 	topology := task.active.Clone()
 	topology.Next().InstalledOnAll = true
+	task.installTopology(topology)
 
-	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
+	res, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
+		log.Println("Topology extension requires resubmit.", res)
 		task.enqueueTick(task)
 	}
 	return nil

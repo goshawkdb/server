@@ -19,10 +19,15 @@ struct Configuration {
     transitioningTo :group {
       configuration  @9: Configuration;
       installedOnAll @10: Bool;
-      pending        @11: List(Condition);
+      pending        @11: List(ConditionPair);
     }
     stable           @12: Void;
   }
+}
+
+struct ConditionPair {
+  rmId      @0: UInt32;
+  condition @1: Condition;
 }
 
 struct Condition {

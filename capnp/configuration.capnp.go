@@ -55,10 +55,10 @@ func (s ConfigurationTransitioningTo) SetConfiguration(v Configuration) {
 }
 func (s ConfigurationTransitioningTo) InstalledOnAll() bool     { return C.Struct(s).Get1(49) }
 func (s ConfigurationTransitioningTo) SetInstalledOnAll(v bool) { C.Struct(s).Set1(49, v) }
-func (s ConfigurationTransitioningTo) Pending() Condition_List {
-	return Condition_List(C.Struct(s).GetObject(6))
+func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
+	return ConditionPair_List(C.Struct(s).GetObject(6))
 }
-func (s ConfigurationTransitioningTo) SetPending(v Condition_List) {
+func (s ConfigurationTransitioningTo) SetPending(v ConditionPair_List) {
 	C.Struct(s).SetObject(6, C.Object(v))
 }
 func (s Configuration) SetStable() { C.Struct(s).Set16(8, 1) }
@@ -783,6 +783,138 @@ func (s Configuration_List) ToArray() []Configuration {
 	return a
 }
 func (s Configuration_List) Set(i int, item Configuration) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type ConditionPair C.Struct
+
+func NewConditionPair(s *C.Segment) ConditionPair      { return ConditionPair(s.NewStruct(8, 1)) }
+func NewRootConditionPair(s *C.Segment) ConditionPair  { return ConditionPair(s.NewRootStruct(8, 1)) }
+func AutoNewConditionPair(s *C.Segment) ConditionPair  { return ConditionPair(s.NewStructAR(8, 1)) }
+func ReadRootConditionPair(s *C.Segment) ConditionPair { return ConditionPair(s.Root(0).ToStruct()) }
+func (s ConditionPair) RmId() uint32                   { return C.Struct(s).Get32(0) }
+func (s ConditionPair) SetRmId(v uint32)               { C.Struct(s).Set32(0, v) }
+func (s ConditionPair) Condition() Condition           { return Condition(C.Struct(s).GetObject(0).ToStruct()) }
+func (s ConditionPair) SetCondition(v Condition)       { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s ConditionPair) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"rmId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.RmId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"condition\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Condition()
+		err = s.WriteJSON(b)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s ConditionPair) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s ConditionPair) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("rmId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.RmId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("condition = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Condition()
+		err = s.WriteCapLit(b)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s ConditionPair) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type ConditionPair_List C.PointerList
+
+func NewConditionPairList(s *C.Segment, sz int) ConditionPair_List {
+	return ConditionPair_List(s.NewCompositeList(8, 1, sz))
+}
+func (s ConditionPair_List) Len() int { return C.PointerList(s).Len() }
+func (s ConditionPair_List) At(i int) ConditionPair {
+	return ConditionPair(C.PointerList(s).At(i).ToStruct())
+}
+func (s ConditionPair_List) ToArray() []ConditionPair {
+	n := s.Len()
+	a := make([]ConditionPair, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s ConditionPair_List) Set(i int, item ConditionPair) { C.PointerList(s).Set(i, C.Object(item)) }
 
 type Condition C.Struct
 type Condition_Which uint16

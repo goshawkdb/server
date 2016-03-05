@@ -80,8 +80,10 @@ func (d *Dispatchers) DispatchMessage(sender common.RMId, msgType msgs.Message_W
 	case msgs.MESSAGE_TXNGLOBALLYCOMPLETE:
 		tgc := msg.TxnGloballyComplete()
 		d.ProposerDispatcher.TxnGloballyCompleteReceived(sender, &tgc)
+	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
+		// do nothing - we've just sent it to ourselves.
 	default:
-		panic(fmt.Sprintf("Unexpected message received from %v", sender))
+		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
 	}
 }
 
