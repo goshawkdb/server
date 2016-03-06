@@ -111,3 +111,25 @@ func (s *RepeatingSender) ConnectionEstablished(rmId common.RMId, conn Connectio
 		}
 	}
 }
+
+type RepeatingAllSender struct {
+	msg []byte
+}
+
+func NewRepeatingAllSender(msg []byte) *RepeatingAllSender {
+	return &RepeatingAllSender{
+		msg: msg,
+	}
+}
+
+func (s *RepeatingAllSender) ConnectedRMs(conns map[common.RMId]Connection) {
+	for _, conn := range conns {
+		conn.Send(s.msg)
+	}
+}
+
+func (s *RepeatingAllSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
+
+func (s *RepeatingAllSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+	conn.Send(s.msg)
+}

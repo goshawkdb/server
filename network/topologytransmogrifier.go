@@ -233,7 +233,6 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
 		return errors.New("We have been removed from the cluster. Shutting down.")
 	}
-	oldActive := tt.active
 	tt.active = topology
 
 	if tt.task != nil {
@@ -256,10 +255,6 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			tt.selectGoal(next)
 		}
 	}
-	if oldActive == nil && tt.localEstablished != nil {
-		close(tt.localEstablished)
-		tt.localEstablished = nil
-	}
 	return nil
 }
 
@@ -270,6 +265,10 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 		installedOnProposers = func() {
 			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				tt.installedOnProposers = topology
+				if tt.localEstablished != nil {
+					close(tt.localEstablished)
+					tt.localEstablished = nil
+				}
 				if tt.task != nil {
 					return tt.task.tick()
 				}
@@ -387,12 +386,12 @@ func (task *targetConfig) tick() error {
 	return nil
 }
 
-func (task *targetConfig) shareGoalWith(rmIds []common.RMId) {
+func (task *targetConfig) shareGoalWithAll() {
 	task.ensureRemoveTaskSender()
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
-	task.sender = paxos.NewRepeatingSender(server.SegToBytes(seg), rmIds...)
+	task.sender = paxos.NewRepeatingAllSender(server.SegToBytes(seg))
 	task.connectionManager.AddSender(task.sender)
 }
 
@@ -492,7 +491,8 @@ func (task *joinCluster) tick() error {
 
 	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
 	if err != nil {
-		// for joining, it's fatal if we can't find ourself
+		// For joining, it's fatal if we can't find ourself in the
+		// target.
 		return task.fatal(err)
 	}
 	task.installTopology(task.active)
@@ -529,7 +529,7 @@ func (task *joinCluster) tick() error {
 	// It's possible that different members of our goal are trying to
 	// achieve different goals, so in all cases, we should share our
 	// goal with them and there should only be one winner.
-	task.shareGoalWith(rmIds)
+	task.shareGoalWithAll()
 
 	if allJoining := rootId == nil; allJoining {
 		return task.allJoining(append(rmIds, task.connectionManager.RMId))
@@ -613,18 +613,18 @@ func (task *installTargetOld) tick() error {
 		return task.completed()
 	}
 
-	task.shareGoalWith(task.active.RMs().NonEmpty())
-
 	localHost, targetTopology, err := task.calculateTargetTopology()
 	if err != nil || targetTopology == nil {
 		return err
 	}
-	log.Printf("Calculated target topology: %v", targetTopology.Next())
+
+	task.shareGoalWithAll()
 
 	active, passive := task.chooseRMIdsForTopology(localHost, task.active)
 	if active == nil {
 		return nil
 	}
+	log.Printf("Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
 
 	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
 	if err != nil {
@@ -642,9 +642,11 @@ func (task *installTargetOld) tick() error {
 func (task *installTargetOld) calculateTargetTopology() (string, *configuration.Topology, error) {
 	localHost, _, err := task.active.LocalRemoteHosts(task.listenPort)
 	if err != nil {
-		// this calc is being done off the active. So it is fatal if we
-		// can't find ourself.
-		return "", nil, task.fatal(err)
+		localHost, _, err = task.config.LocalRemoteHosts(task.listenPort)
+		// If we're neither in the old or the new, we should shutdown.
+		if err != nil {
+			return "", nil, task.fatal(err)
+		}
 	}
 
 	hostsSurvived, hostsRemoved, hostsAdded :=
@@ -874,11 +876,7 @@ func (task *installTargetNew) tick() error {
 	}
 	task.installTopology(task.active)
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	oldRMIds := task.active.RMs().NonEmpty()
-	allRMIds := make([]common.RMId, len(oldRMIds)+len(task.active.Next().NewRMIds))
-	copy(allRMIds, oldRMIds)
-	copy(allRMIds[len(oldRMIds):], task.active.Next().NewRMIds)
-	task.shareGoalWith(allRMIds)
+	task.shareGoalWithAll()
 
 	rootId := task.active.Root.VarUUId
 	for _, host := range remoteHosts {
