@@ -82,6 +82,19 @@ func (pd *ProposerDispatcher) SetTopology(topology *configuration.Topology, prop
 	}
 }
 
+func (pd *ProposerDispatcher) Immigration(outcomes *msgs.Outcome_List, lsc eng.TxnLocalStateChange) {
+	for idx, l := 0, outcomes.Len(); idx < l; idx++ {
+		outcome := outcomes.At(idx)
+		txnCap := outcome.Txn()
+		txnId := common.MakeTxnId(txnCap.Id())
+		pd.withProposerManager(txnId, func(pm *ProposerManager) {
+			txn := eng.TxnFromCap(pm.Exe, pm.VarDispatcher, lsc, pm.RMId, &txnCap)
+			txn.Start(false)
+			txn.BallotOutcomeReceived(&outcome)
+		})
+	}
+}
+
 func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Proposers")
 	for idx, executor := range pd.Executors {

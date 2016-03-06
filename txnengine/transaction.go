@@ -15,9 +15,9 @@ import (
 )
 
 type TxnLocalStateChange interface {
-	TxnBallotsComplete(...*Ballot)
-	TxnLocallyComplete()
-	TxnFinished()
+	TxnBallotsComplete(*Txn, ...*Ballot)
+	TxnLocallyComplete(*Txn)
+	TxnFinished(*Txn)
 }
 
 type Txn struct {
@@ -439,7 +439,7 @@ func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() {
 			action := &talb.localActions[idx]
 			ballots[idx] = action.ballot
 		}
-		talb.stateChange.TxnBallotsComplete(ballots...)
+		talb.stateChange.TxnBallotsComplete(talb.Txn, ballots...)
 	} else {
 		panic(fmt.Sprintf("%v error: Ballots completed with txn in wrong state: %v\n", talb.Id, talb.currentState))
 	}
@@ -452,7 +452,7 @@ func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) {
 	// Up until we actually receive the outcome, we should pass on all
 	// of these to the proposer.
 	if talb.currentState == &talb.txnReceiveOutcome {
-		talb.stateChange.TxnBallotsComplete(ballot)
+		talb.stateChange.TxnBallotsComplete(talb.Txn, ballot)
 	}
 }
 
@@ -547,7 +547,7 @@ func (talc *txnAwaitLocallyComplete) LocallyComplete() {
 func (talc *txnAwaitLocallyComplete) locallyComplete() {
 	if talc.currentState == talc {
 		talc.nextState() // do state first!
-		talc.stateChange.TxnLocallyComplete()
+		talc.stateChange.TxnLocallyComplete(talc.Txn)
 	}
 }
 
@@ -604,6 +604,6 @@ func (trc *txnReceiveCompletion) CompletionReceived() {
 func (trc *txnReceiveCompletion) maybeFinish() {
 	if trc.currentState == trc && trc.completed {
 		trc.nextState()
-		trc.stateChange.TxnFinished()
+		trc.stateChange.TxnFinished(trc.Txn)
 	}
 }

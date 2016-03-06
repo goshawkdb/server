@@ -78,9 +78,14 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	// Assumption is that conditions are immutable. So the only thing
 	// we'll want to do is shrink the map, so we do a copy of the map,
 	// not a deep copy of the conditions.
-	pending := make(map[common.RMId]Cond, len(next.Pending))
+	pending := make(map[common.RMId]*CondSuppliers, len(next.Pending))
 	for k, v := range next.Pending {
-		pending[k] = v
+		cs := &CondSuppliers{
+			Cond:      v.Cond,
+			Suppliers: make([]common.RMId, len(v.Suppliers)),
+		}
+		copy(cs.Suppliers, v.Suppliers)
+		pending[k] = cs
 	}
 
 	return &NextConfiguration{
@@ -461,26 +466,48 @@ func LocalAddresses() ([]net.IP, error) {
 	return result, nil
 }
 
-type Conds map[common.RMId]Cond
+type Conds map[common.RMId]*CondSuppliers
 
 func ConditionsFromCap(condsCap *msgs.ConditionPair_List) Conds {
-	conds := make(map[common.RMId]Cond, condsCap.Len())
+	condSups := make(map[common.RMId]*CondSuppliers, condsCap.Len())
 	for idx, l := 0, condsCap.Len(); idx < l; idx++ {
 		pairCap := condsCap.At(idx)
 		condCap := pairCap.Condition()
-		conds[common.RMId(pairCap.RmId())] = conditionFromCap(&condCap)
+		suppliersCap := pairCap.Suppliers()
+		suppliers := make([]common.RMId, suppliersCap.Len())
+		for idx := range suppliers {
+			suppliers[idx] = common.RMId(suppliersCap.At(idx))
+		}
+		condSups[common.RMId(pairCap.RmId())] = &CondSuppliers{
+			Cond:      conditionFromCap(&condCap),
+			Suppliers: suppliers,
+		}
 	}
-	return conds
+	return condSups
 }
 
 func (cs Conds) DisjoinWith(rmId common.RMId, c Cond) {
-	if cond, found := cs[rmId]; found {
-		cs[rmId] = &Disjunction{
-			Left:  cond,
+	if condSup, found := cs[rmId]; found {
+		condSup.Cond = &Disjunction{
+			Left:  condSup.Cond,
 			Right: c,
 		}
 	} else {
-		cs[rmId] = c
+		cs[rmId] = &CondSuppliers{Cond: c}
+	}
+}
+
+func (cs Conds) SuppliedBy(requester, supplier common.RMId, maxSuppliers uint8) {
+	if condSup, found := cs[requester]; found {
+		for _, s := range condSup.Suppliers {
+			if s == supplier {
+				return
+			}
+		}
+		condSup.Suppliers = append(condSup.Suppliers, requester)
+		if len(condSup.Suppliers) == int(maxSuppliers) {
+			delete(cs, requester)
+		}
 	}
 }
 
@@ -507,14 +534,35 @@ func (c Conds) String() string {
 func (c Conds) AddToSeg(seg *capn.Segment) msgs.ConditionPair_List {
 	cap := msgs.NewConditionPairList(seg, len(c))
 	idx := 0
-	for rmId, cond := range c {
-		pair := msgs.NewConditionPair(seg)
-		pair.SetRmId(uint32(rmId))
-		pair.SetCondition(cond.AddToSeg(seg))
-		cap.Set(idx, pair)
+	for rmId, condSup := range c {
+		condSupCap := msgs.NewConditionPair(seg)
+		condSupCap.SetRmId(uint32(rmId))
+		condSupCap.SetCondition(condSup.Cond.AddToSeg(seg))
+		suppliersCap := seg.NewUInt32List(len(condSup.Suppliers))
+		for idx, rmId := range condSup.Suppliers {
+			suppliersCap.Set(idx, uint32(rmId))
+		}
+		condSupCap.SetSuppliers(suppliersCap)
+		cap.Set(idx, condSupCap)
 		idx++
 	}
 	return cap
+}
+
+type CondSuppliers struct {
+	Cond      Cond
+	Suppliers common.RMIds
+}
+
+func (a *CondSuppliers) Equal(b *CondSuppliers) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Suppliers.Equal(b.Suppliers) && a.Cond.Equal(b.Cond)
+}
+
+func (cs *CondSuppliers) String() string {
+	return fmt.Sprintf("%v (supplied by: %v)", cs.Cond, cs.Suppliers)
 }
 
 type Cond interface {

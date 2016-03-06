@@ -1,6 +1,7 @@
 package network
 
 import (
+	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
@@ -33,6 +34,61 @@ type ConnectionManager struct {
 	desired                       []string
 	senders                       map[paxos.Sender]server.EmptyStruct
 	Dispatchers                   *paxos.Dispatchers
+}
+
+func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg *msgs.Message) {
+	d := cm.Dispatchers
+	switch msgType {
+	case msgs.MESSAGE_TXNSUBMISSION:
+		txn := msg.TxnSubmission()
+		d.ProposerDispatcher.TxnReceived(sender, &txn)
+	case msgs.MESSAGE_SUBMISSIONOUTCOME:
+		outcome := msg.SubmissionOutcome()
+		txnId := common.MakeTxnId(outcome.Txn().Id())
+		connNumber := binary.BigEndian.Uint32(txnId[8:12])
+		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
+		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
+			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
+			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
+		} else {
+			conn.SubmissionOutcomeReceived(sender, txnId, &outcome)
+			return
+		}
+	case msgs.MESSAGE_SUBMISSIONCOMPLETE:
+		tsc := msg.SubmissionComplete()
+		d.AcceptorDispatcher.TxnSubmissionCompleteReceived(sender, &tsc)
+	case msgs.MESSAGE_SUBMISSIONABORT:
+		tsa := msg.SubmissionAbort()
+		d.ProposerDispatcher.TxnSubmissionAbortReceived(sender, &tsa)
+	case msgs.MESSAGE_ONEATXNVOTES:
+		oneATxnVotes := msg.OneATxnVotes()
+		d.AcceptorDispatcher.OneATxnVotesReceived(sender, &oneATxnVotes)
+	case msgs.MESSAGE_ONEBTXNVOTES:
+		oneBTxnVotes := msg.OneBTxnVotes()
+		d.ProposerDispatcher.OneBTxnVotesReceived(sender, &oneBTxnVotes)
+	case msgs.MESSAGE_TWOATXNVOTES:
+		twoATxnVotes := msg.TwoATxnVotes()
+		d.AcceptorDispatcher.TwoATxnVotesReceived(sender, &twoATxnVotes)
+	case msgs.MESSAGE_TWOBTXNVOTES:
+		twoBTxnVotes := msg.TwoBTxnVotes()
+		d.ProposerDispatcher.TwoBTxnVotesReceived(sender, &twoBTxnVotes)
+	case msgs.MESSAGE_TXNLOCALLYCOMPLETE:
+		tlc := msg.TxnLocallyComplete()
+		d.AcceptorDispatcher.TxnLocallyCompleteReceived(sender, &tlc)
+	case msgs.MESSAGE_TXNGLOBALLYCOMPLETE:
+		tgc := msg.TxnGloballyComplete()
+		d.ProposerDispatcher.TxnGloballyCompleteReceived(sender, &tgc)
+	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
+		// do nothing - we've just sent it to ourselves.
+	case msgs.MESSAGE_MIGRATION:
+		migration := msg.Migration()
+		cm.Transmogrifier.MigrationReceived(sender, &migration)
+	case msgs.MESSAGE_MIGRATIONCOMPLETE:
+		migrationComplete := msg.MigrationComplete()
+		cm.Transmogrifier.MigrationCompleteReceived(sender, &migrationComplete)
+	default:
+		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
+	}
 }
 
 type connectionManagerMsg interface {
@@ -573,7 +629,7 @@ func (cm *ConnectionManager) Send(b []byte) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
 	server.CheckFatal(err)
 	msg := msgs.ReadRootMessage(seg)
-	cm.Dispatchers.DispatchMessage(cm.RMId, msg.Which(), &msg)
+	cm.DispatchMessage(cm.RMId, msg.Which(), &msg)
 }
 
 func (cd *connectionManagerMsgServerEstablished) Host() string {

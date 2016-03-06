@@ -339,6 +339,8 @@ const (
 	MESSAGE_TXNLOCALLYCOMPLETE    Message_Which = 10
 	MESSAGE_TXNGLOBALLYCOMPLETE   Message_Which = 11
 	MESSAGE_TOPOLOGYCHANGEREQUEST Message_Which = 12
+	MESSAGE_MIGRATION             Message_Which = 13
+	MESSAGE_MIGRATIONCOMPLETE     Message_Which = 14
 )
 
 func NewMessage(s *C.Segment) Message          { return Message(s.NewStruct(8, 1)) }
@@ -416,6 +418,18 @@ func (s Message) TopologyChangeRequest() Configuration {
 }
 func (s Message) SetTopologyChangeRequest(v Configuration) {
 	C.Struct(s).Set16(0, 12)
+	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s Message) Migration() Migration { return Migration(C.Struct(s).GetObject(0).ToStruct()) }
+func (s Message) SetMigration(v Migration) {
+	C.Struct(s).Set16(0, 13)
+	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s Message) MigrationComplete() MigrationComplete {
+	return MigrationComplete(C.Struct(s).GetObject(0).ToStruct())
+}
+func (s Message) SetMigrationComplete(v MigrationComplete) {
+	C.Struct(s).Set16(0, 14)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) WriteJSON(w io.Writer) error {
@@ -592,6 +606,32 @@ func (s Message) WriteJSON(w io.Writer) error {
 		}
 		{
 			s := s.TopologyChangeRequest()
+			err = s.WriteJSON(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATION {
+		_, err = b.WriteString("\"migration\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.Migration()
+			err = s.WriteJSON(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATIONCOMPLETE {
+		_, err = b.WriteString("\"migrationComplete\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.MigrationComplete()
 			err = s.WriteJSON(b)
 			if err != nil {
 				return err
@@ -784,6 +824,32 @@ func (s Message) WriteCapLit(w io.Writer) error {
 		}
 		{
 			s := s.TopologyChangeRequest()
+			err = s.WriteCapLit(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATION {
+		_, err = b.WriteString("migration = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.Migration()
+			err = s.WriteCapLit(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATIONCOMPLETE {
+		_, err = b.WriteString("migrationComplete = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.MigrationComplete()
 			err = s.WriteCapLit(b)
 			if err != nil {
 				return err

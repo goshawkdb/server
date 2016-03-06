@@ -984,14 +984,16 @@ func (s Configuration_List) Set(i int, item Configuration) { C.PointerList(s).Se
 
 type ConditionPair C.Struct
 
-func NewConditionPair(s *C.Segment) ConditionPair      { return ConditionPair(s.NewStruct(8, 1)) }
-func NewRootConditionPair(s *C.Segment) ConditionPair  { return ConditionPair(s.NewRootStruct(8, 1)) }
-func AutoNewConditionPair(s *C.Segment) ConditionPair  { return ConditionPair(s.NewStructAR(8, 1)) }
+func NewConditionPair(s *C.Segment) ConditionPair      { return ConditionPair(s.NewStruct(8, 2)) }
+func NewRootConditionPair(s *C.Segment) ConditionPair  { return ConditionPair(s.NewRootStruct(8, 2)) }
+func AutoNewConditionPair(s *C.Segment) ConditionPair  { return ConditionPair(s.NewStructAR(8, 2)) }
 func ReadRootConditionPair(s *C.Segment) ConditionPair { return ConditionPair(s.Root(0).ToStruct()) }
 func (s ConditionPair) RmId() uint32                   { return C.Struct(s).Get32(0) }
 func (s ConditionPair) SetRmId(v uint32)               { C.Struct(s).Set32(0, v) }
 func (s ConditionPair) Condition() Condition           { return Condition(C.Struct(s).GetObject(0).ToStruct()) }
 func (s ConditionPair) SetCondition(v Condition)       { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s ConditionPair) Suppliers() C.UInt32List        { return C.UInt32List(C.Struct(s).GetObject(1)) }
+func (s ConditionPair) SetSuppliers(v C.UInt32List)    { C.Struct(s).SetObject(1, C.Object(v)) }
 func (s ConditionPair) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -1027,6 +1029,43 @@ func (s ConditionPair) WriteJSON(w io.Writer) error {
 	{
 		s := s.Condition()
 		err = s.WriteJSON(b)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"suppliers\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Suppliers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
 		if err != nil {
 			return err
 		}
@@ -1082,6 +1121,43 @@ func (s ConditionPair) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("suppliers = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Suppliers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -1098,7 +1174,7 @@ func (s ConditionPair) MarshalCapLit() ([]byte, error) {
 type ConditionPair_List C.PointerList
 
 func NewConditionPairList(s *C.Segment, sz int) ConditionPair_List {
-	return ConditionPair_List(s.NewCompositeList(8, 1, sz))
+	return ConditionPair_List(s.NewCompositeList(8, 2, sz))
 }
 func (s ConditionPair_List) Len() int { return C.PointerList(s).Len() }
 func (s ConditionPair_List) At(i int) ConditionPair {

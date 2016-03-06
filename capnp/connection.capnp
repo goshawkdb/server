@@ -10,6 +10,7 @@ using Outcome = import "outcome.capnp";
 using Txn = import "transaction.capnp";
 using TxnCompletion = import "txncompletion.capnp";
 using Config = import "configuration.capnp";
+using Migration = import "migration.capnp";
 
 struct HelloServerFromServer {
  localHost @0: Text;
@@ -35,5 +36,7 @@ struct Message {
     txnLocallyComplete    @10: TxnCompletion.TxnLocallyComplete;
     txnGloballyComplete   @11: TxnCompletion.TxnGloballyComplete;
     topologyChangeRequest @12: Config.Configuration;
+    migration             @13: Migration.Migration;
+    migrationComplete     @14: Migration.MigrationComplete;
   }
 }

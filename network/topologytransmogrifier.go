@@ -17,6 +17,7 @@ import (
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"math/rand"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,6 +74,34 @@ func (ttmvc *topologyTransmogrifierMsgTopologyObserved) topologyTransmogrifierMs
 type topologyTransmogrifierMsgExe func() error
 
 func (ttme topologyTransmogrifierMsgExe) topologyTransmogrifierMsgWitness() {}
+
+type topologyTransmogrifierMsgMigration struct {
+	migration *msgs.Migration
+	sender    common.RMId
+}
+
+func (ttmm *topologyTransmogrifierMsgMigration) topologyTransmogrifierMsgWitness() {}
+
+func (tt *TopologyTransmogrifier) MigrationReceived(sender common.RMId, migration *msgs.Migration) {
+	tt.enqueueQuery(&topologyTransmogrifierMsgMigration{
+		migration: migration,
+		sender:    sender,
+	})
+}
+
+type topologyTransmogrifierMsgMigrationComplete struct {
+	complete *msgs.MigrationComplete
+	sender   common.RMId
+}
+
+func (ttmmc *topologyTransmogrifierMsgMigrationComplete) topologyTransmogrifierMsgWitness() {}
+
+func (tt *TopologyTransmogrifier) MigrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) {
+	tt.enqueueQuery(&topologyTransmogrifierMsgMigrationComplete{
+		complete: migrationComplete,
+		sender:   sender,
+	})
+}
 
 func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
 	var f cc.CurCellConsumer
@@ -187,6 +216,10 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 			case *topologyTransmogrifierMsgRequestConfigChange:
 				server.Log("Topology change request:", msgT)
 				tt.selectGoal((*configuration.NextConfiguration)(msgT))
+			case *topologyTransmogrifierMsgMigration:
+				err = tt.migrationReceived(msgT)
+			case *topologyTransmogrifierMsgMigrationComplete:
+				err = tt.migrationCompleteReceived(msgT)
 			case topologyTransmogrifierMsgExe:
 				err = msgT()
 			}
@@ -357,6 +390,20 @@ func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask) {
 			return nil
 		}))
 	}()
+}
+
+func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogrifierMsgMigration) error {
+	if migrator, ok := tt.task.(*migrate); ok {
+		return migrator.migrationReceived(migration.sender, migration.migration)
+	}
+	return nil
+}
+
+func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *topologyTransmogrifierMsgMigrationComplete) error {
+	if migrator, ok := tt.task.(*migrate); ok {
+		return migrator.migrationCompleteReceived(migrationComplete.sender, migrationComplete.complete)
+	}
+	return nil
 }
 
 // topologyTask
@@ -845,7 +892,7 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 func calculateMigrationConditions(translation map[common.RMId]common.RMId, added []common.RMId, from, to *configuration.Configuration) configuration.Conds {
 	survivors := []common.RMId{}
 	removed := []common.RMId{}
-	conditions := configuration.Conds(make(map[common.RMId]configuration.Cond))
+	conditions := configuration.Conds(make(map[common.RMId]*configuration.CondSuppliers))
 	twoFIncNew := to.F + to.F + 1
 	twoFIncOld := from.F + from.F + 1
 
@@ -983,6 +1030,9 @@ func (task *installTargetNew) tick() error {
 type migrate struct {
 	*targetConfig
 	varBarrierReached *configuration.Topology
+	liveMigrations    int
+	pending           configuration.Conds
+	finished          bool
 }
 
 func (task *migrate) tick() error {
@@ -991,6 +1041,10 @@ func (task *migrate) tick() error {
 
 	} else if task.varBarrierReached != nil && task.varBarrierReached.Configuration.Equal(task.active.Configuration) {
 		log.Println("Topology: Var barrier achieved. Migration can proceed.")
+
+		if task.finished {
+			// We've received everything we need to receive from everyone else.
+		}
 
 	} else if task.installedOnProposers != nil && task.installedOnProposers.Configuration.Equal(task.active.Configuration) {
 		log.Println("Topology: Topology installed on proposers. Waiting for txns in old topology to drain.")
@@ -1019,6 +1073,64 @@ func (task *migrate) tick() error {
 
 	return nil
 }
+
+func (task *migrate) migrationReceived(sender common.RMId, migration *msgs.Migration) error {
+	if migration.Version() != task.active.Next().Version {
+		return nil
+	}
+	task.liveMigrations++
+	outcomes := migration.Outcomes()
+	lsc := task.newTxnLSC(&outcomes)
+	task.connectionManager.Dispatchers.ProposerDispatcher.Immigration(&outcomes, lsc)
+	return nil
+}
+
+func (task *migrate) migrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) error {
+	if migrationComplete.Version() != task.active.Next().Version {
+		task.active.Next().Pending.SuppliedBy(task.connectionManager.RMId, sender, task.active.FInc)
+	}
+	return nil
+}
+
+func (task *migrate) maybeStoreTopology() error {
+	_, found := task.active.Next().Pending[task.connectionManager.RMId]
+	task.finished = task.liveMigrations == 0 && !found
+	return nil
+}
+
+func (task *migrate) newTxnLSC(outcomes *msgs.Outcome_List) eng.TxnLocalStateChange {
+	return &migrationTxnLocalStateChange{
+		migrate:                task,
+		outcomes:               outcomes,
+		pendingLocallyComplete: int32(outcomes.Len()),
+	}
+}
+
+type migrationTxnLocalStateChange struct {
+	*migrate
+	outcomes               *msgs.Outcome_List
+	pendingLocallyComplete int32
+}
+
+func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(*eng.Txn, ...*eng.Ballot) {
+	panic("TxnBallotsComplete called on migrating txn.")
+}
+
+// Careful: we're in the proposer dispatcher go routine here!
+func (mtlsc *migrationTxnLocalStateChange) TxnLocallyComplete(txn *eng.Txn) {
+	txn.CompletionReceived()
+	if atomic.AddInt32(&mtlsc.pendingLocallyComplete, -1) == 0 {
+		mtlsc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			if mtlsc.task == mtlsc.migrate {
+				mtlsc.liveMigrations--
+				return mtlsc.maybeStoreTopology()
+			}
+			return nil
+		}))
+	}
+}
+
+func (mtlsc *migrationTxnLocalStateChange) TxnFinished(*eng.Txn) {}
 
 type installCompletion struct {
 	*targetConfig

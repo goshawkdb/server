@@ -787,7 +787,7 @@ func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 		config := configuration.ConfigurationFromCap(&configCap)
 		cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
 	default:
-		cr.connectionManager.Dispatchers.DispatchMessage(cr.remoteRMId, which, msg)
+		cr.connectionManager.DispatchMessage(cr.remoteRMId, which, msg)
 	}
 	return nil
 }

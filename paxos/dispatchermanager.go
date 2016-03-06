@@ -1,12 +1,9 @@
 package paxos
 
 import (
-	"encoding/binary"
-	"fmt"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 )
@@ -37,54 +34,6 @@ func NewDispatchers(cm ConnectionManager, rmId common.RMId, count uint8, disk *m
 	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, d.VarDispatcher, cm, disk)
 
 	return d
-}
-
-func (d *Dispatchers) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg *msgs.Message) {
-	switch msgType {
-	case msgs.MESSAGE_TXNSUBMISSION:
-		txn := msg.TxnSubmission()
-		d.ProposerDispatcher.TxnReceived(sender, &txn)
-	case msgs.MESSAGE_SUBMISSIONOUTCOME:
-		outcome := msg.SubmissionOutcome()
-		txnId := common.MakeTxnId(outcome.Txn().Id())
-		connNumber := binary.BigEndian.Uint32(txnId[8:12])
-		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
-		if conn := d.connectionManager.GetClient(bootNumber, connNumber); conn == nil {
-			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			NewOneShotSender(MakeTxnSubmissionCompleteMsg(txnId), d.connectionManager, sender)
-		} else {
-			conn.SubmissionOutcomeReceived(sender, txnId, &outcome)
-			return
-		}
-	case msgs.MESSAGE_SUBMISSIONCOMPLETE:
-		tsc := msg.SubmissionComplete()
-		d.AcceptorDispatcher.TxnSubmissionCompleteReceived(sender, &tsc)
-	case msgs.MESSAGE_SUBMISSIONABORT:
-		tsa := msg.SubmissionAbort()
-		d.ProposerDispatcher.TxnSubmissionAbortReceived(sender, &tsa)
-	case msgs.MESSAGE_ONEATXNVOTES:
-		oneATxnVotes := msg.OneATxnVotes()
-		d.AcceptorDispatcher.OneATxnVotesReceived(sender, &oneATxnVotes)
-	case msgs.MESSAGE_ONEBTXNVOTES:
-		oneBTxnVotes := msg.OneBTxnVotes()
-		d.ProposerDispatcher.OneBTxnVotesReceived(sender, &oneBTxnVotes)
-	case msgs.MESSAGE_TWOATXNVOTES:
-		twoATxnVotes := msg.TwoATxnVotes()
-		d.AcceptorDispatcher.TwoATxnVotesReceived(sender, &twoATxnVotes)
-	case msgs.MESSAGE_TWOBTXNVOTES:
-		twoBTxnVotes := msg.TwoBTxnVotes()
-		d.ProposerDispatcher.TwoBTxnVotesReceived(sender, &twoBTxnVotes)
-	case msgs.MESSAGE_TXNLOCALLYCOMPLETE:
-		tlc := msg.TxnLocallyComplete()
-		d.AcceptorDispatcher.TxnLocallyCompleteReceived(sender, &tlc)
-	case msgs.MESSAGE_TXNGLOBALLYCOMPLETE:
-		tgc := msg.TxnGloballyComplete()
-		d.ProposerDispatcher.TxnGloballyCompleteReceived(sender, &tgc)
-	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
-		// do nothing - we've just sent it to ourselves.
-	default:
-		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
-	}
 }
 
 func (d *Dispatchers) IsDatabaseEmpty() (bool, error) {

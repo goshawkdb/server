@@ -30,6 +30,7 @@ struct Configuration {
 struct ConditionPair {
   rmId      @0: UInt32;
   condition @1: Condition;
+  suppliers @2: List(UInt32);
 }
 
 struct Condition {

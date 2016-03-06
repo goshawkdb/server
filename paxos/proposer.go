@@ -173,7 +173,7 @@ func (pab *proposerAwaitBallots) String() string {
 	return "proposerAwaitBallots"
 }
 
-func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
+func (pab *proposerAwaitBallots) TxnBallotsComplete(_ *eng.Txn, ballots ...*eng.Ballot) {
 	if pab.currentState == pab {
 		server.Log(pab.txnId, "TxnBallotsComplete callback. Acceptors:", pab.acceptors)
 		if !pab.allAcceptorsAgreed {
@@ -199,7 +199,7 @@ func (pab *proposerAwaitBallots) Abort() {
 		txnCap := pab.txn.TxnCap
 		alloc := AllocForRMId(txnCap, pab.proposerManager.RMId)
 		ballots := MakeAbortBallots(txnCap, alloc)
-		pab.TxnBallotsComplete(ballots...)
+		pab.TxnBallotsComplete(pab.txn, ballots...)
 	}
 }
 
@@ -327,7 +327,7 @@ func (palc *proposerAwaitLocallyComplete) start() {
 		palc.txn.Start(false)
 	}
 	if palc.txn == nil {
-		palc.TxnLocallyComplete()
+		palc.TxnLocallyComplete(palc.txn)
 	} else {
 		palc.txn.BallotOutcomeReceived(palc.outcome)
 	}
@@ -338,7 +338,7 @@ func (palc *proposerAwaitLocallyComplete) String() string {
 	return "proposerAwaitLocallyComplete"
 }
 
-func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete() {
+func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete(*eng.Txn) {
 	if palc.currentState == palc && !palc.callbackInvoked {
 		server.Log(palc.txnId, "Txn locally completed")
 		palc.callbackInvoked = true
@@ -443,7 +443,7 @@ func (paf *proposerAwaitFinished) init(proposer *Proposer) {
 
 func (paf *proposerAwaitFinished) start() {
 	if paf.txn == nil {
-		paf.TxnFinished()
+		paf.TxnFinished(paf.txn)
 	} else {
 		paf.txn.CompletionReceived()
 	}
@@ -454,7 +454,7 @@ func (paf *proposerAwaitFinished) String() string {
 	return "proposerAwaitFinished"
 }
 
-func (paf *proposerAwaitFinished) TxnFinished() {
+func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 	server.Log(paf.txnId, "Txn Finished Callback")
 	if paf.currentState == paf {
 		paf.nextState()
