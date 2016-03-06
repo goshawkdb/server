@@ -72,6 +72,12 @@ func (t *Topology) Clone() *Topology {
 	}
 }
 
+func (t *Topology) SetConfiguration(config *Configuration) {
+	t.Configuration = config
+	t.FInc = config.F + 1
+	t.TwoFInc = (2 * uint16(config.F)) + 1
+}
+
 func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, data []byte) (*Topology, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
