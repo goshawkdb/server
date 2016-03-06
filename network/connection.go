@@ -321,6 +321,7 @@ func (cd *connectionDelay) start() (bool, error) {
 	cd.maybeStopBeater()
 	cd.isServer = false
 	cd.isClient = false
+	cd.peerCerts = nil
 	if cd.delay == nil {
 		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
 		cd.delay = time.AfterFunc(delay, func() {
@@ -581,6 +582,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 
 type connectionAwaitClientHandshake struct {
 	*Connection
+	peerCerts []*x509.Certificate
 }
 
 func (cach *connectionAwaitClientHandshake) connectionStateMachineComponentWitness() {}
@@ -604,19 +606,12 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 		return false, errors.New("Root not yet known")
 	}
 
-	found := false
-	fingerprints := topology.Fingerprints()
-	var hashsum [sha256.Size]byte
-	for _, cert := range socket.ConnectionState().PeerCertificates {
-		hashsum = sha256.Sum256(cert.Raw)
-		if _, found = fingerprints[hashsum]; found {
-			break
-		}
-	}
-	if found {
+	peerCerts := socket.ConnectionState().PeerCertificates
+	if authenticated, hashsum := cach.verifyPeerCerts(topology, peerCerts); authenticated {
+		cach.peerCerts = peerCerts
 		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
 	} else {
-		return false, errors.New("No client certificate known")
+		return false, errors.New("Client connection rejected: No client certificate known")
 	}
 
 	helloFromServer := cach.makeHelloClientFromServer(topology)
@@ -626,6 +621,17 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	cach.remoteHost = cach.socket.RemoteAddr().String()
 	cach.nextState(nil)
 	return false, nil
+}
+
+func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte) {
+	fingerprints := topology.Fingerprints()
+	for _, cert := range peerCerts {
+		hashsum = sha256.Sum256(cert.Raw)
+		if _, found := fingerprints[hashsum]; found {
+			return true, hashsum
+		}
+	}
+	return false, hashsum
 }
 
 func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
@@ -709,13 +715,19 @@ func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) er
 	if cr.currentState != cr {
 		return nil
 	}
-	if topology := tChange.topology; cr.isServer && topology != nil {
+	topology := tChange.topology
+	if cr.isServer && topology != nil {
 		if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
 			return cr.serverError(
 				fmt.Errorf("%v has been removed from topology and may not rejoin.", cr.remoteRMId))
 		}
 	}
 	if cr.isClient {
+		if topology != nil {
+			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+				return errors.New("Client connection closed: No client certificate known")
+			}
+		}
 		cr.submitter.TopologyChange(tChange.topology, tChange.servers)
 	}
 	return nil

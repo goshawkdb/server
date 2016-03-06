@@ -474,12 +474,13 @@ func (task *targetConfig) verifyRoots(rootId *common.VarUUId, remoteHosts []stri
 	return true, nil
 }
 
-func (task *targetConfig) firstLocalHost(configs ...*configuration.Configuration) (localHost string, err error) {
-	for _, config := range configs {
+func (task *targetConfig) firstLocalHost(config *configuration.Configuration) (localHost string, err error) {
+	for config != nil {
 		localHost, _, err = config.LocalRemoteHosts(task.listenPort)
 		if err == nil {
 			return localHost, err
 		}
+		config = config.Next().Configuration
 	}
 	return "", err
 }
@@ -703,7 +704,7 @@ func (task *installTargetOld) tick() error {
 }
 
 func (task *installTargetOld) calculateTargetTopology() (string, *configuration.Topology, error) {
-	localHost, err := task.firstLocalHost(task.active.Configuration, task.active.Next().Configuration)
+	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
 		return "", nil, task.fatal(err)
 	}
@@ -907,7 +908,7 @@ func (task *installTargetNew) tick() error {
 		return task.completed()
 	}
 
-	localHost, err := task.firstLocalHost(task.active.Configuration, task.active.Next().Configuration)
+	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
 		return task.fatal(err)
 	}
@@ -992,7 +993,7 @@ func (task *migrate) tick() error {
 		})
 
 	} else {
-		localHost, err := task.firstLocalHost(task.active.Configuration, task.active.Next().Configuration)
+		localHost, err := task.firstLocalHost(task.active.Configuration)
 		if err != nil {
 			return task.fatal(err)
 		}
@@ -1015,7 +1016,7 @@ func (task *installCompletion) tick() error {
 		return task.completed()
 	}
 
-	localHost, err := task.firstLocalHost(task.active.Configuration, task.active.Next().Configuration)
+	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
 		return task.fatal(err)
 	}
