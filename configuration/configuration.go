@@ -21,7 +21,7 @@ type Configuration struct {
 	Hosts                         []string
 	F                             uint8
 	MaxRMCount                    uint8
-	AsyncFlush                    bool
+	NoSync                        bool
 	ClientCertificateFingerprints []string
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
@@ -176,7 +176,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		Hosts:      config.Hosts().ToArray(),
 		F:          config.F(),
 		MaxRMCount: config.MaxRMCount(),
-		AsyncFlush: config.AsyncFlush(),
+		NoSync:     config.NoSync(),
 	}
 
 	rms := config.Rms()
@@ -234,7 +234,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.AsyncFlush == b.AsyncFlush && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
+	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
 		return false
 	}
 	for idx, aHost := range a.Hosts {
@@ -261,8 +261,8 @@ func (a *Configuration) Equal(b *Configuration) bool {
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, AsyncFlush: %v, RMs: %v, Removed: %v}",
-		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.AsyncFlush, config.rms, config.rmsRemoved)
+	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v}",
+		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved)
 }
 
 func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
@@ -295,12 +295,12 @@ func (config *Configuration) SetRMsRemoved(removed map[common.RMId]server.EmptyS
 
 func (config *Configuration) Clone() *Configuration {
 	clone := &Configuration{
-		ClusterId:                     config.ClusterId,
-		Version:                       config.Version,
-		Hosts:                         make([]string, len(config.Hosts)),
-		F:                             config.F,
-		MaxRMCount:                    config.MaxRMCount,
-		AsyncFlush:                    config.AsyncFlush,
+		ClusterId:  config.ClusterId,
+		Version:    config.Version,
+		Hosts:      make([]string, len(config.Hosts)),
+		F:          config.F,
+		MaxRMCount: config.MaxRMCount,
+		NoSync:     config.NoSync,
 		ClientCertificateFingerprints: make([]string, len(config.ClientCertificateFingerprints)),
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
@@ -333,7 +333,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 
 	cap.SetF(config.F)
 	cap.SetMaxRMCount(config.MaxRMCount)
-	cap.SetAsyncFlush(config.AsyncFlush)
+	cap.SetNoSync(config.NoSync)
 
 	rms := seg.NewUInt32List(len(config.rms))
 	cap.SetRms(rms)

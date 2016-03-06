@@ -6,6 +6,8 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
+	mdb "github.com/msackman/gomdb"
+	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -19,6 +21,7 @@ import (
 )
 
 type TopologyTransmogrifier struct {
+	disk                 *mdbs.MDBServer
 	connectionManager    *ConnectionManager
 	localConnection      *client.LocalConnection
 	active               *configuration.Topology
@@ -79,8 +82,9 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(disk *mdbs.MDBServer, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
+		disk:              disk,
 		connectionManager: cm,
 		localConnection:   lc,
 		hostToConnection:  make(map[string]paxos.Connection),
@@ -249,7 +253,16 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 				return err
 			}
 			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
+
+			future := tt.disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
+				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
+			})
 			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
+
+			_, err = future.ResultError()
+			if err != nil {
+				return err
+			}
 
 		} else {
 			tt.selectGoal(next)

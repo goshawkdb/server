@@ -28,12 +28,12 @@ type Root struct {
 func BlankTopology(clusterId string) *Topology {
 	return &Topology{
 		Configuration: &Configuration{
-			ClusterId:                     clusterId,
-			Version:                       0,
-			Hosts:                         []string{},
-			F:                             0,
-			MaxRMCount:                    0,
-			AsyncFlush:                    false,
+			ClusterId:  clusterId,
+			Version:    0,
+			Hosts:      []string{},
+			F:          0,
+			MaxRMCount: 0,
+			NoSync:     false,
 			ClientCertificateFingerprints: []string{},
 			rms:               []common.RMId{},
 			fingerprints:      nil,

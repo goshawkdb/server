@@ -35,8 +35,8 @@ func (s Configuration) F() uint8                       { return C.Struct(s).Get8
 func (s Configuration) SetF(v uint8)                   { C.Struct(s).Set8(4, v) }
 func (s Configuration) MaxRMCount() uint8              { return C.Struct(s).Get8(5) }
 func (s Configuration) SetMaxRMCount(v uint8)          { C.Struct(s).Set8(5, v) }
-func (s Configuration) AsyncFlush() bool               { return C.Struct(s).Get1(48) }
-func (s Configuration) SetAsyncFlush(v bool)           { C.Struct(s).Set1(48, v) }
+func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(48) }
+func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(48, v) }
 func (s Configuration) Rms() C.UInt32List              { return C.UInt32List(C.Struct(s).GetObject(2)) }
 func (s Configuration) SetRms(v C.UInt32List)          { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s Configuration) RmsRemoved() C.UInt32List       { return C.UInt32List(C.Struct(s).GetObject(3)) }
@@ -198,12 +198,12 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"asyncFlush\":")
+	_, err = b.WriteString("\"noSync\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.AsyncFlush()
+		s := s.NoSync()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -641,12 +641,12 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("asyncFlush = ")
+	_, err = b.WriteString("noSync = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.AsyncFlush()
+		s := s.NoSync()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err

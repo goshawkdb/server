@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
@@ -152,7 +151,7 @@ func (s *server) start() {
 
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP|mdb.MAPASYNC, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
 	s.addOnShutdown(disk.Shutdown)
 	s.maybeShutdown(err)
 

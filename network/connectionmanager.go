@@ -271,7 +271,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 	cm.servers[cd.host] = cd
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(cm, lc, port, config)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(disk, cm, lc, port, config)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	cm.ClientEstablished(0, lc)

@@ -11,7 +11,7 @@ struct Configuration {
   hosts              @2: List(Text);
   f                  @3: UInt8;
   maxRMCount         @4: UInt8;
-  asyncFlush         @5: Bool;
+  noSync             @5: Bool;
   rms                @6: List(UInt32);
   rmsRemoved         @7: List(UInt32);
   fingerprints       @8: List(Data);
