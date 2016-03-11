@@ -497,18 +497,20 @@ func (cs Conds) DisjoinWith(rmId common.RMId, c Cond) {
 	}
 }
 
-func (cs Conds) SuppliedBy(requester, supplier common.RMId, maxSuppliers uint8) {
+func (cs Conds) SuppliedBy(requester, supplier common.RMId, maxSuppliers int) bool {
 	if condSup, found := cs[requester]; found {
 		for _, s := range condSup.Suppliers {
 			if s == supplier {
-				return
+				return false
 			}
 		}
 		condSup.Suppliers = append(condSup.Suppliers, requester)
-		if len(condSup.Suppliers) == int(maxSuppliers) {
+		if len(condSup.Suppliers) == maxSuppliers {
 			delete(cs, requester)
 		}
+		return true
 	}
+	return false
 }
 
 func (a Conds) Equal(b Conds) bool {
