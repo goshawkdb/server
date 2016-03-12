@@ -426,6 +426,7 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *topologyTransmogrifierMsgMigrationComplete) error {
 	version := migrationComplete.complete.Version()
 	sender := migrationComplete.sender
+	log.Printf("MCR from %v (%v)\n", sender, version)
 	senders, found := tt.migrations[version]
 	if !found {
 		if version > tt.active.Version {
@@ -1230,7 +1231,10 @@ func (task *migrateAwaitVarBarrier) init(migrate *migrate)     { task.migrate = 
 func (task *migrateAwaitVarBarrier) tick() error {
 	if task.varBarrierReached != nil && task.varBarrierReached.Configuration.Equal(task.active.Configuration) {
 		log.Println("Topology: Var barrier achieved. Migration can proceed.")
-		task.ensureEmigrator()
+		_, _, err := task.active.LocalRemoteHosts(task.listenPort)
+		if err == nil {
+			task.ensureEmigrator()
+		}
 		return task.nextState()
 	}
 	return nil
