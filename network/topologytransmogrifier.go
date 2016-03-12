@@ -442,6 +442,7 @@ func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *t
 		inprogressPtr = &inprogress
 		senders[sender] = inprogressPtr
 	}
+	// race here?!
 	if tt.task != nil && inprogress == 0 {
 		return tt.task.tick()
 	}
@@ -1153,6 +1154,16 @@ func (task *migrate) tick() error {
 	return task.currentState.tick()
 }
 
+func (task *migrate) abandon() {
+	task.ensureStopEmigrator()
+	task.targetConfig.abandon()
+}
+
+func (task *migrate) completed() error {
+	task.ensureStopEmigrator()
+	return task.targetConfig.completed()
+}
+
 func (task *migrate) nextState() error {
 	switch task.currentState {
 	case &task.migrateInstall:
@@ -1209,17 +1220,33 @@ func (task *migrateAwaitProposerDrain) tick() error {
 	return nil
 }
 
-type migrateAwaitVarBarrier struct{ *migrate }
+type migrateAwaitVarBarrier struct {
+	*migrate
+	emigrator *emigrator
+}
 
 func (task *migrateAwaitVarBarrier) migrateInnerStateWitness() {}
 func (task *migrateAwaitVarBarrier) init(migrate *migrate)     { task.migrate = migrate }
 func (task *migrateAwaitVarBarrier) tick() error {
 	if task.varBarrierReached != nil && task.varBarrierReached.Configuration.Equal(task.active.Configuration) {
 		log.Println("Topology: Var barrier achieved. Migration can proceed.")
-		// launch emigrators
+		task.ensureEmigrator()
 		return task.nextState()
 	}
 	return nil
+}
+
+func (task *migrateAwaitVarBarrier) ensureEmigrator() {
+	if task.emigrator == nil {
+		task.emigrator = newEmigrator(task)
+	}
+}
+
+func (task *migrateAwaitVarBarrier) ensureStopEmigrator() {
+	if task.emigrator != nil {
+		task.emigrator.stopAsync()
+		task.emigrator = nil
+	}
 }
 
 type migrateAwaitImmigrations struct{ *migrate }
@@ -1236,13 +1263,13 @@ func (task *migrateAwaitImmigrations) tick() error {
 	if !found {
 		return nil
 	}
-	f := int(task.active.F)
+	fInc := int(task.active.FInc)
 	topology := task.active.Clone()
 	changed := false
 	for sender, inprogressPtr := range senders {
 		if atomic.LoadInt32(inprogressPtr) == 0 {
 			// Because we wait for locallyComplete, we know they've gone to disk.
-			changed = topology.Next().Pending.SuppliedBy(task.connectionManager.RMId, sender, f) || changed
+			changed = topology.Next().Pending.SuppliedBy(task.connectionManager.RMId, sender, fInc) || changed
 		}
 	}
 	if !changed {
@@ -1264,7 +1291,7 @@ func (task *migrateAwaitImmigrations) tick() error {
 	curRMsNE := curRMs.NonEmpty()
 	added := task.active.Next().NewRMIds
 	active, passive := task.partitionActivePassive(curRMsNE, added)
-	f = (len(curRMsNE) + len(added)) >> 1
+	f := (len(curRMsNE) + len(added)) >> 1
 
 	if len(active) <= f {
 		// too many failures right now
@@ -1662,4 +1689,103 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 		return true, nil
 	}
 	return false, fmt.Errorf("Internal error: creation of root gave rerun outcome")
+}
+
+// emigrator
+
+type emigrator struct {
+	stop              int32
+	connectionManager *ConnectionManager
+	nextTopology      *configuration.NextConfiguration
+}
+
+func newEmigrator(task *migrateAwaitVarBarrier) *emigrator {
+	e := &emigrator{
+		connectionManager: task.connectionManager,
+		nextTopology:      task.active.Next(),
+	}
+	e.connectionManager.AddSender(e)
+	return e
+}
+
+func (e *emigrator) stopAsync() {
+	atomic.StoreInt32(&e.stop, 1)
+	e.connectionManager.RemoveSenderAsync(e)
+}
+
+func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+	batchConds := make(map[paxos.Connection]configuration.Cond)
+	for rmId, cond := range e.nextTopology.Pending {
+		if rmId == e.connectionManager.RMId {
+			continue
+		}
+		if conn, found := conns[rmId]; found {
+			batchConds[conn] = cond.Cond
+		}
+	}
+	if len(batchConds) > 0 {
+		e.startBatch(batchConds)
+	}
+}
+
+func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {}
+
+func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
+	if rmId == e.connectionManager.RMId {
+		return
+	}
+	if cond, found := e.nextTopology.Pending[rmId]; found {
+		batchConds := map[paxos.Connection]configuration.Cond{
+			conn: cond.Cond,
+		}
+		e.startBatch(batchConds)
+	}
+}
+
+func (e *emigrator) startBatch(batch map[paxos.Connection]configuration.Cond) {
+	it := &dbIterator{
+		emigrator: e,
+		batch:     batch,
+	}
+	go it.iterate()
+}
+
+type dbIterator struct {
+	*emigrator
+	batch map[paxos.Connection]configuration.Cond
+}
+
+func (it *dbIterator) iterate() {
+	// do the iteration, then:
+
+	it.connectionManager.AddSender(it)
+}
+
+func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+	defer it.connectionManager.RemoveSenderAsync(it)
+
+	if atomic.LoadInt32(&it.stop) == 1 {
+		return
+	}
+
+	seg := capn.NewBuffer(nil)
+	msg := msgs.NewRootMessage(seg)
+	mc := msgs.NewMigrationComplete(seg)
+	mc.SetVersion(it.nextTopology.Version)
+	msg.SetMigrationComplete(mc)
+	bites := server.SegToBytes(seg)
+
+	for connOrig := range it.batch {
+		if conn, found := conns[connOrig.RMId()]; found && connOrig == conn {
+			// The connection has not changed since we started sending to
+			// it (because we cached it, you can discount the issue of
+			// memory reuse here - phew). Therefore, it's safe to send
+			// the completion msg.
+			log.Println("Sending migration completion to", conn.RMId())
+			conn.Send(bites)
+		}
+	}
+}
+func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]paxos.Connection) {}
+func (it *dbIterator) ConnectionEstablished(common.RMId, paxos.Connection, map[common.RMId]paxos.Connection) {
 }
