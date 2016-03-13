@@ -300,7 +300,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			future := tt.disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
 				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
 			})
-			tt.connectionManager.SetDesiredServers(localHost, remoteHosts, true)
+			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
 			for version := range tt.migrations {
 				if version <= topology.Version {
 					delete(tt.migrations, version)
@@ -712,7 +712,7 @@ func (task *joinCluster) tick() error {
 	// we may not have the youngest topology and there could be other
 	// hosts who have connected to us who are trying to send us a more
 	// up to date topology. So we shouldn't kill off those connections.
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 
 	// It's possible that different members of our goal are trying to
 	// achieve different goals, so in all cases, we should share our
@@ -901,7 +901,7 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts, false)
+		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
 	}
 	allFound, err := task.verifyRoots(task.active.Root.VarUUId, allRemoteHosts)
 	if err != nil {
@@ -1082,7 +1082,7 @@ func (task *installTargetNew) tick() error {
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
 
@@ -1211,7 +1211,7 @@ func (task *migrateInstall) tick() error {
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
 	task.installTopology(task.active)
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 	return task.nextState()
 }
@@ -1367,7 +1367,7 @@ func (task *installCompletion) tick() error {
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
 

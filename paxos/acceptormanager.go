@@ -10,6 +10,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 )
@@ -24,6 +25,7 @@ type AcceptorManager struct {
 	Exe               *dispatcher.Executor
 	instances         map[instanceId]*instance
 	acceptors         map[common.TxnId]*acceptorInstances
+	Topology          *configuration.Topology
 }
 
 func NewAcceptorManager(exe *dispatcher.Executor, cm ConnectionManager, server *mdbs.MDBServer) *AcceptorManager {
@@ -128,6 +130,13 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 
 	acc.Start()
 	return nil
+}
+
+func (am *AcceptorManager) SetTopology(topology *configuration.Topology) {
+	am.Topology = topology
+	for _, ai := range am.acceptors {
+		ai.acceptor.TopologyChange(topology)
+	}
 }
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {

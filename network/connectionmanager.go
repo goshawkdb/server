@@ -102,7 +102,6 @@ func (cmms connectionManagerMsgShutdown) connectionManagerMsgWitness() {}
 type connectionManagerMsgSetDesired struct {
 	local  string
 	remote []string
-	kill   bool
 }
 
 func (cmmsd *connectionManagerMsgSetDesired) connectionManagerMsgWitness() {}
@@ -172,11 +171,10 @@ func (cm *ConnectionManager) Shutdown() {
 	<-c
 }
 
-func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string, killUnknown bool) {
+func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string) {
 	cm.enqueueQuery(&connectionManagerMsgSetDesired{
 		local:  localhost,
 		remote: remotehosts,
-		kill:   killUnknown,
 	})
 }
 
@@ -390,42 +388,29 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 }
 
 func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDesired) {
-	oldServers := cm.servers
-	delete(oldServers, cm.localHost)
+	cm.desired = hosts.remote
+
 	localHostChanged := cm.localHost != hosts.local
 	cm.Lock()
 	cm.localHost = hosts.local
 	cm.Unlock()
-	cm.desired = hosts.remote
-	cm.servers = make(map[string]*connectionManagerMsgServerEstablished)
-	cd := cm.rmToServer[cm.RMId]
+
 	if localHostChanged {
+		cd := cm.rmToServer[cm.RMId]
+		delete(cm.rmToServer, cd.rmId)
 		cm.sendersConnectionLost(cd.rmId)
 		cd = cd.clone()
 		cd.host = cm.localHost
 		cm.rmToServer[cd.rmId] = cd
 		cm.servers[cm.localHost] = cd
-		cm.sendersConnectionEstablished(cd.rmId, cd)
+		cm.sendersConnectionEstablished(cd)
 	}
 
 	for _, host := range hosts.remote {
-		if cd, found := oldServers[host]; found {
-			cm.servers[host] = cd
-			delete(oldServers, host)
-		} else {
+		if _, found := cm.servers[host]; !found {
 			cm.servers[host] = &connectionManagerMsgServerEstablished{
 				Connection: NewConnectionToDial(host, cm),
 				host:       host,
-			}
-		}
-	}
-
-	if hosts.kill {
-		for _, cd := range oldServers {
-			cd.Shutdown(false)
-			if cd.established {
-				delete(cm.rmToServer, cd.rmId)
-				cm.sendersConnectionLost(cd.rmId)
 			}
 		}
 	}
@@ -438,9 +423,11 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 	} else if found {
 		killOld, killNew := false, false
 		switch {
-		case cd.established && cd.rmId != connEst.rmId:
+		case !cd.established:
+			killOld = true
+		case cd.rmId != connEst.rmId:
 			killOld, killNew = true, true
-		case !cd.established || cd.bootCount < connEst.bootCount:
+		case cd.bootCount < connEst.bootCount:
 			killOld = true
 		case cd.bootCount > connEst.bootCount:
 			killNew = true
@@ -468,9 +455,6 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 			}
 			return
 		}
-
-	} else {
-		cm.servers[connEst.host] = connEst
 	}
 
 	if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.rmId == cm.RMId {
@@ -482,7 +466,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 			host:       connEst.host,
 		}
 
-	} else if found {
+	} else if found && connEst.host != cd.host {
 		log.Printf("%v claimed by multiple servers: %v and %v. Recreating both connections.",
 			connEst.rmId, cd.host, connEst.host)
 		cd.Shutdown(false)
@@ -501,7 +485,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 	} else {
 		cm.servers[connEst.host] = connEst
 		cm.rmToServer[connEst.rmId] = connEst
-		cm.sendersConnectionEstablished(connEst.rmId, connEst)
+		cm.sendersConnectionEstablished(connEst)
 	}
 }
 
@@ -542,10 +526,10 @@ func (cm *ConnectionManager) removeSender(sender paxos.Sender, resultChan chan s
 	}
 }
 
-func (cm *ConnectionManager) sendersConnectionEstablished(rmId common.RMId, cd *connectionManagerMsgServerEstablished) {
+func (cm *ConnectionManager) sendersConnectionEstablished(cd *connectionManagerMsgServerEstablished) {
 	rmToServerCopy := cm.cloneRMToServer()
 	for sender := range cm.senders {
-		sender.ConnectionEstablished(rmId, cd, rmToServerCopy)
+		sender.ConnectionEstablished(cd.rmId, cd, rmToServerCopy)
 	}
 }
 
@@ -563,19 +547,31 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, pr
 	cm.topology = topology
 	cd := cm.rmToServer[cm.RMId]
 	if topology.Root.VarUUId.Compare(cd.rootId) != common.EQ {
+		delete(cm.rmToServer, cd.rmId)
 		cm.sendersConnectionLost(cd.rmId)
 		cd = cd.clone()
 		cd.rootId = topology.Root.VarUUId
 		cm.rmToServer[cm.RMId] = cd
 		cm.servers[cd.host] = cd
-		cm.sendersConnectionEstablished(cd.rmId, cd)
+		cm.sendersConnectionEstablished(cd)
 	}
 	server.Log("Topology change:", topology)
+	for rmId := range topology.RMsRemoved() {
+		if cd, found := cm.rmToServer[rmId]; found {
+			cd.Shutdown(false)
+			delete(cm.rmToServer, cd.rmId)
+			delete(cm.servers, cd.host)
+			if cd.established {
+				cm.sendersConnectionLost(cd.rmId)
+			}
+		}
+	}
 	rmToServerCopy := cm.cloneRMToServer()
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
 	}
 	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, proposersInstalled)
+	cm.Dispatchers.AcceptorDispatcher.SetTopology(topology)
 }
 
 func (cm *ConnectionManager) getTopology(msg *connectionManagerMsgGetTopology) {

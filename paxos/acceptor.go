@@ -7,6 +7,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"log"
 )
@@ -230,10 +231,19 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	allocs := aalc.ballotAccumulator.Txn.Allocations()
 	aalc.pendingTLC = make(map[common.RMId]server.EmptyStruct, allocs.Len())
 	aalc.tgcRecipients = make([]common.RMId, 0, allocs.Len())
+
+	var rmsRemoved map[common.RMId]server.EmptyStruct
+	if aalc.acceptorManager.Topology != nil {
+		rmsRemoved = aalc.acceptorManager.Topology.RMsRemoved()
+	}
+
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
 		active := alloc.Active() != 0
 		rmId := common.RMId(alloc.RmId())
+		if _, found := rmsRemoved[rmId]; found {
+			continue
+		}
 		if aalc.sendToAllOnDisk || active {
 			if _, found := aalc.tlcsReceived[rmId]; !found {
 				aalc.pendingTLC[rmId] = server.EmptyStructVal
@@ -271,6 +281,12 @@ func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(sender c
 	if !aalc.tscReceived {
 		aalc.tscReceived = true
 		aalc.maybeDelete()
+	}
+}
+
+func (aalc *acceptorAwaitLocallyComplete) TopologyChange(topology *configuration.Topology) {
+	for rmId := range topology.RMsRemoved() {
+		aalc.TxnLocallyCompleteReceived(rmId)
 	}
 }
 
