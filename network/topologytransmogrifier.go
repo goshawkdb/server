@@ -1098,13 +1098,26 @@ func (task *installTargetNew) tick() error {
 	// far and therefore how much of the pending work we can do in one
 	// shot.
 	curRMs := task.active.RMs()
-	curRMsNE := curRMs.NonEmpty()
+	nextRMs := task.active.Next().RMs()
+	rms := common.RMIds(make([]common.RMId, len(curRMs)))
+	copy(rms, curRMs)
+	for idx, rmId := range rms {
+		if idx == len(nextRMs) {
+			break
+		} else if rmId == task.connectionManager.RMId {
+			continue
+		} else if nextRMId := nextRMs[idx]; nextRMId != rmId && nextRMId != common.RMIdEmpty {
+			// wipe out rms that have been wiped out
+			rms[idx] = common.RMIdEmpty
+		}
+	}
+	rmsNE := rms.NonEmpty()
 	added := task.active.Next().NewRMIds
 	alreadyExtendedTo := added[:len(added)-len(task.active.Next().PendingInstall)]
-	active, passive := task.partitionActivePassive(curRMsNE, alreadyExtendedTo)
+	active, passive := task.partitionActivePassive(rmsNE, alreadyExtendedTo)
 
 	f := len(active) - 1
-	if len(curRMsNE) == 1 && f == 0 {
+	if len(rmsNE) == 1 && f == 0 {
 		log.Println("You've asked to extend the cluster from a single node.\n This is not guaranteed to be safe: if another node within the target\n configuration is performing a different configuration change concurrently\n then it's possible I won't be able to prevent divergence.\n Odds are it'll be fine though, I just can't guarantee it.")
 		f++
 	}
@@ -1313,11 +1326,25 @@ func (task *migrateAwaitImmigrations) tick() error {
 	} else if !allFound {
 		return nil
 	}
+
 	curRMs := task.active.RMs()
-	curRMsNE := curRMs.NonEmpty()
+	nextRMs := task.active.Next().RMs()
+	rms := common.RMIds(make([]common.RMId, len(curRMs)))
+	copy(rms, curRMs)
+	for idx, rmId := range rms {
+		if idx == len(nextRMs) {
+			break
+		} else if rmId == task.connectionManager.RMId {
+			continue
+		} else if nextRMId := nextRMs[idx]; nextRMId != rmId && nextRMId != common.RMIdEmpty {
+			// wipe out rms that have been wiped out
+			rms[idx] = common.RMIdEmpty
+		}
+	}
+	rmsNE := rms.NonEmpty()
 	added := task.active.Next().NewRMIds
-	active, passive := task.partitionActivePassive(curRMsNE, added)
-	f := (len(curRMsNE) + len(added)) >> 1
+	active, passive := task.partitionActivePassive(rmsNE, added)
+	f := (len(rmsNE) + len(added)) >> 1
 
 	if len(active) <= f {
 		// too many failures right now
@@ -1379,10 +1406,23 @@ func (task *installCompletion) tick() error {
 	}
 
 	curRMs := task.active.RMs()
-	curRMsNE := curRMs.NonEmpty()
+	nextRMs := task.active.Next().RMs()
+	rms := common.RMIds(make([]common.RMId, len(curRMs)))
+	copy(rms, curRMs)
+	for idx, rmId := range rms {
+		if idx == len(nextRMs) {
+			break
+		} else if rmId == task.connectionManager.RMId {
+			continue
+		} else if nextRMId := nextRMs[idx]; nextRMId != rmId && nextRMId != common.RMIdEmpty {
+			// wipe out rms that have been wiped out
+			rms[idx] = common.RMIdEmpty
+		}
+	}
+	rmsNE := rms.NonEmpty()
 	added := task.active.Next().NewRMIds
-	active, passive := task.partitionActivePassive(curRMsNE, added)
-	f := (len(curRMsNE) + len(added)) >> 1
+	active, passive := task.partitionActivePassive(rmsNE, added)
+	f := (len(rmsNE) + len(added)) >> 1
 
 	if len(active) <= f {
 		// too many failures right now

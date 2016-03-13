@@ -556,13 +556,15 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, pr
 		cm.sendersConnectionEstablished(cd)
 	}
 	server.Log("Topology change:", topology)
-	for rmId := range topology.RMsRemoved() {
-		if cd, found := cm.rmToServer[rmId]; found {
-			cd.Shutdown(false)
-			delete(cm.rmToServer, cd.rmId)
-			delete(cm.servers, cd.host)
-			if cd.established {
-				cm.sendersConnectionLost(cd.rmId)
+	if topology.Next() == nil {
+		for rmId := range topology.RMsRemoved() {
+			if cd, found := cm.rmToServer[rmId]; found {
+				cd.Shutdown(false)
+				delete(cm.rmToServer, cd.rmId)
+				delete(cm.servers, cd.host)
+				if cd.established {
+					cm.sendersConnectionLost(cd.rmId)
+				}
 			}
 		}
 	}
