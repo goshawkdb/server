@@ -504,7 +504,7 @@ func (cs Conds) SuppliedBy(requester, supplier common.RMId, maxSuppliers int) bo
 				return false
 			}
 		}
-		condSup.Suppliers = append(condSup.Suppliers, requester)
+		condSup.Suppliers = append(condSup.Suppliers, supplier)
 		if len(condSup.Suppliers) == maxSuppliers {
 			delete(cs, requester)
 		}

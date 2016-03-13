@@ -688,7 +688,6 @@ func (task *ensureLocalTopology) tick() error {
 
 type joinCluster struct {
 	*targetConfig
-	installing bool
 }
 
 func (task *joinCluster) tick() error {
@@ -702,11 +701,11 @@ func (task *joinCluster) tick() error {
 		// target.
 		return task.fatal(err)
 	}
-	if !task.installing {
-		task.installing = true
-		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	}
+
+	// must install to connectionManager before launching any connections
+	task.installTopology(task.active)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+
 	// It's possible that different members of our goal are trying to
 	// achieve different goals, so in all cases, we should share our
 	// goal with them and there should only be one winner.
@@ -767,6 +766,13 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	targetTopology := configuration.NewTopology(task.active.DBVersion, nil, task.config.Configuration)
 	targetTopology.SetRMs(allRMIds)
 
+	activeWithNext := task.active.Clone()
+	activeWithNext.SetNext(&configuration.NextConfiguration{Configuration: targetTopology.Configuration})
+
+	// We're about to create and run a txn, so we must make sure that
+	// txn's topology version is acceptable to our proposers.
+	task.installTopology(activeWithNext)
+
 	switch resubmit, err := task.attemptCreateRoot(targetTopology); {
 	case err != nil:
 		return task.fatal(err)
@@ -788,8 +794,9 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// sure that all peers are empty and moving to the same topology
 	// is to have all peers as active.
 
-	activeWithNext := task.active.Clone()
-	activeWithNext.SetNext(&configuration.NextConfiguration{Configuration: targetTopology.Configuration})
+	// If we got this far then attemptCreateRoot will have modified
+	// targetTopology to include the updated root. We should install
+	// this to the connectionManager.
 	task.installTopology(activeWithNext)
 
 	result, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
@@ -1122,7 +1129,7 @@ func (task *installTargetNew) tick() error {
 
 type migrate struct {
 	*targetConfig
-	varBarrierReached *configuration.Topology
+	varBarrierReached *configuration.Configuration
 	migrateInstall
 	migrateAwaitProposerDrain
 	migrateAwaitVarBarrier
@@ -1204,12 +1211,13 @@ type migrateAwaitProposerDrain struct{ *migrate }
 func (task *migrateAwaitProposerDrain) migrateInnerStateWitness() {}
 func (task *migrateAwaitProposerDrain) init(migrate *migrate)     { task.migrate = migrate }
 func (task *migrateAwaitProposerDrain) tick() error {
-	if task.installedOnProposers != nil && task.installedOnProposers.Configuration.Equal(task.active.Configuration) {
+	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
+		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
 		log.Println("Topology: Topology installed on proposers. Waiting for txns in old topology to drain.")
-		topology := task.active
+		nextConfig := task.active.Next().Configuration
 		task.connectionManager.Dispatchers.VarDispatcher.OnAllCommitted(func() {
 			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-				task.varBarrierReached = topology
+				task.varBarrierReached = nextConfig
 				if task.task == task.migrate {
 					return task.task.tick()
 				}
@@ -1229,7 +1237,7 @@ type migrateAwaitVarBarrier struct {
 func (task *migrateAwaitVarBarrier) migrateInnerStateWitness() {}
 func (task *migrateAwaitVarBarrier) init(migrate *migrate)     { task.migrate = migrate }
 func (task *migrateAwaitVarBarrier) tick() error {
-	if task.varBarrierReached != nil && task.varBarrierReached.Configuration.Equal(task.active.Configuration) {
+	if task.varBarrierReached != nil && task.varBarrierReached.Equal(task.active.Next().Configuration) {
 		log.Println("Topology: Var barrier achieved. Migration can proceed.")
 		_, _, err := task.active.LocalRemoteHosts(task.listenPort)
 		if err == nil {
@@ -1267,13 +1275,17 @@ func (task *migrateAwaitImmigrations) tick() error {
 	if !found {
 		return nil
 	}
-	fInc := int(task.active.FInc)
+	maxSuppliers := task.active.RMs().NonEmptyLen() - int(task.active.F)
+	if _, _, err := task.active.LocalRemoteHosts(task.listenPort); err == nil {
+		// We were part of the old topology, so we have already supplied ourselves!
+		maxSuppliers--
+	}
 	topology := task.active.Clone()
 	changed := false
 	for sender, inprogressPtr := range senders {
 		if atomic.LoadInt32(inprogressPtr) == 0 {
 			// Because we wait for locallyComplete, we know they've gone to disk.
-			changed = topology.Next().Pending.SuppliedBy(task.connectionManager.RMId, sender, fInc) || changed
+			changed = topology.Next().Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
 		}
 	}
 	if !changed {
