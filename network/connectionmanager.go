@@ -102,6 +102,7 @@ func (cmms connectionManagerMsgShutdown) connectionManagerMsgWitness() {}
 type connectionManagerMsgSetDesired struct {
 	local  string
 	remote []string
+	kill   bool
 }
 
 func (cmmsd *connectionManagerMsgSetDesired) connectionManagerMsgWitness() {}
@@ -171,10 +172,11 @@ func (cm *ConnectionManager) Shutdown() {
 	<-c
 }
 
-func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string) {
+func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string, killUnknown bool) {
 	cm.enqueueQuery(&connectionManagerMsgSetDesired{
 		local:  localhost,
 		remote: remotehosts,
+		kill:   killUnknown,
 	})
 }
 
@@ -418,11 +420,13 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 		}
 	}
 
-	for _, cd := range oldServers {
-		cd.Shutdown(false)
-		if cd.established {
-			delete(cm.rmToServer, cd.rmId)
-			cm.sendersConnectionLost(cd.rmId)
+	if hosts.kill {
+		for _, cd := range oldServers {
+			cd.Shutdown(false)
+			if cd.established {
+				delete(cm.rmToServer, cd.rmId)
+				cm.sendersConnectionLost(cd.rmId)
+			}
 		}
 	}
 }

@@ -40,12 +40,12 @@ type TopologyTransmogrifier struct {
 }
 
 type topologyTransmogrifierMsg interface {
-	topologyTransmogrifierMsgWitness()
+	witness() topologyTransmogrifierMsg
 }
 
 type topologyTransmogrifierMsgShutdown struct{}
 
-func (ttms *topologyTransmogrifierMsgShutdown) topologyTransmogrifierMsgWitness() {}
+func (ttms *topologyTransmogrifierMsgShutdown) witness() topologyTransmogrifierMsg { return ttms }
 
 var topologyTransmogrifierMsgShutdownInst = &topologyTransmogrifierMsgShutdown{}
 
@@ -62,26 +62,32 @@ func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configurati
 		&configuration.NextConfiguration{Configuration: config}))
 }
 
-func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) topologyTransmogrifierMsgWitness() {}
+func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) witness() topologyTransmogrifierMsg {
+	return ttmrcc
+}
 
 type topologyTransmogrifierMsgSetActiveConnections map[common.RMId]paxos.Connection
 
-func (ttmsac topologyTransmogrifierMsgSetActiveConnections) topologyTransmogrifierMsgWitness() {}
+func (ttmsac topologyTransmogrifierMsgSetActiveConnections) witness() topologyTransmogrifierMsg {
+	return ttmsac
+}
 
 type topologyTransmogrifierMsgTopologyObserved configuration.Topology
 
-func (ttmvc *topologyTransmogrifierMsgTopologyObserved) topologyTransmogrifierMsgWitness() {}
+func (ttmvc *topologyTransmogrifierMsgTopologyObserved) witness() topologyTransmogrifierMsg {
+	return ttmvc
+}
 
 type topologyTransmogrifierMsgExe func() error
 
-func (ttme topologyTransmogrifierMsgExe) topologyTransmogrifierMsgWitness() {}
+func (ttme topologyTransmogrifierMsgExe) witness() topologyTransmogrifierMsg { return ttme }
 
 type topologyTransmogrifierMsgMigration struct {
 	migration *msgs.Migration
 	sender    common.RMId
 }
 
-func (ttmm *topologyTransmogrifierMsgMigration) topologyTransmogrifierMsgWitness() {}
+func (ttmm *topologyTransmogrifierMsgMigration) witness() topologyTransmogrifierMsg { return ttmm }
 
 func (tt *TopologyTransmogrifier) MigrationReceived(sender common.RMId, migration *msgs.Migration) {
 	tt.enqueueQuery(&topologyTransmogrifierMsgMigration{
@@ -95,7 +101,9 @@ type topologyTransmogrifierMsgMigrationComplete struct {
 	sender   common.RMId
 }
 
-func (ttmmc *topologyTransmogrifierMsgMigrationComplete) topologyTransmogrifierMsgWitness() {}
+func (ttmmc *topologyTransmogrifierMsgMigrationComplete) witness() topologyTransmogrifierMsg {
+	return ttmmc
+}
 
 func (tt *TopologyTransmogrifier) MigrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) {
 	tt.enqueueQuery(&topologyTransmogrifierMsgMigrationComplete{
@@ -292,7 +300,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			future := tt.disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
 				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
 			})
-			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
+			tt.connectionManager.SetDesiredServers(localHost, remoteHosts, true)
 			for version := range tt.migrations {
 				if version <= topology.Version {
 					delete(tt.migrations, version)
@@ -426,7 +434,7 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *topologyTransmogrifierMsgMigrationComplete) error {
 	version := migrationComplete.complete.Version()
 	sender := migrationComplete.sender
-	log.Printf("MCR from %v (%v)\n", sender, version)
+	log.Printf("MCR from %v (v%v)\n", sender, version)
 	senders, found := tt.migrations[version]
 	if !found {
 		if version > tt.active.Version {
@@ -492,6 +500,7 @@ type topologyTask interface {
 	tick() error
 	abandon()
 	goal() *configuration.NextConfiguration
+	witness() topologyTask
 }
 
 // targetConfig
@@ -553,13 +562,9 @@ func (task *targetConfig) ensureRemoveTaskSender() {
 	}
 }
 
-func (task *targetConfig) abandon() {
-	task.ensureRemoveTaskSender()
-}
-
-func (task *targetConfig) goal() *configuration.NextConfiguration {
-	return task.config
-}
+func (task *targetConfig) abandon()                               { task.ensureRemoveTaskSender() }
+func (task *targetConfig) goal() *configuration.NextConfiguration { return task.config }
+func (task *targetConfig) witness() topologyTask                  { return task }
 
 func (task *targetConfig) fatal(err error) error {
 	task.ensureRemoveTaskSender()
@@ -704,7 +709,10 @@ func (task *joinCluster) tick() error {
 
 	// must install to connectionManager before launching any connections
 	task.installTopology(task.active)
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	// we may not have the youngest topology and there could be other
+	// hosts who have connected to us who are trying to send us a more
+	// up to date topology. So we shouldn't kill off those connections.
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
 
 	// It's possible that different members of our goal are trying to
 	// achieve different goals, so in all cases, we should share our
@@ -893,7 +901,7 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
+		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts, false)
 	}
 	allFound, err := task.verifyRoots(task.active.Root.VarUUId, allRemoteHosts)
 	if err != nil {
@@ -1074,7 +1082,7 @@ func (task *installTargetNew) tick() error {
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
 	}
 	task.shareGoalWithAll()
 
@@ -1138,10 +1146,12 @@ type migrate struct {
 	currentState migrateInnerState
 }
 
+func (task *migrate) witness() topologyTask { return task.targetConfig.witness() }
+
 type migrateInnerState interface {
 	init(*migrate)
 	tick() error
-	migrateInnerStateWitness()
+	witness() migrateInnerState
 }
 
 func (task *migrate) tick() error {
@@ -1191,8 +1201,8 @@ func (task *migrate) nextState() error {
 
 type migrateInstall struct{ *migrate }
 
-func (task *migrateInstall) migrateInnerStateWitness() {}
-func (task *migrateInstall) init(migrate *migrate)     { task.migrate = migrate }
+func (task *migrateInstall) witness() migrateInnerState { return task }
+func (task *migrateInstall) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateInstall) tick() error {
 	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
@@ -1201,15 +1211,15 @@ func (task *migrateInstall) tick() error {
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
 	task.installTopology(task.active)
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
 	task.shareGoalWithAll()
 	return task.nextState()
 }
 
 type migrateAwaitProposerDrain struct{ *migrate }
 
-func (task *migrateAwaitProposerDrain) migrateInnerStateWitness() {}
-func (task *migrateAwaitProposerDrain) init(migrate *migrate)     { task.migrate = migrate }
+func (task *migrateAwaitProposerDrain) witness() migrateInnerState { return task }
+func (task *migrateAwaitProposerDrain) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitProposerDrain) tick() error {
 	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
 		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
@@ -1234,8 +1244,8 @@ type migrateAwaitVarBarrier struct {
 	emigrator *emigrator
 }
 
-func (task *migrateAwaitVarBarrier) migrateInnerStateWitness() {}
-func (task *migrateAwaitVarBarrier) init(migrate *migrate)     { task.migrate = migrate }
+func (task *migrateAwaitVarBarrier) witness() migrateInnerState { return task }
+func (task *migrateAwaitVarBarrier) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitVarBarrier) tick() error {
 	if task.varBarrierReached != nil && task.varBarrierReached.Equal(task.active.Next().Configuration) {
 		log.Println("Topology: Var barrier achieved. Migration can proceed.")
@@ -1263,8 +1273,8 @@ func (task *migrateAwaitVarBarrier) ensureStopEmigrator() {
 
 type migrateAwaitImmigrations struct{ *migrate }
 
-func (task *migrateAwaitImmigrations) migrateInnerStateWitness() {}
-func (task *migrateAwaitImmigrations) init(migrate *migrate)     { task.migrate = migrate }
+func (task *migrateAwaitImmigrations) witness() migrateInnerState { return task }
+func (task *migrateAwaitImmigrations) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitImmigrations) tick() error {
 	if _, found := task.active.Next().Pending[task.connectionManager.RMId]; !found {
 		log.Println("Topology: All migration into this RM completed.")
@@ -1319,7 +1329,7 @@ func (task *migrateAwaitImmigrations) tick() error {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.enqueueTick(task)
+		task.enqueueTick(task.migrate)
 		return nil
 	}
 	// Must be badread, which means again we should receive the
@@ -1329,8 +1339,8 @@ func (task *migrateAwaitImmigrations) tick() error {
 
 type migrateAwaitNoPending struct{ *migrate }
 
-func (task *migrateAwaitNoPending) migrateInnerStateWitness() {}
-func (task *migrateAwaitNoPending) init(migrate *migrate)     { task.migrate = migrate }
+func (task *migrateAwaitNoPending) witness() migrateInnerState { return task }
+func (task *migrateAwaitNoPending) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitNoPending) tick() error {
 	// do nothing here: the migrate tick() will spot when the Pending array has emptied.
 	return nil
@@ -1357,7 +1367,7 @@ func (task *installCompletion) tick() error {
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts, false)
 	}
 	task.shareGoalWithAll()
 
