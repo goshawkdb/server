@@ -589,11 +589,14 @@ func (task *targetConfig) activeChange(active *configuration.Topology) error {
 	return task.setActive(active)
 }
 
-func (task *targetConfig) partitionActivePassive(rmIdLists ...common.RMIds) (active, passive common.RMIds) {
+// NB filters out empty RMIds so no need to pre-filter.
+func (task *targetConfig) partitionByActiveConnection(rmIdLists ...common.RMIds) (active, passive common.RMIds) {
 	active, passive = []common.RMId{}, []common.RMId{}
 	for _, rmIds := range rmIdLists {
 		for _, rmId := range rmIds {
-			if _, found := task.activeConnections[rmId]; found {
+			if rmId == common.RMIdEmpty {
+				continue
+			} else if _, found := task.activeConnections[rmId]; found {
 				active = append(active, rmId)
 			} else {
 				passive = append(passive, rmId)
@@ -838,17 +841,23 @@ func (task *installTargetOld) tick() error {
 		return task.completed()
 	}
 
-	localHost, targetTopology, err := task.calculateTargetTopology()
+	targetTopology, err := task.calculateTargetTopology()
 	if err != nil || targetTopology == nil {
 		return err
 	}
 
 	task.shareGoalWithAll()
 
-	active, passive := task.chooseRMIdsForTopology(localHost, task.active)
-	if active == nil {
+	// Here, we just want to use the RMs in the old topology only.
+	active, passive := task.partitionByActiveConnection(task.active.RMs())
+	if len(active) <= len(passive) {
+		log.Printf("Can not make progress at this time due to too many failures (failures: %v)",
+			passive)
 		return nil
 	}
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	active, passive = active[:fInc], append(active[fInc:], passive...)
+
 	log.Printf("Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
 
 	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
@@ -864,10 +873,10 @@ func (task *installTargetOld) tick() error {
 	return nil
 }
 
-func (task *installTargetOld) calculateTargetTopology() (string, *configuration.Topology, error) {
+func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, error) {
 	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
-		return "", nil, task.fatal(err)
+		return nil, task.fatal(err)
 	}
 
 	hostsSurvived, hostsRemoved, hostsAdded :=
@@ -905,14 +914,16 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 	}
 	allFound, err := task.verifyRoots(task.active.Root.VarUUId, allRemoteHosts)
 	if err != nil {
-		return "", nil, task.error(err)
+		return nil, task.error(err)
 	} else if !allFound {
-		return "", nil, nil
+		return nil, nil
 	}
 
 	// map(old -> new)
 	rmIdsTranslation := make(map[common.RMId]common.RMId)
-	added := make([]common.RMId, 0, len(hostsAdded))
+	rmIdsAdded := make([]common.RMId, 0, len(hostsAdded))
+	rmIdsSurvived := make([]common.RMId, 0, len(hostsSurvived))
+	rmIdsLost := make([]common.RMId, 0, len(hostsRemoved))
 
 	// 3. Assume all old RMIds have been removed (so map to RMIdEmpty)
 	rmIdsOld := task.active.RMs().NonEmpty()
@@ -922,7 +933,7 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 	// 4. All new hosts must have new RMIds.
 	for host := range hostsAdded {
 		rmId := task.hostToConnection[host].RMId()
-		added = append(added, rmId)
+		rmIdsAdded = append(rmIdsAdded, rmId)
 	}
 	// 5. Problem is that hostsAdded may be missing entries for hosts
 	// that have been wiped and thus changed RMId
@@ -931,16 +942,16 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 		if _, found := rmIdsTranslation[rmId]; found {
 			// Hasn't changed RMId, so it maps to itself.
 			rmIdsTranslation[rmId] = rmId
+			rmIdsSurvived = append(rmIdsSurvived, rmId)
 		} else {
 			// It has changed RMId! The old RMId is already in
 			// rmIdsTranslation somewhere, but we don't know where, nor
 			// care until we order the RMIds
-			added = append(added, rmId)
+			rmIdsAdded = append(rmIdsAdded, rmId)
 		}
 	}
 
-	addedCopy := added
-	rmIdsRemoved := make(map[common.RMId]server.EmptyStruct)
+	rmIdsAddedCopy := rmIdsAdded
 
 	// Now construct the new RMId list.
 	rmIdsNew := make([]common.RMId, 0, len(allRemoteHosts)+1)
@@ -951,51 +962,58 @@ func (task *installTargetOld) calculateTargetTopology() (string, *configuration.
 		// If rmIdNew is RMIdEmpty then it's the removal of an old RMId,
 		// which again we can fill in with added RMIds.
 		switch {
-		case rmIdOld == common.RMIdEmpty && len(addedCopy) > 0:
-			rmIdsNew = append(rmIdsNew, addedCopy[0])
-			addedCopy = addedCopy[1:]
+		case rmIdOld == common.RMIdEmpty && len(rmIdsAddedCopy) > 0:
+			rmIdsNew = append(rmIdsNew, rmIdsAddedCopy[0])
+			rmIdsAddedCopy = rmIdsAddedCopy[1:]
 		case rmIdOld == common.RMIdEmpty:
 			rmIdsNew = append(rmIdsNew, common.RMIdEmpty)
-		case rmIdNew == common.RMIdEmpty && len(addedCopy) > 0:
-			rmIdsNew = append(rmIdsNew, addedCopy[0])
-			rmIdsTranslation[rmIdOld] = addedCopy[0]
-			addedCopy = addedCopy[1:]
-			rmIdsRemoved[rmIdOld] = server.EmptyStructVal
+		case rmIdNew == common.RMIdEmpty && len(rmIdsAddedCopy) > 0:
+			rmIdsNew = append(rmIdsNew, rmIdsAddedCopy[0])
+			rmIdsTranslation[rmIdOld] = rmIdsAddedCopy[0]
+			rmIdsAddedCopy = rmIdsAddedCopy[1:]
+			rmIdsLost = append(rmIdsLost, rmIdOld)
 		default:
 			rmIdsNew = append(rmIdsNew, rmIdNew)
-			if rmIdOld != rmIdNew {
-				rmIdsRemoved[rmIdOld] = server.EmptyStructVal
+			if rmIdNew == common.RMIdEmpty {
+				rmIdsLost = append(rmIdsLost, rmIdOld)
 			}
 		}
 	}
 	// Finally, we may still have some new RMIds we never found space
 	// for.
-	rmIdsNew = append(rmIdsNew, addedCopy...)
+	rmIdsNew = append(rmIdsNew, rmIdsAddedCopy...)
 
 	targetTopology := task.active.Clone()
 	next := task.config.Configuration.Clone()
 	next.SetRMs(rmIdsNew)
+
 	// Pointer semantics, so we need to copy into our new set
+	removed := make(map[common.RMId]server.EmptyStruct)
 	alreadyRemoved := targetTopology.RMsRemoved()
 	for rmId := range alreadyRemoved {
-		rmIdsRemoved[rmId] = server.EmptyStructVal
+		removed[rmId] = server.EmptyStructVal
 	}
-	next.SetRMsRemoved(rmIdsRemoved)
-	conds := calculateMigrationConditions(rmIdsTranslation, added, task.active.Configuration, next)
+	for _, rmId := range rmIdsLost {
+		removed[rmId] = server.EmptyStructVal
+	}
+	next.SetRMsRemoved(removed)
+
+	conds := calculateMigrationConditions(rmIdsAdded, rmIdsLost, rmIdsSurvived, task.active.Configuration, next)
+
 	targetTopology.SetNext(&configuration.NextConfiguration{
 		Configuration:  next,
 		AllHosts:       append(allRemoteHosts, localHost),
-		NewRMIds:       added,
-		PendingInstall: added,
+		NewRMIds:       rmIdsAdded,
+		SurvivingRMIds: rmIdsSurvived,
+		LostRMIds:      rmIdsLost,
+		PendingInstall: rmIdsAdded,
 		Pending:        conds,
 	})
 
-	return localHost, targetTopology, nil
+	return targetTopology, nil
 }
 
-func calculateMigrationConditions(translation map[common.RMId]common.RMId, added []common.RMId, from, to *configuration.Configuration) configuration.Conds {
-	survivors := []common.RMId{}
-	removed := []common.RMId{}
+func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
 	conditions := configuration.Conds(make(map[common.RMId]*configuration.CondSuppliers))
 	twoFIncNew := to.F + to.F + 1
 	twoFIncOld := from.F + from.F + 1
@@ -1010,25 +1028,14 @@ func calculateMigrationConditions(translation map[common.RMId]common.RMId, added
 		})
 	}
 
-	for rmIdOld, rmIdNew := range translation {
-		// We ignore "changed" here because the newRMId will be in
-		// added.
-		switch {
-		case rmIdOld == rmIdNew: // survivor
-			survivors = append(survivors, rmIdOld)
-		case rmIdNew == common.RMIdEmpty: // removed
-			removed = append(removed, rmIdOld)
-		}
-	}
-
-	if len(removed) > 0 {
-		if int(twoFIncOld) < from.RMs().NonEmptyLen() && len(survivors) > 1 {
-			for _, rmId := range survivors {
+	if len(lost) > 0 {
+		if int(twoFIncOld) < from.RMs().NonEmptyLen() && len(survived) > 1 {
+			for _, rmId := range survived {
 				conditions.DisjoinWith(rmId, &configuration.Generator{
 					RMId:               rmId,
 					PermLen:            uint8(from.RMs().NonEmptyLen()),
 					Start:              twoFIncOld,
-					LenAdjustIntersect: removed,
+					LenAdjustIntersect: lost,
 					Includes:           true,
 				})
 			}
@@ -1036,7 +1043,7 @@ func calculateMigrationConditions(translation map[common.RMId]common.RMId, added
 	}
 
 	if from.F < to.F {
-		for _, rmId := range survivors {
+		for _, rmId := range survived {
 			conditions.DisjoinWith(rmId, &configuration.Conjunction{
 				Left: &configuration.Generator{
 					RMId:     rmId,
@@ -1069,7 +1076,8 @@ type installTargetNew struct {
 }
 
 func (task *installTargetNew) tick() error {
-	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) > 0) {
+	next := task.active.Next()
+	if !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) > 0) {
 		return task.completed()
 	}
 
@@ -1078,7 +1086,7 @@ func (task *installTargetNew) tick() error {
 		return task.fatal(err)
 	}
 
-	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
+	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
@@ -1097,40 +1105,30 @@ func (task *installTargetNew) tick() error {
 	// topology. Strategy is to figure out how much work we've done so
 	// far and therefore how much of the pending work we can do in one
 	// shot.
-	curRMs := task.active.RMs()
-	nextRMs := task.active.Next().RMs()
-	rms := common.RMIds(make([]common.RMId, len(curRMs)))
-	copy(rms, curRMs)
-	for idx, rmId := range rms {
-		if idx == len(nextRMs) {
-			break
-		} else if rmId == task.connectionManager.RMId {
-			continue
-		} else if nextRMId := nextRMs[idx]; nextRMId != rmId && nextRMId != common.RMIdEmpty {
-			// wipe out rms that have been wiped out
-			rms[idx] = common.RMIdEmpty
-		}
-	}
-	rmsNE := rms.NonEmpty()
-	added := task.active.Next().NewRMIds
-	alreadyExtendedTo := added[:len(added)-len(task.active.Next().PendingInstall)]
-	active, passive := task.partitionActivePassive(rmsNE, alreadyExtendedTo)
 
-	f := len(active) - 1
-	if len(rmsNE) == 1 && f == 0 {
-		log.Println("You've asked to extend the cluster from a single node.\n This is not guaranteed to be safe: if another node within the target\n configuration is performing a different configuration change concurrently\n then it's possible I won't be able to prevent divergence.\n Odds are it'll be fine though, I just can't guarantee it.")
-		f++
+	// Candidates are survivors + new progress. Lost/replaced always passive.
+	added := next.NewRMIds
+	alreadyExtendedTo := added[:len(added)-len(next.PendingInstall)]
+	active, passive := task.partitionByActiveConnection(next.SurvivingRMIds, alreadyExtendedTo)
+
+	maxPassive := len(active) - 1
+	if task.active.RMs().NonEmptyLen() == 1 {
+		log.Println("You've asked to extend the cluster from a single node.\n This is not guaranteed to be safe: if a distinct node within the target\n configuration is performing a different configuration change concurrently\n then it's possible I won't be able to prevent divergence.\n Odds are it'll be fine though, I just can't guarantee it.")
+		maxPassive++
 	}
-	if f <= len(passive) {
+	if (maxPassive - len(passive)) <= 0 {
 		// we're not going to make any progress here, Stop now.
 		log.Printf("Topology change: No progress possible (active: %v, passive %v)\n", active, passive)
 		return nil
 	}
-	passive = append(passive, task.active.Next().PendingInstall...)
-	if f > len(passive) {
-		f = len(passive)
+
+	passive = append(passive, next.PendingInstall...)
+	if maxPassive > len(passive) {
+		maxPassive = len(passive)
 	}
-	passive, pendingInstall := passive[:f], passive[f:]
+	passive, pendingInstall := passive[:maxPassive], passive[maxPassive:]
+	// do it this way around otherwise we risk overwriting pendingInstall
+	passive = append(next.LostRMIds, passive...)
 	log.Printf("Extending topology. Actives: %v; Passives: %v, PendingInstall: %v", active, passive, pendingInstall)
 
 	topology := task.active.Clone()
@@ -1304,11 +1302,12 @@ func (task *migrateAwaitImmigrations) tick() error {
 		maxSuppliers--
 	}
 	topology := task.active.Clone()
+	next := topology.Next()
 	changed := false
 	for sender, inprogressPtr := range senders {
 		if atomic.LoadInt32(inprogressPtr) == 0 {
 			// Because we wait for locallyComplete, we know they've gone to disk.
-			changed = topology.Next().Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
+			changed = next.Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
 		}
 	}
 	if !changed {
@@ -1319,7 +1318,7 @@ func (task *migrateAwaitImmigrations) tick() error {
 	if err != nil {
 		return task.fatal(err)
 	}
-	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
+	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	allFound, err := task.verifyRoots(task.active.Root.VarUUId, remoteHosts)
 	if err != nil {
 		return task.error(err)
@@ -1327,29 +1326,14 @@ func (task *migrateAwaitImmigrations) tick() error {
 		return nil
 	}
 
-	curRMs := task.active.RMs()
-	nextRMs := task.active.Next().RMs()
-	rms := common.RMIds(make([]common.RMId, len(curRMs)))
-	copy(rms, curRMs)
-	for idx, rmId := range rms {
-		if idx == len(nextRMs) {
-			break
-		} else if rmId == task.connectionManager.RMId {
-			continue
-		} else if nextRMId := nextRMs[idx]; nextRMId != rmId && nextRMId != common.RMIdEmpty {
-			// wipe out rms that have been wiped out
-			rms[idx] = common.RMIdEmpty
-		}
-	}
-	rmsNE := rms.NonEmpty()
-	added := task.active.Next().NewRMIds
-	active, passive := task.partitionActivePassive(rmsNE, added)
-	f := (len(rmsNE) + len(added)) >> 1
-
-	if len(active) <= f {
+	// By this point we only need the next RMs to form our
+	// 2F+1. LostRMs are always passive now
+	active, passive := task.partitionByActiveConnection(next.RMs())
+	if len(active) <= len(passive) {
 		// too many failures right now
 		return nil
 	}
+	passive = append(passive, next.LostRMIds...)
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
@@ -1381,7 +1365,8 @@ type installCompletion struct {
 }
 
 func (task *installCompletion) tick() error {
-	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0 && len(next.Pending) == 0) {
+	next := task.active.Next()
+	if !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0 && len(next.Pending) == 0) {
 		return task.completed()
 	}
 
@@ -1390,7 +1375,7 @@ func (task *installCompletion) tick() error {
 		return task.fatal(err)
 	}
 
-	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
+	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.active)
@@ -1405,32 +1390,17 @@ func (task *installCompletion) tick() error {
 		return nil
 	}
 
-	curRMs := task.active.RMs()
-	nextRMs := task.active.Next().RMs()
-	rms := common.RMIds(make([]common.RMId, len(curRMs)))
-	copy(rms, curRMs)
-	for idx, rmId := range rms {
-		if idx == len(nextRMs) {
-			break
-		} else if rmId == task.connectionManager.RMId {
-			continue
-		} else if nextRMId := nextRMs[idx]; nextRMId != rmId && nextRMId != common.RMIdEmpty {
-			// wipe out rms that have been wiped out
-			rms[idx] = common.RMIdEmpty
-		}
-	}
-	rmsNE := rms.NonEmpty()
-	added := task.active.Next().NewRMIds
-	active, passive := task.partitionActivePassive(rmsNE, added)
-	f := (len(rmsNE) + len(added)) >> 1
-
-	if len(active) <= f {
+	// As before, we use the new topology now and we only need to
+	// include the lostRMIds as passives.
+	active, passive := task.partitionByActiveConnection(next.RMs())
+	if len(active) <= len(passive) {
 		// too many failures right now
 		return nil
 	}
+	passive = append(passive, next.LostRMIds...)
 
 	topology := task.active.Clone()
-	topology.SetConfiguration(task.active.Next().Configuration)
+	topology.SetConfiguration(next.Configuration)
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
@@ -1656,30 +1626,6 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, a
 		return nil, false, err
 	}
 	return topology, false, nil
-}
-
-func (task *targetConfig) chooseRMIdsForTopology(localHost string, topology *configuration.Topology) ([]common.RMId, []common.RMId) {
-	twoFInc := len(topology.Hosts)
-	if len(task.hostToConnection) < twoFInc {
-		return nil, nil
-	}
-	f := twoFInc >> 1
-	fInc := twoFInc - f
-	active := make([]common.RMId, 0, fInc)
-	passive := make([]common.RMId, 0, f)
-	for _, rmId := range topology.RMs().NonEmpty() {
-		if _, found := task.activeConnections[rmId]; found && len(active) < cap(active) {
-			active = append(active, rmId)
-		} else if len(passive) < cap(passive) {
-			passive = append(passive, rmId)
-		} else { // not found in activeConnections, and passive is full
-			return nil, nil
-		}
-	}
-	if len(active) < cap(active) || len(passive) < cap(passive) {
-		return nil, nil
-	}
-	return active, passive
 }
 
 func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (bool, error) {

@@ -33,13 +33,15 @@ type NextConfiguration struct {
 	*Configuration
 	AllHosts       []string
 	NewRMIds       common.RMIds
+	SurvivingRMIds common.RMIds
+	LostRMIds      common.RMIds
 	PendingInstall common.RMIds
 	Pending        Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n PendingInstall: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.PendingInstall, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n PendingInstall: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.PendingInstall, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -56,6 +58,8 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 		}
 	}
 	return a.NewRMIds.Equal(b.NewRMIds) &&
+		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
+		a.LostRMIds.Equal(b.LostRMIds) &&
 		a.PendingInstall.Equal(b.PendingInstall) &&
 		a.Pending.Equal(b.Pending) &&
 		a.Configuration.Equal(b.Configuration)
@@ -71,6 +75,12 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 
 	newRMIds := make([]common.RMId, len(next.NewRMIds))
 	copy(newRMIds, next.NewRMIds)
+
+	survivingRMIds := make([]common.RMId, len(next.SurvivingRMIds))
+	copy(survivingRMIds, next.SurvivingRMIds)
+
+	lostRMIds := make([]common.RMId, len(next.LostRMIds))
+	copy(lostRMIds, next.LostRMIds)
 
 	pendingInstall := make([]common.RMId, len(next.PendingInstall))
 	copy(pendingInstall, next.PendingInstall)
@@ -92,6 +102,8 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 		Configuration:  next.Configuration.Clone(),
 		AllHosts:       allHosts,
 		NewRMIds:       newRMIds,
+		SurvivingRMIds: survivingRMIds,
+		LostRMIds:      lostRMIds,
 		PendingInstall: pendingInstall,
 		Pending:        pending,
 	}
@@ -215,6 +227,18 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			newRMIds[idx] = common.RMId(newRMIdsCap.At(idx))
 		}
 
+		survivingRMIdsCap := next.SurvivingRMIds()
+		survivingRMIds := make([]common.RMId, survivingRMIdsCap.Len())
+		for idx := range survivingRMIds {
+			survivingRMIds[idx] = common.RMId(survivingRMIdsCap.At(idx))
+		}
+
+		lostRMIdsCap := next.LostRMIds()
+		lostRMIds := make([]common.RMId, lostRMIdsCap.Len())
+		for idx := range lostRMIds {
+			lostRMIds[idx] = common.RMId(lostRMIdsCap.At(idx))
+		}
+
 		pendingInstallCap := next.PendingInstall()
 		pendingInstall := make([]common.RMId, pendingInstallCap.Len())
 		for idx := range pendingInstall {
@@ -227,6 +251,8 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			Configuration:  ConfigurationFromCap(&nextConfig),
 			AllHosts:       next.AllHosts().ToArray(),
 			NewRMIds:       newRMIds,
+			SurvivingRMIds: survivingRMIds,
+			LostRMIds:      lostRMIds,
 			PendingInstall: pendingInstall,
 			Pending:        ConditionsFromCap(&pending),
 		}
@@ -382,6 +408,18 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 			newRMIdsCap.Set(idx, uint32(rmId))
 		}
 		next.SetNewRMIds(newRMIdsCap)
+
+		survivingRMIdsCap := seg.NewUInt32List(len(nextConfig.SurvivingRMIds))
+		for idx, rmId := range nextConfig.SurvivingRMIds {
+			survivingRMIdsCap.Set(idx, uint32(rmId))
+		}
+		next.SetSurvivingRMIds(survivingRMIdsCap)
+
+		lostRMIdsCap := seg.NewUInt32List(len(nextConfig.LostRMIds))
+		for idx, rmId := range nextConfig.LostRMIds {
+			lostRMIdsCap.Set(idx, uint32(rmId))
+		}
+		next.SetLostRMIds(lostRMIdsCap)
 
 		pendingInstallCap := seg.NewUInt32List(len(nextConfig.PendingInstall))
 		for idx, rmId := range nextConfig.PendingInstall {

@@ -20,10 +20,12 @@ struct Configuration {
       configuration  @9: Configuration;
       allHosts       @10: List(Text);
       newRMIds       @11: List(UInt32);
-      pendingInstall @12: List(UInt32);
-      pending        @13: List(ConditionPair);
+      survivingRMIds @12: List(UInt32);
+      lostRMIds      @13: List(UInt32);
+      pendingInstall @14: List(UInt32);
+      pending        @15: List(ConditionPair);
     }
-    stable           @14: Void;
+    stable           @16: Void;
   }
 }
 

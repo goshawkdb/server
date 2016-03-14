@@ -400,9 +400,9 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 		delete(cm.rmToServer, cd.rmId)
 		cm.sendersConnectionLost(cd.rmId)
 		cd = cd.clone()
-		cd.host = cm.localHost
+		cd.host = hosts.local
 		cm.rmToServer[cd.rmId] = cd
-		cm.servers[cm.localHost] = cd
+		cm.servers[cd.host] = cd
 		cm.sendersConnectionEstablished(cd)
 	}
 
