@@ -1,9 +1,9 @@
 package consistenthash
 
 import (
-	sl "github.com/msackman/skiplist"
+	"fmt"
 	"goshawkdb.io/common"
-	"math/rand"
+	"sort"
 )
 
 var (
@@ -17,114 +17,68 @@ func (ipe *insufficientPositionsError) Error() string {
 }
 
 type Resolver struct {
-	hashCodes       common.RMIds
-	removed         *sl.SkipList
-	straightIndices []uint8
+	hashCodes     common.RMIds
+	desiredLength int
+	permLen       uint16
+	indices       []uint16
 }
 
-func NewResolver(rng *rand.Rand, hashCodes []common.RMId) *Resolver {
-	indices := make([]uint8, len(hashCodes))
+// hashCodes is the rmIds from topology - i.e. it can contain
+// RMIdEmpty, and those RMIdEmpties do not contibute to the
+// desiredLength. Here, you want desiredLength to be desiredLength
+func NewResolver(hashCodes common.RMIds, desiredLength uint16) *Resolver {
+	if hashCodes.NonEmptyLen() < int(desiredLength) {
+		panic(fmt.Sprintf("Too few non-empty hashcodes: %v but need at least %v", hashCodes, desiredLength))
+	}
+	return &Resolver{
+		hashCodes:     hashCodes,
+		desiredLength: int(desiredLength),
+		permLen:       desiredLength + uint16(hashCodes.EmptyLen()),
+		indices:       straightIndices(len(hashCodes)),
+	}
+}
+
+func straightIndices(count int) []uint16 {
+	indices := make([]uint16, count)
 	for idx := range indices {
-		indices[idx] = uint8(idx)
+		indices[idx] = uint16(idx)
 	}
-	res := &Resolver{
-		hashCodes:       make([]common.RMId, len(hashCodes)),
-		removed:         sl.New(rng),
-		straightIndices: indices,
-	}
-	copy(res.hashCodes, hashCodes)
-	for idx, hc := range hashCodes {
-		if hc == common.RMIdEmpty {
-			res.removed.Insert(intKey(idx), true)
-		}
-	}
-	return res
+	return indices
 }
 
-type intKey int
-
-func (a intKey) Compare(bC sl.Comparable) sl.Cmp {
-	b := bC.(intKey)
-	switch {
-	case a < b:
-		return sl.LT
-	case a > b:
-		return sl.GT
-	default:
-		return sl.EQ
-	}
-}
-
-func (res *Resolver) AddHashCode(hashCode common.RMId) {
-	// 1. make this idempotent.
-	for _, hc := range res.hashCodes {
-		if hc == hashCode {
-			return
-		}
-	}
-	// 2. ok, really add it.
-	if res.removed.Len() == 0 {
-		res.hashCodes = append(res.hashCodes, hashCode)
-	} else {
-		idxElem := res.removed.First()
-		idx := int(idxElem.Key.(intKey))
-		idxElem.Remove()
-		res.hashCodes[idx] = hashCode
-	}
-	if len(res.hashCodes) == 1+len(res.straightIndices) {
-		res.straightIndices = append(res.straightIndices, uint8(len(res.straightIndices)))
-	}
-}
-
-func (res *Resolver) RemoveHashCode(hashCode common.RMId) {
-	if idx := len(res.hashCodes) - 1; idx >= 0 && hashCode == res.hashCodes[idx] {
-		for idx--; idx >= 0 && res.hashCodes[idx] == common.RMIdEmpty; idx-- {
-			res.removed.Last().Remove()
-		}
-		res.hashCodes = res.hashCodes[:idx+1]
-		res.straightIndices = res.straightIndices[:idx+1]
-		return
-	}
-	for idx, hc := range res.hashCodes {
-		if hc == hashCode {
-			res.removed.Insert(intKey(idx), true)
-			res.hashCodes[idx] = common.RMIdEmpty
-			return
-		}
-	}
-}
-
-// Positions must be at least as long as we have nodes. I.e. at least as long as res.hashCodes.
-// PermutationLength must be equal to the current number of nodes in topology.
-// You can then take the 2F+1 prefix of the result.
-func (res *Resolver) ResolveHashCodes(positions []uint8, permutationLength int) ([]common.RMId, error) {
-	extras := 0
-	for removedElem := res.removed.First(); removedElem != nil && int(removedElem.Key.(intKey)) < permutationLength; removedElem = removedElem.Next() {
-		extras++
-	}
-	permutationLength += extras
-	if len(positions) < permutationLength {
+func (r *Resolver) ResolveHashCodes(positions []uint8) (common.RMIds, error) {
+	hcLen := len(r.hashCodes)
+	if hcLen > len(positions) {
 		return nil, InsufficientPositionsError
 	}
 
-	result := make([]common.RMId, permutationLength)
-	indices := make([]uint8, permutationLength)
-	copy(indices, res.straightIndices)
-
-	for depth := permutationLength - 1; depth >= 0; depth-- {
+	permLen := r.permLen
+	empties := make([]int, 0, permLen)
+	result := make([]common.RMId, permLen)
+	indices := make([]uint16, hcLen)
+	copy(indices, r.indices)
+	for depth := hcLen - 1; depth >= 0; depth-- {
 		position := positions[depth]
-		idx := indices[position]
-		result[idx] = res.hashCodes[depth]
-		indices = append(indices[:position], indices[position+1:]...)
-	}
-
-	for idx := len(result) - 1; extras > 0 && idx >= 0; idx-- {
-		if result[idx] == common.RMIdEmpty {
-			extras--
-			result = append(result[:idx], result[idx+1:]...)
-			idx--
+		index := indices[position]
+		copy(indices[position:], indices[position+1:])
+		if index < permLen {
+			rmId := r.hashCodes[depth]
+			result[index] = rmId
+			if rmId == common.RMIdEmpty {
+				empties = append(empties, int(index))
+			}
 		}
 	}
 
-	return result, nil
+	if len(empties) != 0 {
+		sort.Ints(empties)
+		for idx, idy := range empties {
+			if idy-idx >= r.desiredLength {
+				break
+			}
+			copy(result[idy-idx:], result[idy-idx+1:])
+		}
+	}
+
+	return result[:r.desiredLength], nil
 }

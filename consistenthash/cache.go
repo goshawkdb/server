@@ -9,27 +9,31 @@ import (
 )
 
 var (
-	VarUUIdNotKnown = fmt.Errorf("VarUUId Not Known to Cache")
+	VarUUIdNotKnown = &varUUIdNotKnown{}
 )
+
+type varUUIdNotKnown struct{}
+
+func (vnk *varUUIdNotKnown) Error() string {
+	return "VarUUId Not Known to Cache"
+}
 
 type ConsistentHashCache struct {
 	hashCodesPositions map[common.VarUUId]*hcPos
 	resolver           *Resolver
 	rng                *rand.Rand
-	desiredLen         int
 }
 
 type hcPos struct {
 	positions *common.Positions
-	hashCodes []common.RMId
+	hashCodes common.RMIds
 }
 
-func NewCache(resolver *Resolver, desiredLen int, rng *rand.Rand) *ConsistentHashCache {
+func NewCache(resolver *Resolver, rng *rand.Rand) *ConsistentHashCache {
 	return &ConsistentHashCache{
 		hashCodesPositions: make(map[common.VarUUId]*hcPos),
 		resolver:           resolver,
 		rng:                rng,
-		desiredLen:         desiredLen,
 	}
 }
 
@@ -44,7 +48,7 @@ func (chc *ConsistentHashCache) GetHashCodes(vUUId *common.VarUUId) ([]common.RM
 		return hcp.hashCodes, nil
 	case found:
 		positionsSlice := (*capn.UInt8List)(hcp.positions).ToArray()
-		hashCodes, err := chc.resolver.ResolveHashCodes(positionsSlice, chc.desiredLen)
+		hashCodes, err := chc.resolver.ResolveHashCodes(positionsSlice)
 		if err != nil {
 			return nil, err
 		}
@@ -75,6 +79,8 @@ func (chc *ConsistentHashCache) Remove(vUUId *common.VarUUId) {
 	delete(chc.hashCodesPositions, *vUUId)
 }
 
+// In here, we don't actually add to the cache because we don't know
+// if the corresponding txn is going to commit or not.
 func (chc *ConsistentHashCache) CreatePositions(vUUId *common.VarUUId, positionsLength int) (*common.Positions, []common.RMId, error) {
 	positionsCap := capn.NewBuffer(nil).NewUInt8List(positionsLength)
 	positionsSlice := make([]uint8, positionsLength)
@@ -96,7 +102,7 @@ func (chc *ConsistentHashCache) CreatePositions(vUUId *common.VarUUId, positions
 		}
 	}
 	positions := (*common.Positions)(&positionsCap)
-	hashCodes, err := chc.resolver.ResolveHashCodes(positionsSlice, chc.desiredLen)
+	hashCodes, err := chc.resolver.ResolveHashCodes(positionsSlice)
 	if err == nil {
 		return positions, hashCodes, nil
 	} else {
@@ -104,9 +110,8 @@ func (chc *ConsistentHashCache) CreatePositions(vUUId *common.VarUUId, positions
 	}
 }
 
-func (chc *ConsistentHashCache) SetResolverDesiredLen(resolver *Resolver, desiredLen int) {
+func (chc *ConsistentHashCache) SetResolver(resolver *Resolver) {
 	chc.resolver = resolver
-	chc.desiredLen = desiredLen
 	for _, hcp := range chc.hashCodesPositions {
 		hcp.hashCodes = nil
 	}

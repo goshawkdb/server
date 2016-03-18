@@ -9,66 +9,41 @@ import (
 
 var (
 	randomPositions [][]uint8
-	hashcodes       []common.RMId
-	rng             = rand.New(rand.NewSource(0))
+	hashcodes       common.RMIds
 )
 
 const (
 	positionsCount = 10000
 )
 
-func checkHashCodeLen(t *testing.T, res *Resolver, expectedLen int) {
-	if found := len(res.hashCodes) - int(res.removed.Len()); found != expectedLen {
-		t.Errorf("Expected %v hashcodes, found %v\n", expectedLen, found)
-	}
-}
-
 func TestPerms(t *testing.T) {
-	res := NewResolver(rng, []common.RMId{})
-	count := 0
-	checkHashCodeLen(t, res, count)
-	for _, hc := range hashcodes {
-		// check removal is idempotent
-		res.RemoveHashCode(hc)
-		checkHashCodeLen(t, res, count)
-		res.AddHashCode(hc)
-		count++
-		checkHashCodeLen(t, res, count)
-		// check addition is idempotent
-		res.AddHashCode(hc)
-		checkHashCodeLen(t, res, count)
-	}
-
 	permLen := 6
 	failuresLim := permLen + 1
 	// we have at most one failure at a time, so we need at most
 	// permLen+1 positions. However, give an extra one just to try and
 	// confuse it further.
 	positions := make([]uint8, permLen+2)
-	workingHashCodes := make([]common.RMId, 0, len(hashcodes))
+	workingHashCodes := make([]common.RMId, len(hashcodes))
 
-	count--
 	for failIdx := 0; failIdx < failuresLim; failIdx++ {
-		failed := hashcodes[failIdx]
-		res.RemoveHashCode(failed)
-		workingHashCodes = append(workingHashCodes[:0], hashcodes[:failIdx]...)
-		workingHashCodes = append(workingHashCodes, hashcodes[failIdx+1:]...)
+		copy(workingHashCodes, hashcodes)
+		workingHashCodes[failIdx] = common.RMIdEmpty
 
 		consumer := func(positions []uint8) {
-			for l := 0; l <= permLen; l++ {
-				perm, err := res.ResolveHashCodes(positions, l)
+			for l := 1; l < permLen; l++ {
+				legalHashCodes := workingHashCodes[:permLen]
+				res := NewResolver(legalHashCodes, uint16(l))
+				perm, err := res.ResolveHashCodes(positions)
+				// t.Logf("NewResolver(%v, %v, %v) => %v", legalHashCodes[:permLen], uint8(l), perm)
 				if err != nil {
 					t.Fatal(err)
 				}
-				legalHashCodes := workingHashCodes[:l]
-				if !isPermutationOf(perm, legalHashCodes) {
+				if !isPermutationPrefixOf(perm, legalHashCodes, l) {
 					t.Fatal("Not a valid permutation", perm, legalHashCodes, positions, l)
 				}
 			}
 		}
 		forEachPositions(consumer, positions, 0)
-
-		res.AddHashCode(failed)
 	}
 }
 
@@ -85,8 +60,8 @@ func forEachPositions(f func([]uint8), positions []uint8, idx int) {
 	}
 }
 
-func isPermutationOf(perm, hashcodes []common.RMId) bool {
-	if len(perm) != len(hashcodes) {
+func isPermutationPrefixOf(perm, hashcodes []common.RMId, l int) bool {
+	if len(perm) != l {
 		return false
 	}
 	freq := make(map[common.RMId]int)
@@ -98,54 +73,50 @@ func isPermutationOf(perm, hashcodes []common.RMId) bool {
 		}
 	}
 	for _, hc := range hashcodes {
-		if _, found := freq[hc]; found {
-			delete(freq, hc)
-		} else {
-			return false
-		}
+		delete(freq, hc)
 	}
 	return len(freq) == 0
 }
 
 func BenchmarkHash4_4(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:4]), 4, b)
+	benchmarkHash(NewResolver(hashcodes[:4], 4), b)
 }
 
 func BenchmarkHash8_4(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:8]), 4, b)
+	benchmarkHash(NewResolver(hashcodes[:8], 4), b)
 }
 func BenchmarkHash8_8(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:8]), 8, b)
+	benchmarkHash(NewResolver(hashcodes[:8], 8), b)
 }
 
 func BenchmarkHash16_4(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:16]), 4, b)
+	benchmarkHash(NewResolver(hashcodes[:16], 4), b)
 }
 func BenchmarkHash16_8(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:16]), 8, b)
+	benchmarkHash(NewResolver(hashcodes[:16], 8), b)
 }
 func BenchmarkHash16_16(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:16]), 16, b)
+	benchmarkHash(NewResolver(hashcodes[:16], 16), b)
 }
 
 func BenchmarkHash32_4(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:32]), 4, b)
+	benchmarkHash(NewResolver(hashcodes[:32], 4), b)
 }
 func BenchmarkHash32_8(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:32]), 8, b)
+	benchmarkHash(NewResolver(hashcodes[:32], 8), b)
 }
 func BenchmarkHash32_16(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:32]), 16, b)
+	benchmarkHash(NewResolver(hashcodes[:32], 16), b)
 }
 func BenchmarkHash32_32(b *testing.B) {
-	benchmarkHash(NewResolver(rng, hashcodes[:32]), 32, b)
+	benchmarkHash(NewResolver(hashcodes[:32], 32), b)
 }
 
-func benchmarkHash(res *Resolver, permLen int, b *testing.B) {
+func benchmarkHash(res *Resolver, b *testing.B) {
 	b.ResetTimer()
 	for idx := 0; idx < b.N; idx++ {
 		positions := randomPositions[idx%len(randomPositions)]
-		res.ResolveHashCodes(positions, permLen)
+		res.ResolveHashCodes(positions)
 	}
 }
 

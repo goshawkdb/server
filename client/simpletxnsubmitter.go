@@ -36,7 +36,7 @@ type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	cache := ch.NewCache(nil, 0, rng)
+	cache := ch.NewCache(nil, rng)
 
 	sts := &SimpleTxnSubmitter{
 		rmId:              rmId,
@@ -156,8 +156,10 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 	if topology != nil {
 		server.Log("TM setting topology to", topology)
 		sts.topology = topology
-		sts.resolver = ch.NewResolver(sts.rng, topology.RMs())
-		sts.hashCache.SetResolverDesiredLen(sts.resolver, topology.RMs().NonEmptyLen())
+		if topology.RMs().NonEmptyLen() >= int(topology.TwoFInc) {
+			sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
+			sts.hashCache.SetResolver(sts.resolver)
+		}
 		if topology.Root.VarUUId != nil {
 			sts.hashCache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
 		}
