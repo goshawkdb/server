@@ -119,7 +119,7 @@ type varstate struct {
 }
 
 func (vs *varstate) matches(disk *mdbs.MDBServer, writeTxnId *common.TxnId, writeTxnClock, writesClock *eng.VectorClock, positions *common.Positions) error {
-	if !vs.writeTxnId.Equal(writeTxnId) {
+	if vs.writeTxnId.Compare(writeTxnId) != common.EQ {
 		return fmt.Errorf("%v TxnId divergence: %v vs %v", vs.vUUId, vs.writeTxnId, writeTxnId)
 	}
 	if !vs.positions.Equal(positions) {

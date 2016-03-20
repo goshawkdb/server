@@ -425,11 +425,21 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 			inprogressPtr = &inprogress
 			senders[sender] = inprogressPtr
 		}
-		/* TODO
-		outcomes := migration.migration.Outcomes()
-		lsc := tt.newTxnLSC(&outcomes, inprogressPtr)
-		tt.connectionManager.Dispatchers.ProposerDispatcher.Immigration(&outcomes, lsc)
-		*/
+		varCount := int32(migration.migration.Vars().Len())
+		tt.connectionManager.Dispatchers.VarDispatcher.Immigrate(migration.migration, func(err error) {
+			if err != nil {
+				panic(fmt.Sprintf("Error when processing immigration: %v", err))
+			}
+			if atomic.AddInt32(&varCount, -1) == 0 &&
+				atomic.AddInt32(inprogressPtr, -1) == 0 {
+				tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+					if tt.task != nil {
+						return tt.task.tick()
+					}
+					return nil
+				}))
+			}
+		})
 	}
 	return nil
 }
@@ -460,42 +470,6 @@ func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *t
 	}
 	return nil
 }
-
-func (tt *TopologyTransmogrifier) newTxnLSC(outcomes *msgs.Outcome_List, inprogressPtr *int32) eng.TxnLocalStateChange {
-	return &migrationTxnLocalStateChange{
-		TopologyTransmogrifier: tt,
-		outcomes:               outcomes,
-		pendingLocallyComplete: int32(outcomes.Len()),
-		inprogressPtr:          inprogressPtr,
-	}
-}
-
-type migrationTxnLocalStateChange struct {
-	*TopologyTransmogrifier
-	outcomes               *msgs.Outcome_List
-	pendingLocallyComplete int32
-	inprogressPtr          *int32
-}
-
-func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(*eng.Txn, ...*eng.Ballot) {
-	panic("TxnBallotsComplete called on migrating txn.")
-}
-
-// Careful: we're in the proposer dispatcher go routine here!
-func (mtlsc *migrationTxnLocalStateChange) TxnLocallyComplete(txn *eng.Txn) {
-	txn.CompletionReceived()
-	if atomic.AddInt32(&mtlsc.pendingLocallyComplete, -1) == 0 &&
-		atomic.AddInt32(mtlsc.inprogressPtr, -1) == 0 {
-		mtlsc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			if mtlsc.task != nil {
-				return mtlsc.task.tick()
-			}
-			return nil
-		}))
-	}
-}
-
-func (mtlsc *migrationTxnLocalStateChange) TxnFinished(*eng.Txn) {}
 
 // topologyTask
 

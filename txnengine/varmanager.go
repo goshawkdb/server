@@ -2,10 +2,12 @@ package txnengine
 
 import (
 	"fmt"
+	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -88,6 +90,62 @@ func (vm *VarManager) SetInactive(v *Var) {
 		//fmt.Printf("%v is now inactive. ", v.UUId)
 		delete(vm.active, *v.UUId)
 	}
+}
+
+func (vm *VarManager) Immigrate(uuid *common.VarUUId, varCap *msgs.Var, txnId *common.TxnId, txnCap *msgs.Txn, cont func(error)) {
+	if _, found := vm.active[*uuid]; found {
+		server.Log("Immigration ignored as var is active. Assuming it arrived late.", uuid, txnId)
+		cont(nil)
+		return
+	}
+
+	txnBites := db.TxnToRootBytes(txnCap)
+	varSeg := capn.NewBuffer(nil)
+	varCapRoot := msgs.NewRootVar(varSeg)
+	varCapRoot.SetId(varCap.Id())
+	varCapRoot.SetPositions(varCap.Positions())
+	varCapRoot.SetWriteTxnId(varCap.WriteTxnId())
+	varCapRoot.SetWriteTxnClock(varCap.WriteTxnClock())
+	varCapRoot.SetWritesClock(varCap.WritesClock())
+	varBites := server.SegToBytes(varSeg)
+
+	future := vm.disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		if varBitesOld, err := rwtxn.Get(db.DB.Vars, uuid[:]); err != nil && err != mdb.NotFound {
+			return nil
+		} else if err == nil {
+			seg, _, err := capn.ReadFromMemoryZeroCopy(varBitesOld)
+			if err != nil {
+				rwtxn.Error(err)
+				return nil
+			}
+			varCapOld := msgs.ReadRootVar(seg)
+			txnIdOld := common.MakeTxnId(varCapOld.WriteTxnId())
+			txnIdCmp := txnId.Compare(txnIdOld)
+			if txnIdCmp == common.EQ {
+				server.Log(uuid, "Immigration ignored: duplicate", txnId)
+				return nil
+			}
+			txnClock := VectorClockFromCap(varCap.WriteTxnClock())
+			txnClockOld := VectorClockFromCap(varCapOld.WriteTxnClock())
+			elem := txnClock.Clock[*uuid]
+			elemOld := txnClockOld.Clock[*uuid]
+			if elem < elemOld || (elem == elemOld && txnIdCmp == common.LT) {
+				server.Log("Immigration ignored as local disk contains newer version. Assuming it arrived late.", uuid)
+				return nil
+			}
+		}
+		if err := db.WriteTxnToDisk(rwtxn, txnId, txnBites); err == nil {
+			rwtxn.Put(db.DB.Vars, uuid[:], varBites, 0)
+		}
+		return nil
+	})
+	go func() {
+		_, err := future.ResultError()
+		if err == nil {
+			server.Log("Immigration of", uuid, "completed", txnId)
+		}
+		cont(err)
+	}()
 }
 
 func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
