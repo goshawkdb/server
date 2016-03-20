@@ -12,14 +12,16 @@ import (
 
 type Migration C.Struct
 
-func NewMigration(s *C.Segment) Migration      { return Migration(s.NewStruct(8, 1)) }
-func NewRootMigration(s *C.Segment) Migration  { return Migration(s.NewRootStruct(8, 1)) }
-func AutoNewMigration(s *C.Segment) Migration  { return Migration(s.NewStructAR(8, 1)) }
+func NewMigration(s *C.Segment) Migration      { return Migration(s.NewStruct(8, 2)) }
+func NewRootMigration(s *C.Segment) Migration  { return Migration(s.NewRootStruct(8, 2)) }
+func AutoNewMigration(s *C.Segment) Migration  { return Migration(s.NewStructAR(8, 2)) }
 func ReadRootMigration(s *C.Segment) Migration { return Migration(s.Root(0).ToStruct()) }
 func (s Migration) Version() uint32            { return C.Struct(s).Get32(0) }
 func (s Migration) SetVersion(v uint32)        { C.Struct(s).Set32(0, v) }
-func (s Migration) Outcomes() Outcome_List     { return Outcome_List(C.Struct(s).GetObject(0)) }
-func (s Migration) SetOutcomes(v Outcome_List) { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s Migration) Txns() Txn_List             { return Txn_List(C.Struct(s).GetObject(0)) }
+func (s Migration) SetTxns(v Txn_List)         { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s Migration) Vars() Var_List             { return Var_List(C.Struct(s).GetObject(1)) }
+func (s Migration) SetVars(v Var_List)         { C.Struct(s).SetObject(1, C.Object(v)) }
 func (s Migration) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -48,12 +50,45 @@ func (s Migration) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"outcomes\":")
+	_, err = b.WriteString("\"txns\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Outcomes()
+		s := s.Txns()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteJSON(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"vars\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Vars()
 		{
 			err = b.WriteByte('[')
 			if err != nil {
@@ -117,12 +152,45 @@ func (s Migration) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("outcomes = ")
+	_, err = b.WriteString("txns = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Outcomes()
+		s := s.Txns()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteCapLit(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("vars = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Vars()
 		{
 			err = b.WriteByte('[')
 			if err != nil {
@@ -162,7 +230,7 @@ func (s Migration) MarshalCapLit() ([]byte, error) {
 type Migration_List C.PointerList
 
 func NewMigrationList(s *C.Segment, sz int) Migration_List {
-	return Migration_List(s.NewCompositeList(8, 1, sz))
+	return Migration_List(s.NewCompositeList(8, 2, sz))
 }
 func (s Migration_List) Len() int           { return C.PointerList(s).Len() }
 func (s Migration_List) At(i int) Migration { return Migration(C.PointerList(s).At(i).ToStruct()) }

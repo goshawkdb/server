@@ -10,6 +10,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	ch "goshawkdb.io/server/consistenthash"
 	"net"
 	"os"
 	"strconv"
@@ -20,7 +21,7 @@ type Configuration struct {
 	Version                       uint32
 	Hosts                         []string
 	F                             uint8
-	MaxRMCount                    uint8
+	MaxRMCount                    uint16
 	NoSync                        bool
 	ClientCertificateFingerprints []string
 	rms                           common.RMIds
@@ -144,7 +145,7 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 			config.F, twoFInc, len(config.Hosts))
 	}
 	if config.MaxRMCount == 0 && twoFInc < 128 {
-		config.MaxRMCount = uint8(2 * twoFInc)
+		config.MaxRMCount = 2 * uint16(twoFInc)
 	} else if int(config.MaxRMCount) < twoFInc {
 		return nil, fmt.Errorf("MaxRMCount given as %v but must be at least 2F+1=%v.", config.MaxRMCount, twoFInc)
 	}
@@ -608,7 +609,8 @@ func (cs *CondSuppliers) String() string {
 type Cond interface {
 	Equal(Cond) bool
 	AddToSeg(seg *capn.Segment) msgs.Condition
-	condWitness()
+	witness() Cond
+	SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error)
 }
 
 func conditionFromCap(condCap *msgs.Condition) Cond {
@@ -658,8 +660,15 @@ type Conjunction struct {
 	Right Cond
 }
 
-func (c *Conjunction) condWitness()   {}
+func (c *Conjunction) witness() Cond  { return c }
 func (c *Conjunction) String() string { return fmt.Sprintf("(%v ∧ %v)", c.Left, c.Right) }
+
+func (c *Conjunction) SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error) {
+	if b, err := c.Left.SatisfiedBy(topology, positions); err != nil || !b {
+		return b, err
+	}
+	return c.Right.SatisfiedBy(topology, positions)
+}
 
 func (a *Conjunction) Equal(b Cond) bool {
 	bConj, ok := b.(*Conjunction)
@@ -686,8 +695,15 @@ type Disjunction struct {
 	Right Cond
 }
 
-func (d *Disjunction) condWitness()   {}
+func (d *Disjunction) witness() Cond  { return d }
 func (d *Disjunction) String() string { return fmt.Sprintf("(%v ∨ %v)", d.Left, d.Right) }
+
+func (d *Disjunction) SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error) {
+	if b, err := d.Left.SatisfiedBy(topology, positions); err != nil || b {
+		return b, err
+	}
+	return d.Right.SatisfiedBy(topology, positions)
+}
 
 func (a *Disjunction) Equal(b Cond) bool {
 	bDisj, ok := b.(*Disjunction)
@@ -711,14 +727,14 @@ func (d *Disjunction) AddToSeg(seg *capn.Segment) msgs.Condition {
 
 type Generator struct {
 	RMId               common.RMId
-	PermLen            uint8
-	Start              uint8
-	Len                uint8
+	PermLen            uint16
+	Start              uint16
+	Len                uint16
 	LenAdjustIntersect common.RMIds
 	Includes           bool
 }
 
-func (g *Generator) condWitness() {}
+func (g *Generator) witness() Cond { return g }
 func (g *Generator) String() string {
 	op := "∈"
 	if !g.Includes {
@@ -737,6 +753,37 @@ func (g *Generator) String() string {
 		end = fmt.Sprintf("%v+|(p,%v)[:%v] ∩ {%v}|", g.Start, g.PermLen, g.Start+g.Len, set[1:])
 	}
 	return fmt.Sprintf("%v %v (p,%v)[%s:%v]", g.RMId, op, g.PermLen, start, end)
+}
+
+func (g *Generator) SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error) {
+	resolver := ch.NewResolver(topology.Next().RMs(), uint16(g.PermLen))
+	perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
+	if err != nil {
+		return false, err
+	}
+	var slice common.RMIds
+	if len(g.LenAdjustIntersect) == 0 {
+		slice = perm[g.Start : g.Start+g.Len]
+	} else {
+		set := make(map[common.RMId]server.EmptyStruct, len(g.LenAdjustIntersect))
+		for _, rmId := range g.LenAdjustIntersect {
+			set[rmId] = server.EmptyStructVal
+		}
+		end := g.Start + g.Len
+		for _, rmId := range perm[:end] {
+			if _, found := set[rmId]; found {
+				end++
+			}
+		}
+		slice = perm[g.Start:end]
+	}
+	for _, rmId := range slice {
+		if rmId == g.RMId {
+			return g.Includes, nil
+		}
+	}
+	return !g.Includes, nil
+
 }
 
 func (a *Generator) Equal(b Cond) bool {

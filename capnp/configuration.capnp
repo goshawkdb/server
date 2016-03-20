@@ -10,7 +10,7 @@ struct Configuration {
   version            @1: UInt32;
   hosts              @2: List(Text);
   f                  @3: UInt8;
-  maxRMCount         @4: UInt8;
+  maxRMCount         @4: UInt16;
   noSync             @5: Bool;
   rms                @6: List(UInt32);
   rmsRemoved         @7: List(UInt32);
@@ -55,10 +55,10 @@ struct Disjunction {
 
 struct Generator {
   rmId      @0: UInt32;
-  permLen   @1: UInt8;
-  start     @2: UInt8;
+  permLen   @1: UInt16;
+  start     @2: UInt16;
   union {
-    lenSimple          @3: UInt8;
+    lenSimple          @3: UInt16;
     lenAdjustIntersect @4: List(UInt32);
   }
   includes  @5: Bool;

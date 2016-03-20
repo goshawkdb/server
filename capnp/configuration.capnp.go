@@ -33,10 +33,10 @@ func (s Configuration) Hosts() C.TextList              { return C.TextList(C.Str
 func (s Configuration) SetHosts(v C.TextList)          { C.Struct(s).SetObject(1, C.Object(v)) }
 func (s Configuration) F() uint8                       { return C.Struct(s).Get8(4) }
 func (s Configuration) SetF(v uint8)                   { C.Struct(s).Set8(4, v) }
-func (s Configuration) MaxRMCount() uint8              { return C.Struct(s).Get8(5) }
-func (s Configuration) SetMaxRMCount(v uint8)          { C.Struct(s).Set8(5, v) }
-func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(48) }
-func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(48, v) }
+func (s Configuration) MaxRMCount() uint16             { return C.Struct(s).Get16(6) }
+func (s Configuration) SetMaxRMCount(v uint16)         { C.Struct(s).Set16(6, v) }
+func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(40) }
+func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(40, v) }
 func (s Configuration) Rms() C.UInt32List              { return C.UInt32List(C.Struct(s).GetObject(2)) }
 func (s Configuration) SetRms(v C.UInt32List)          { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s Configuration) RmsRemoved() C.UInt32List       { return C.UInt32List(C.Struct(s).GetObject(3)) }
@@ -1773,22 +1773,22 @@ func NewGenerator(s *C.Segment) Generator            { return Generator(s.NewStr
 func NewRootGenerator(s *C.Segment) Generator        { return Generator(s.NewRootStruct(16, 1)) }
 func AutoNewGenerator(s *C.Segment) Generator        { return Generator(s.NewStructAR(16, 1)) }
 func ReadRootGenerator(s *C.Segment) Generator       { return Generator(s.Root(0).ToStruct()) }
-func (s Generator) Which() Generator_Which           { return Generator_Which(C.Struct(s).Get16(8)) }
+func (s Generator) Which() Generator_Which           { return Generator_Which(C.Struct(s).Get16(10)) }
 func (s Generator) RmId() uint32                     { return C.Struct(s).Get32(0) }
 func (s Generator) SetRmId(v uint32)                 { C.Struct(s).Set32(0, v) }
-func (s Generator) PermLen() uint8                   { return C.Struct(s).Get8(4) }
-func (s Generator) SetPermLen(v uint8)               { C.Struct(s).Set8(4, v) }
-func (s Generator) Start() uint8                     { return C.Struct(s).Get8(5) }
-func (s Generator) SetStart(v uint8)                 { C.Struct(s).Set8(5, v) }
-func (s Generator) LenSimple() uint8                 { return C.Struct(s).Get8(6) }
-func (s Generator) SetLenSimple(v uint8)             { C.Struct(s).Set16(8, 0); C.Struct(s).Set8(6, v) }
+func (s Generator) PermLen() uint16                  { return C.Struct(s).Get16(4) }
+func (s Generator) SetPermLen(v uint16)              { C.Struct(s).Set16(4, v) }
+func (s Generator) Start() uint16                    { return C.Struct(s).Get16(6) }
+func (s Generator) SetStart(v uint16)                { C.Struct(s).Set16(6, v) }
+func (s Generator) LenSimple() uint16                { return C.Struct(s).Get16(8) }
+func (s Generator) SetLenSimple(v uint16)            { C.Struct(s).Set16(10, 0); C.Struct(s).Set16(8, v) }
 func (s Generator) LenAdjustIntersect() C.UInt32List { return C.UInt32List(C.Struct(s).GetObject(0)) }
 func (s Generator) SetLenAdjustIntersect(v C.UInt32List) {
-	C.Struct(s).Set16(8, 1)
+	C.Struct(s).Set16(10, 1)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
-func (s Generator) Includes() bool     { return C.Struct(s).Get1(56) }
-func (s Generator) SetIncludes(v bool) { C.Struct(s).Set1(56, v) }
+func (s Generator) Includes() bool     { return C.Struct(s).Get1(96) }
+func (s Generator) SetIncludes(v bool) { C.Struct(s).Set1(96, v) }
 func (s Generator) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error

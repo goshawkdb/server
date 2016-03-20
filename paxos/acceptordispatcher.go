@@ -81,7 +81,7 @@ func (ad *AcceptorDispatcher) loadFromDisk(server *mdbs.MDBServer) {
 				txnId := common.MakeTxnId(txnIdData)
 				acceptorStates[txnId] = acceptorState
 			}
-			if err == mdb.NotFound || err == nil {
+			if err == mdb.NotFound {
 				// fine, we just fell off the end as expected.
 				return acceptorStates
 			} else {

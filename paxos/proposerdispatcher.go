@@ -118,7 +118,7 @@ func (pd *ProposerDispatcher) loadFromDisk(server *mdbs.MDBServer) {
 				txnId := common.MakeTxnId(txnIdData)
 				proposerStates[txnId] = proposerState
 			}
-			if err == mdb.NotFound || err == nil {
+			if err == mdb.NotFound {
 				// fine, we just fell off the end as expected.
 				return proposerStates
 			} else {

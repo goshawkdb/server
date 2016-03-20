@@ -25,7 +25,7 @@ type Resolver struct {
 
 // hashCodes is the rmIds from topology - i.e. it can contain
 // RMIdEmpty, and those RMIdEmpties do not contibute to the
-// desiredLength. Here, you want desiredLength to be desiredLength
+// desiredLength. Here, you want desiredLength to be TwoFInc
 func NewResolver(hashCodes common.RMIds, desiredLength uint16) *Resolver {
 	if hashCodes.NonEmptyLen() < int(desiredLength) {
 		panic(fmt.Sprintf("Too few non-empty hashcodes: %v but need at least %v", hashCodes, desiredLength))
@@ -81,4 +81,46 @@ func (r *Resolver) ResolveHashCodes(positions []uint8) (common.RMIds, error) {
 	}
 
 	return result[:r.desiredLength], nil
+}
+
+// rmIdIdx is the index of the rmId in question within the
+// topology.RMs() slice.
+func (r *Resolver) RMIdHasVar(rmIdIdx int, positions []uint8) (bool, error) {
+	// We do a bunch of cheap checks first of all to avoid calculating
+	// the permutation if we can avoid it.
+	position := int(positions[rmIdIdx])
+	// remainingSpace is how far we are from the right hand edge
+	// (assuming no empties) at the point at which we'd be added to the
+	// permutation.
+	remainingSpace := r.desiredLength - (int(position) + 1)
+
+	if remainingSpace >= (len(r.hashCodes) - (rmIdIdx + 1)) {
+		// There's so much space left, and so few rmIds still to go,
+		// that no matter what happens, we could not be pushed out.
+		return true, nil
+	}
+
+	neLen := r.hashCodes.NonEmptyLen()
+	if r.desiredLength == neLen {
+		// every hashcode will always be included in every permutation
+		return true, nil
+	}
+
+	emptiesCount := len(r.hashCodes) - neLen
+	if position > r.desiredLength+emptiesCount {
+		// there is no way we will ever be in the result
+		return false, nil
+	}
+
+	perm, err := r.ResolveHashCodes(positions)
+	if err != nil {
+		return false, err
+	}
+	rmId := r.hashCodes[rmIdIdx]
+	for _, r := range perm {
+		if r == rmId {
+			return true, nil
+		}
+	}
+	return false, nil
 }

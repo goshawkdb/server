@@ -13,6 +13,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
@@ -424,9 +425,11 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 			inprogressPtr = &inprogress
 			senders[sender] = inprogressPtr
 		}
+		/* TODO
 		outcomes := migration.migration.Outcomes()
 		lsc := tt.newTxnLSC(&outcomes, inprogressPtr)
 		tt.connectionManager.Dispatchers.ProposerDispatcher.Immigration(&outcomes, lsc)
+		*/
 	}
 	return nil
 }
@@ -1015,13 +1018,13 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
 	conditions := configuration.Conds(make(map[common.RMId]*configuration.CondSuppliers))
-	twoFIncNew := to.F + to.F + 1
-	twoFIncOld := from.F + from.F + 1
+	twoFIncNew := (uint16(to.F) * 2) + 1
+	twoFIncOld := (uint16(from.F) * 2) + 1
 
 	for _, rmIdNew := range added {
 		conditions.DisjoinWith(rmIdNew, &configuration.Generator{
 			RMId:     rmIdNew,
-			PermLen:  uint8(to.RMs().NonEmptyLen()),
+			PermLen:  uint16(to.RMs().NonEmptyLen()),
 			Start:    0,
 			Len:      twoFIncNew,
 			Includes: true,
@@ -1033,7 +1036,7 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 			for _, rmId := range survived {
 				conditions.DisjoinWith(rmId, &configuration.Generator{
 					RMId:               rmId,
-					PermLen:            uint8(from.RMs().NonEmptyLen()),
+					PermLen:            uint16(from.RMs().NonEmptyLen()),
 					Start:              twoFIncOld,
 					LenAdjustIntersect: lost,
 					Includes:           true,
@@ -1047,14 +1050,14 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 			conditions.DisjoinWith(rmId, &configuration.Conjunction{
 				Left: &configuration.Generator{
 					RMId:     rmId,
-					PermLen:  uint8(to.RMs().NonEmptyLen()),
+					PermLen:  uint16(to.RMs().NonEmptyLen()),
 					Start:    0,
 					Len:      twoFIncNew,
 					Includes: true,
 				},
 				Right: &configuration.Generator{
 					RMId:     rmId,
-					PermLen:  uint8(from.RMs().NonEmptyLen()),
+					PermLen:  uint16(from.RMs().NonEmptyLen()),
 					Start:    0,
 					Len:      twoFIncOld,
 					Includes: false,
@@ -1707,14 +1710,16 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 
 type emigrator struct {
 	stop              int32
+	disk              *mdbs.MDBServer
 	connectionManager *ConnectionManager
-	nextTopology      *configuration.NextConfiguration
+	topology          *configuration.Topology
 }
 
 func newEmigrator(task *migrateAwaitVarBarrier) *emigrator {
 	e := &emigrator{
+		disk:              task.disk,
 		connectionManager: task.connectionManager,
-		nextTopology:      task.active.Next(),
+		topology:          task.active,
 	}
 	e.connectionManager.AddSender(e)
 	return e
@@ -1727,7 +1732,7 @@ func (e *emigrator) stopAsync() {
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	batchConds := make(map[paxos.Connection]configuration.Cond)
-	for rmId, cond := range e.nextTopology.Pending {
+	for rmId, cond := range e.topology.Next().Pending {
 		if rmId == e.connectionManager.RMId {
 			continue
 		}
@@ -1746,7 +1751,7 @@ func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connectio
 	if rmId == e.connectionManager.RMId {
 		return
 	}
-	if cond, found := e.nextTopology.Pending[rmId]; found {
+	if cond, found := e.topology.Next().Pending[rmId]; found {
 		batchConds := map[paxos.Connection]configuration.Cond{
 			conn: cond.Cond,
 		}
@@ -1768,9 +1773,108 @@ type dbIterator struct {
 }
 
 func (it *dbIterator) iterate() {
-	// do the iteration, then:
-
+	_, err := it.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		result, err := rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
+			vUUIdBytes, varBytes, err := cursor.Get(nil, nil, mdb.FIRST)
+			for ; err == nil; vUUIdBytes, varBytes, err = cursor.Get(nil, nil, mdb.NEXT) {
+				seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
+				if err != nil {
+					cursor.Error(err)
+					return nil
+				}
+				varCap := msgs.ReadRootVar(seg)
+				txnId := common.MakeTxnId(varCap.WriteTxnId())
+				txnBytes := db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
+				if txnBytes == nil {
+					return nil
+				}
+				seg, _, err = capn.ReadFromMemoryZeroCopy(txnBytes)
+				if err != nil {
+					cursor.Error(err)
+					return nil
+				}
+				txnCap := msgs.ReadRootTxn(seg)
+				// So, we only need to send based on the vars that we have
+				// (in fact, we require the positions so we can only look
+				// at the vars we have). However, the txn var allocations
+				// only cover what's assigned to us at the time of txn
+				// creation and that can change and we don't rewrite the
+				// txn when it changes. So that all just means we must
+				// ignore the allocations here, and just work through the
+				// actions directly.
+				actions := txnCap.Actions()
+				covered, varCaps, err := it.alreadyCovered(cursor, vUUIdBytes, txnId[:], &actions)
+				if err != nil {
+					return nil
+				} else if covered {
+					continue
+				}
+				for conn, cond := range it.batch {
+					matchingVarIndices, err := it.matchVarsAgainstCond(cond, varCaps)
+					if err != nil {
+						cursor.Error(err)
+						return nil
+					}
+				}
+			}
+			if err == mdb.NotFound {
+				return nil
+			} else {
+				return err
+			}
+		})
+		if err == nil {
+			return result
+		}
+		return nil
+	}).ResultError()
+	if err != nil {
+		log.Println(err)
+	}
 	it.connectionManager.AddSender(it)
+}
+
+func (it *dbIterator) alreadyCovered(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) (bool, []*msgs.Var, error) {
+	varCaps := make([]*msgs.Var, 0, actions.Len()>>1)
+	for idx, l := 0, actions.Len(); idx < l; idx++ {
+		actionVarUUIdBytes := actions.At(idx).VarId()
+		varBytes, err := cursor.RTxn.Get(db.DB.Vars, actionVarUUIdBytes)
+		if err == mdb.NotFound {
+			continue
+		} else if err != nil {
+			cursor.Error(err)
+			return false, nil, err
+		}
+
+		seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
+		if err != nil {
+			cursor.Error(err)
+			return false, nil, err
+		}
+		varCap := msgs.ReadRootVar(seg)
+		if bytes.Compare(actionVarUUIdBytes, vUUIdBytes) < 0 && bytes.Equal(txnIdBytes, varCap.WriteTxnId()) {
+			// We've found an action on a var that is 'before' the
+			// current var (will match ordering in lmdb) and it's on the
+			// same txn as the current var. Therefore we've already done
+			// this txn so we can just skip now.
+			return true, nil, nil
+		}
+		varCaps = append(varCaps, &varCap)
+	}
+	return false, varCaps, nil
+}
+
+func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*msgs.Var) ([]uint16, error) {
+	indices := make([]uint16, 0, len(varCaps)>>1)
+	for idx, varCap := range varCaps {
+		pos := varCap.Positions()
+		if b, err := cond.SatisfiedBy(it.topology, (*common.Positions)(&pos)); err == nil && b {
+			indices = append(indices, uint16(idx))
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	return indices, nil
 }
 
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -1783,7 +1887,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	mc := msgs.NewMigrationComplete(seg)
-	mc.SetVersion(it.nextTopology.Version)
+	mc.SetVersion(it.topology.Next().Version)
 	msg.SetMigrationComplete(mc)
 	bites := server.SegToBytes(seg)
 
