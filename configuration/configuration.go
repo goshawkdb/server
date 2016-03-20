@@ -756,6 +756,7 @@ func (g *Generator) String() string {
 }
 
 func (g *Generator) SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error) {
+	server.Log("Generator:SatisfiedBy:NewResolver:", topology.Next().RMs(), uint16(g.PermLen))
 	resolver := ch.NewResolver(topology.Next().RMs(), uint16(g.PermLen))
 	perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
 	if err != nil {

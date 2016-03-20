@@ -1783,6 +1783,9 @@ func (it *dbIterator) iterate() {
 					return nil
 				}
 				varCap := msgs.ReadRootVar(seg)
+				if bytes.Equal(varCap.Id(), configuration.TopologyVarUUId[:]) {
+					continue
+				}
 				txnId := common.MakeTxnId(varCap.WriteTxnId())
 				txnBytes := db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
 				if txnBytes == nil {
@@ -1803,17 +1806,36 @@ func (it *dbIterator) iterate() {
 				// ignore the allocations here, and just work through the
 				// actions directly.
 				actions := txnCap.Actions()
-				covered, varCaps, err := it.alreadyCovered(cursor, vUUIdBytes, txnId[:], &actions)
+				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], &actions)
 				if err != nil {
 					return nil
-				} else if covered {
+				} else if len(varCaps) == 0 {
 					continue
 				}
 				for conn, cond := range it.batch {
-					matchingVarIndices, err := it.matchVarsAgainstCond(cond, varCaps)
+					matchingVarCaps, err := it.matchVarsAgainstCond(cond, varCaps)
 					if err != nil {
 						cursor.Error(err)
 						return nil
+					} else if len(matchingVarCaps) != 0 {
+						// first attempt: no batching. Just send them. Add
+						// batching later on. TODO.
+						seg := capn.NewBuffer(nil)
+						msg := msgs.NewRootMessage(seg)
+						migration := msgs.NewMigration(seg)
+						msg.SetMigration(migration)
+						migration.SetVersion(it.topology.Next().Version)
+						txns := msgs.NewTxnList(seg, 1)
+						migration.SetTxns(txns)
+						txns.Set(0, txnCap)
+						vars := msgs.NewVarList(seg, len(matchingVarCaps))
+						migration.SetVars(vars)
+						for idx, varCap := range matchingVarCaps {
+							vars.Set(idx, *varCap)
+						}
+						bites := server.SegToBytes(seg)
+						server.Log("Migrating", len(matchingVarCaps), "vars on", txnId, "to", conn.RMId())
+						conn.Send(bites)
 					}
 				}
 			}
@@ -1834,7 +1856,7 @@ func (it *dbIterator) iterate() {
 	it.connectionManager.AddSender(it)
 }
 
-func (it *dbIterator) alreadyCovered(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) (bool, []*msgs.Var, error) {
+func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) ([]*msgs.Var, error) {
 	varCaps := make([]*msgs.Var, 0, actions.Len()>>1)
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		actionVarUUIdBytes := actions.At(idx).VarId()
@@ -1843,13 +1865,13 @@ func (it *dbIterator) alreadyCovered(cursor *mdbs.Cursor, vUUIdBytes []byte, txn
 			continue
 		} else if err != nil {
 			cursor.Error(err)
-			return false, nil, err
+			return nil, err
 		}
 
 		seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
 		if err != nil {
 			cursor.Error(err)
-			return false, nil, err
+			return nil, err
 		}
 		varCap := msgs.ReadRootVar(seg)
 		if bytes.Compare(actionVarUUIdBytes, vUUIdBytes) < 0 && bytes.Equal(txnIdBytes, varCap.WriteTxnId()) {
@@ -1857,24 +1879,25 @@ func (it *dbIterator) alreadyCovered(cursor *mdbs.Cursor, vUUIdBytes []byte, txn
 			// current var (will match ordering in lmdb) and it's on the
 			// same txn as the current var. Therefore we've already done
 			// this txn so we can just skip now.
-			return true, nil, nil
+			return nil, nil
 		}
 		varCaps = append(varCaps, &varCap)
 	}
-	return false, varCaps, nil
+	return varCaps, nil
 }
 
-func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*msgs.Var) ([]uint16, error) {
-	indices := make([]uint16, 0, len(varCaps)>>1)
-	for idx, varCap := range varCaps {
+func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*msgs.Var) ([]*msgs.Var, error) {
+	result := make([]*msgs.Var, len(varCaps)>>1)
+	for _, varCap := range varCaps {
 		pos := varCap.Positions()
+		server.Log("Testing", common.MakeVarUUId(varCap.Id()), (*common.Positions)(&pos), "against condition", cond)
 		if b, err := cond.SatisfiedBy(it.topology, (*common.Positions)(&pos)); err == nil && b {
-			indices = append(indices, uint16(idx))
+			result = append(result, varCap)
 		} else if err != nil {
 			return nil, err
 		}
 	}
-	return indices, nil
+	return result, nil
 }
 
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
