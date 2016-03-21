@@ -66,8 +66,9 @@ type connectionMsgOutcomeReceived func(*connectionRun)
 func (cor connectionMsgOutcomeReceived) connectionMsgWitness() {}
 
 type connectionMsgTopologyChange struct {
-	topology *configuration.Topology
-	servers  map[common.RMId]paxos.Connection
+	topology  *configuration.Topology
+	servers   map[common.RMId]paxos.Connection
+	installed func()
 }
 
 func (ctc *connectionMsgTopologyChange) connectionMsgWitness() {}
@@ -96,10 +97,11 @@ func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *com
 	}))
 }
 
-func (conn *Connection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
+func (conn *Connection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection, installed func()) {
 	conn.enqueueQuery(&connectionMsgTopologyChange{
-		topology: topology,
-		servers:  servers,
+		topology:  topology,
+		servers:   servers,
+		installed: installed,
 	})
 }
 
@@ -729,6 +731,9 @@ func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) er
 			}
 		}
 		cr.submitter.TopologyChange(tChange.topology, tChange.servers)
+	}
+	if tChange.installed != nil {
+		tChange.installed()
 	}
 	return nil
 }

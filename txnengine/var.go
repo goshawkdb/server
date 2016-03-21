@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-type VarWriteSubscriber func(v *Var, value []byte, references *msgs.VarIdPos_List, txn *Txn)
+type VarWriteSubscriber struct {
+	Observe func(v *Var, value []byte, references *msgs.VarIdPos_List, txn *Txn)
+	Cancel  func(v *Var)
+}
 
 type Var struct {
 	UUId            *common.VarUUId
@@ -21,7 +24,7 @@ type Var struct {
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
-	subscribers     map[common.TxnId]VarWriteSubscriber
+	subscribers     map[common.TxnId]*VarWriteSubscriber
 	exe             *dispatcher.Executor
 	disk            *mdbs.MDBServer
 	vm              *VarManager
@@ -91,7 +94,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, disk *mdbs.MDBServer
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
-		subscribers:     make(map[common.TxnId]VarWriteSubscriber),
+		subscribers:     make(map[common.TxnId]*VarWriteSubscriber),
 		exe:             exe,
 		disk:            disk,
 		vm:              vm,
@@ -99,8 +102,8 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, disk *mdbs.MDBServer
 	}
 }
 
-func (v *Var) AddWriteSubscriber(txnId *common.TxnId, fun VarWriteSubscriber) {
-	v.subscribers[*txnId] = fun
+func (v *Var) AddWriteSubscriber(txnId *common.TxnId, sub *VarWriteSubscriber) {
+	v.subscribers[*txnId] = sub
 }
 
 func (v *Var) RemoveWriteSubscriber(txnId *common.TxnId) {
@@ -115,10 +118,16 @@ func (v *Var) ReceiveTxn(action *localAction) {
 	if isRead && action.Retry {
 		if voted := v.curFrame.ReadRetry(action); !voted {
 			v.AddWriteSubscriber(action.Id,
-				func(v *Var, value []byte, refs *msgs.VarIdPos_List, newtxn *Txn) {
-					if voted := v.curFrame.ReadRetry(action); voted {
+				&VarWriteSubscriber{
+					Observe: func(v *Var, value []byte, refs *msgs.VarIdPos_List, newtxn *Txn) {
+						if voted := v.curFrame.ReadRetry(action); voted {
+							v.RemoveWriteSubscriber(action.Id)
+						}
+					},
+					Cancel: func(v *Var) {
+						action.VoteDeadlock(v.curFrame.frameTxnClock)
 						v.RemoveWriteSubscriber(action.Id)
-					}
+					},
 				})
 		}
 		return
@@ -205,7 +214,7 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 		panic(fmt.Sprintf("Unexpected action type: %v", actionCap.Which()))
 	}
 	for _, sub := range v.subscribers {
-		sub(v, value, &references, action.Txn)
+		sub.Observe(v, value, &references, action.Txn)
 	}
 
 	// diffLen := len(action.outcomeClock.Clock) - action.TxnCap.Actions().Len()
@@ -288,6 +297,16 @@ func (v *Var) TxnGloballyComplete(action *localAction) {
 	}
 }
 
+func (v *Var) ForceToIdle() {
+	// bascially, we just cancel all the subscribers here
+	if len(v.subscribers) != 0 {
+		for _, sub := range v.subscribers {
+			sub.Cancel(v)
+		}
+	}
+	v.maybeMakeInactive()
+}
+
 func (v *Var) maybeMakeInactive() {
 	if v.isIdle() {
 		v.vm.SetInactive(v)
@@ -324,6 +343,5 @@ func (v *Var) Status(sc *server.StatusConsumer) {
 	v.curFrame.Status(sc.Fork())
 	sc.Emit(fmt.Sprintf("- Subscribers: %v", len(v.subscribers)))
 	sc.Emit(fmt.Sprintf("- Idle? %v", v.isIdle()))
-	sc.Emit(fmt.Sprintf("- OnDisk? %v", v.curFrame.IsOnDisk()))
 	sc.Join()
 }

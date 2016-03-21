@@ -761,10 +761,6 @@ func (fo *frameOpen) isIdle() bool {
 	return fo.currentState == fo && !fo.rollScheduled && !fo.rollActive && fo.child == nil && fo.parent == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
 }
 
-func (fo *frameOpen) IsOnDisk() bool {
-	return fo.child == nil && fo.currentState == fo && (fo.parent == nil || fo.parent.onDisk) && fo.writes.Len() == 0
-}
-
 // closed
 
 type frameClosed struct {

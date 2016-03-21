@@ -8,6 +8,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -16,13 +17,13 @@ import (
 
 type VarManager struct {
 	LocalConnection
-	disk           *mdbs.MDBServer
-	active         map[common.VarUUId]*Var
-	exe            *dispatcher.Executor
-	onAllCommitted func()
-	lc             LocalConnection
-	callbacks      []func()
-	beaterLive     bool
+	disk       *mdbs.MDBServer
+	active     map[common.VarUUId]*Var
+	exe        *dispatcher.Executor
+	onIdle     func()
+	lc         LocalConnection
+	callbacks  []func()
+	beaterLive bool
 }
 
 func init() {
@@ -52,29 +53,41 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	fun(v, nil)
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
-	}
-	if vm.onAllCommitted != nil {
-		// this is horrible. WIP. FIXME etc.
-		for uuid, v := range vm.active {
-			if !v.curFrame.IsOnDisk() {
-				fmt.Println(uuid)
-				return
-			}
-		}
-		vm.onAllCommitted()
-		vm.onAllCommitted = nil
+	} else if found && vm.onIdle != nil {
+		v.ForceToIdle()
+		vm.checkAllIdle()
+	} else if vm.onIdle != nil {
+		vm.checkAllIdle()
 	}
 }
 
-func (vm *VarManager) OnAllCommitted(f func()) {
-	for uuid, v := range vm.active {
-		if !v.curFrame.IsOnDisk() {
-			fmt.Println(uuid)
-			vm.onAllCommitted = f
-			return
+func (vm *VarManager) ForceToIdle(onIdle func()) {
+	vm.onIdle = onIdle
+	if !vm.checkAllIdle() {
+		for uuid, v := range vm.active {
+			if configuration.TopologyVarUUId.Compare(&uuid) == common.EQ {
+				continue
+			}
+			v.ForceToIdle()
 		}
+		vm.checkAllIdle()
 	}
-	f()
+}
+
+func (vm *VarManager) checkAllIdle() bool {
+	onIdle := vm.onIdle
+	if onIdle == nil {
+		return true
+	} else if l := len(vm.active); l == 0 {
+		vm.onIdle = nil
+		onIdle()
+		return true
+	} else if _, found := vm.active[*configuration.TopologyVarUUId]; l == 1 && found {
+		vm.onIdle = nil
+		onIdle()
+		return true
+	}
+	return false
 }
 
 // var.VarLifecycle interface

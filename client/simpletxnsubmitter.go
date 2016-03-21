@@ -110,9 +110,10 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connectionManager, acceptors...)
 		if shutdown {
 			if txnCap.Retry() {
-				// Don't like this. What happens if this msg doesn't make
-				// it? I guess worst case is it's a leak. This needs
-				// fixing eventually.
+				// If this msg doesn't make it then proposers should
+				// observe our death and tidy up anyway. If it's just this
+				// connection shutting down then there should be no
+				// problem with these msgs getting to the propposers.
 				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connectionManager, activeRMs...)
 			}
 			continuation(txnId, nil)
@@ -133,10 +134,10 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, bufferOnTopologyChange bool) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() {
-		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay) }
+	if sts.topology.IsBlank() || (bufferOnTopologyChange && sts.topology.Next() != nil) {
+		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, bufferOnTopologyChange) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
 		} else {

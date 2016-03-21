@@ -63,11 +63,8 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (pm *ProposerManager) SetTopology(topology *configuration.Topology, installed func()) {
+func (pm *ProposerManager) SetTopology(topology *configuration.Topology) {
 	pm.topology = topology
-	if installed != nil {
-		installed()
-	}
 }
 
 func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
@@ -86,7 +83,7 @@ func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 			proposer.Start()
 
 		} else {
-			server.Log(txnId, "Aborting received txn due to non-matching topology.")
+			server.Log(txnId, "Aborting received txn due to non-matching topology.", txnCap.TopologyVersion())
 			acceptors := GetAcceptorsFromTxn(txnCap)
 			fInc := int(txnCap.FInc())
 			alloc := AllocForRMId(txnCap, pm.RMId)

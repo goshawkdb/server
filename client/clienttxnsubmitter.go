@@ -99,7 +99,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
 			ctxnCap.SetId(curTxnId[:])
 
-			err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay)
+			err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, true)
 			if err != nil {
 				cts.txnLive = false
 				continuation(nil, err)
@@ -108,7 +108,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		}
 	}
 
-	err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0)
+	err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, true)
 	if err != nil {
 		continuation(nil, err)
 		return

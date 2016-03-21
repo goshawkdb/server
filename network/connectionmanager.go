@@ -15,6 +15,7 @@ import (
 	"goshawkdb.io/server/paxos"
 	"log"
 	"sync"
+	"sync/atomic"
 )
 
 type ConnectionManager struct {
@@ -155,8 +156,8 @@ type connectionManagerMsgGetTopology struct {
 func (cmmgt *connectionManagerMsgGetTopology) connectionManagerMsgWitness() {}
 
 type connectionManagerMsgSetTopology struct {
-	topology           *configuration.Topology
-	proposersInstalled func()
+	topology         *configuration.Topology
+	clientsInstalled func()
 }
 
 func (cmmst *connectionManagerMsgSetTopology) connectionManagerMsgWitness() {}
@@ -242,10 +243,10 @@ func (cm *ConnectionManager) Topology() *configuration.Topology {
 	return nil
 }
 
-func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, proposersInstalled func()) {
+func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, clientsInstalled func()) {
 	cm.enqueueQuery(&connectionManagerMsgSetTopology{
-		topology:           topology,
-		proposersInstalled: proposersInstalled,
+		topology:         topology,
+		clientsInstalled: clientsInstalled,
 	})
 }
 
@@ -362,7 +363,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgSenderFinished:
 				cm.removeSender(msgT.Sender, msgT.resultChan)
 			case *connectionManagerMsgSetTopology:
-				cm.updateTopology(msgT.topology, msgT.proposersInstalled)
+				cm.updateTopology(msgT.topology, msgT.clientsInstalled)
 			case *connectionManagerMsgGetTopology:
 				cm.getTopology(msgT)
 			case *connectionManagerMsgClientEstablished:
@@ -540,7 +541,7 @@ func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
 	}
 }
 
-func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, proposersInstalled func()) {
+func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, clientsInstalled func()) {
 	if cm.topology != nil && cm.topology.Configuration.Equal(topology.Configuration) {
 		return
 	}
@@ -569,10 +570,24 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, pr
 		}
 	}
 	rmToServerCopy := cm.cloneRMToServer()
-	for _, cconn := range cm.connCountToClient {
-		cconn.TopologyChange(topology, rmToServerCopy)
+	if clientsInstalled != nil {
+		count := int32(len(cm.connCountToClient))
+		orig := clientsInstalled
+		clientsInstalled = func() {
+			if atomic.AddInt32(&count, -1) == 0 {
+				orig()
+			}
+		}
 	}
-	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, proposersInstalled)
+	for _, cconn := range cm.connCountToClient {
+		cconn.TopologyChange(topology, rmToServerCopy, clientsInstalled)
+	}
+	for _, sconn := range cm.rmToServer {
+		if sconn.Connection != nil {
+			sconn.Connection.TopologyChange(topology, rmToServerCopy, nil)
+		}
+	}
+	cm.Dispatchers.ProposerDispatcher.SetTopology(topology)
 	cm.Dispatchers.AcceptorDispatcher.SetTopology(topology)
 }
 

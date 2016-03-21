@@ -23,21 +23,21 @@ import (
 )
 
 type TopologyTransmogrifier struct {
-	disk                 *mdbs.MDBServer
-	connectionManager    *ConnectionManager
-	localConnection      *client.LocalConnection
-	active               *configuration.Topology
-	installedOnProposers *configuration.Topology
-	hostToConnection     map[string]paxos.Connection
-	activeConnections    map[common.RMId]paxos.Connection
-	migrations           map[uint32]map[common.RMId]*int32
-	task                 topologyTask
-	cellTail             *cc.ChanCellTail
-	enqueueQueryInner    func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan            <-chan topologyTransmogrifierMsg
-	listenPort           uint16
-	rng                  *rand.Rand
-	localEstablished     chan struct{}
+	disk               *mdbs.MDBServer
+	connectionManager  *ConnectionManager
+	localConnection    *client.LocalConnection
+	active             *configuration.Topology
+	installedOnClients *configuration.Topology
+	hostToConnection   map[string]paxos.Connection
+	activeConnections  map[common.RMId]paxos.Connection
+	migrations         map[uint32]map[common.RMId]*int32
+	task               topologyTask
+	cellTail           *cc.ChanCellTail
+	enqueueQueryInner  func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan          <-chan topologyTransmogrifierMsg
+	listenPort         uint16
+	rng                *rand.Rand
+	localEstablished   chan struct{}
 }
 
 type topologyTransmogrifierMsg interface {
@@ -163,17 +163,22 @@ func NewTopologyTransmogrifier(disk *mdbs.MDBServer, cm *ConnectionManager, lc *
 			panic(fmt.Errorf("Error trying to subscribe to topology: %v", err))
 		}
 		v.AddWriteSubscriber(configuration.VersionOne,
-			func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-				var rootVarPosPtr *msgs.VarIdPos
-				if refs.Len() > 0 {
-					root := refs.At(0)
-					rootVarPosPtr = &root
-				}
-				topology, err := configuration.TopologyFromCap(txn.Id, rootVarPosPtr, value)
-				if err != nil {
-					panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
-				}
-				tt.enqueueQuery((*topologyTransmogrifierMsgTopologyObserved)(topology))
+			&eng.VarWriteSubscriber{
+				Observe: func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
+					var rootVarPosPtr *msgs.VarIdPos
+					if refs.Len() > 0 {
+						root := refs.At(0)
+						rootVarPosPtr = &root
+					}
+					topology, err := configuration.TopologyFromCap(txn.Id, rootVarPosPtr, value)
+					if err != nil {
+						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
+					}
+					tt.enqueueQuery((*topologyTransmogrifierMsgTopologyObserved)(topology))
+				},
+				Cancel: func(v *eng.Var) {
+					panic("Subscriber on topology var has been cancelled!")
+				},
 			})
 		close(subscriberInstalled)
 	}, true, configuration.TopologyVarUUId)
@@ -321,12 +326,12 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 }
 
 func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology) {
-	server.Log("Installing topology on proposers:", topology)
-	var installedOnProposers func()
+	server.Log("Installing topology to connection manager, et al:", topology)
+	var installedOnClients func()
 	if topology.Next() != nil {
-		installedOnProposers = func() {
+		installedOnClients = func() {
 			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-				tt.installedOnProposers = topology
+				tt.installedOnClients = topology
 				if tt.localEstablished != nil {
 					close(tt.localEstablished)
 					tt.localEstablished = nil
@@ -338,7 +343,7 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 			}))
 		}
 	}
-	tt.connectionManager.SetTopology(topology, installedOnProposers)
+	tt.connectionManager.SetTopology(topology, installedOnClients)
 }
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
@@ -1127,7 +1132,7 @@ type migrate struct {
 	*targetConfig
 	varBarrierReached *configuration.Configuration
 	migrateInstall
-	migrateAwaitProposerDrain
+	migrateAwaitClientDrain
 	migrateAwaitVarBarrier
 	migrateAwaitImmigrations
 	migrateAwaitNoPending
@@ -1149,7 +1154,7 @@ func (task *migrate) tick() error {
 
 	if task.currentState == nil {
 		task.migrateInstall.init(task)
-		task.migrateAwaitProposerDrain.init(task)
+		task.migrateAwaitClientDrain.init(task)
 		task.migrateAwaitVarBarrier.init(task)
 		task.migrateAwaitImmigrations.init(task)
 		task.migrateAwaitNoPending.init(task)
@@ -1173,8 +1178,8 @@ func (task *migrate) completed() error {
 func (task *migrate) nextState() error {
 	switch task.currentState {
 	case &task.migrateInstall:
-		task.currentState = &task.migrateAwaitProposerDrain
-	case &task.migrateAwaitProposerDrain:
+		task.currentState = &task.migrateAwaitClientDrain
+	case &task.migrateAwaitClientDrain:
 		task.currentState = &task.migrateAwaitVarBarrier
 	case &task.migrateAwaitVarBarrier:
 		task.currentState = &task.migrateAwaitImmigrations
@@ -1204,16 +1209,16 @@ func (task *migrateInstall) tick() error {
 	return task.nextState()
 }
 
-type migrateAwaitProposerDrain struct{ *migrate }
+type migrateAwaitClientDrain struct{ *migrate }
 
-func (task *migrateAwaitProposerDrain) witness() migrateInnerState { return task }
-func (task *migrateAwaitProposerDrain) init(migrate *migrate)      { task.migrate = migrate }
-func (task *migrateAwaitProposerDrain) tick() error {
-	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
-		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
-		log.Println("Topology: Topology installed on proposers. Waiting for txns in old topology to drain.")
+func (task *migrateAwaitClientDrain) witness() migrateInnerState { return task }
+func (task *migrateAwaitClientDrain) init(migrate *migrate)      { task.migrate = migrate }
+func (task *migrateAwaitClientDrain) tick() error {
+	if task.installedOnClients != nil && task.installedOnClients.Next() != nil &&
+		task.installedOnClients.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
+		log.Println("Topology: Topology installed on clients. Waiting for vars to go quiet.")
 		nextConfig := task.active.Next().Configuration
-		task.connectionManager.Dispatchers.VarDispatcher.OnAllCommitted(func() {
+		task.connectionManager.Dispatchers.VarDispatcher.ForceToIdle(func() {
 			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				task.varBarrierReached = nextConfig
 				if task.task == task.migrate {
@@ -1465,10 +1470,10 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 	txn.SetFInc(uint8(len(active)))
 	if read == nil {
 		txn.SetTopologyVersion(0)
-	} else if read.Next() == nil {
-		txn.SetTopologyVersion(read.Version)
+	} else if next := read.Next(); next != nil {
+		txn.SetTopologyVersion(next.Version)
 	} else {
-		txn.SetTopologyVersion(read.Next().Version)
+		txn.SetTopologyVersion(read.Version)
 	}
 
 	return &txn
