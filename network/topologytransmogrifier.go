@@ -1705,13 +1705,13 @@ func (e *emigrator) stopAsync() {
 }
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	batchConds := make(map[paxos.Connection]configuration.Cond)
+	batchConds := make([]*sendBatch, 0, len(conns))
 	for rmId, cond := range e.topology.Next().Pending {
 		if rmId == e.connectionManager.RMId {
 			continue
 		}
 		if conn, found := conns[rmId]; found {
-			batchConds[conn] = cond.Cond
+			batchConds = append(batchConds, e.newBatch(conn, cond.Cond))
 		}
 	}
 	if len(batchConds) > 0 {
@@ -1726,14 +1726,12 @@ func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connectio
 		return
 	}
 	if cond, found := e.topology.Next().Pending[rmId]; found {
-		batchConds := map[paxos.Connection]configuration.Cond{
-			conn: cond.Cond,
-		}
+		batchConds := []*sendBatch{e.newBatch(conn, cond.Cond)}
 		e.startBatch(batchConds)
 	}
 }
 
-func (e *emigrator) startBatch(batch map[paxos.Connection]configuration.Cond) {
+func (e *emigrator) startBatch(batch []*sendBatch) {
 	it := &dbIterator{
 		emigrator: e,
 		batch:     batch,
@@ -1743,7 +1741,7 @@ func (e *emigrator) startBatch(batch map[paxos.Connection]configuration.Cond) {
 
 type dbIterator struct {
 	*emigrator
-	batch map[paxos.Connection]configuration.Cond
+	batch []*sendBatch
 }
 
 func (it *dbIterator) iterate() {
@@ -1786,30 +1784,13 @@ func (it *dbIterator) iterate() {
 				} else if len(varCaps) == 0 {
 					continue
 				}
-				for conn, cond := range it.batch {
-					matchingVarCaps, err := it.matchVarsAgainstCond(cond, varCaps)
+				for _, sb := range it.batch {
+					matchingVarCaps, err := it.matchVarsAgainstCond(sb.cond, varCaps)
 					if err != nil {
 						cursor.Error(err)
 						return nil
 					} else if len(matchingVarCaps) != 0 {
-						// first attempt: no batching. Just send them. Add
-						// batching later on. TODO.
-						seg := capn.NewBuffer(nil)
-						msg := msgs.NewRootMessage(seg)
-						migration := msgs.NewMigration(seg)
-						msg.SetMigration(migration)
-						migration.SetVersion(it.topology.Next().Version)
-						txns := msgs.NewTxnList(seg, 1)
-						migration.SetTxns(txns)
-						txns.Set(0, txnCap)
-						vars := msgs.NewVarList(seg, len(matchingVarCaps))
-						migration.SetVars(vars)
-						for idx, varCap := range matchingVarCaps {
-							vars.Set(idx, *varCap)
-						}
-						bites := server.SegToBytes(seg)
-						server.Log("Migrating", len(matchingVarCaps), "vars on", txnId, "to", conn.RMId())
-						conn.Send(bites)
+						sb.add(&txnCap, matchingVarCaps)
 					}
 				}
 			}
@@ -1827,13 +1808,22 @@ func (it *dbIterator) iterate() {
 	if err != nil {
 		log.Println(err)
 	}
+	for _, sb := range it.batch {
+		sb.flush()
+	}
 	it.connectionManager.AddSender(it)
 }
 
 func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) ([]*msgs.Var, error) {
 	varCaps := make([]*msgs.Var, 0, actions.Len()>>1)
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
-		actionVarUUIdBytes := actions.At(idx).VarId()
+		action := actions.At(idx)
+		if action.Which() == msgs.ACTION_READ {
+			// no point looking up the var itself as there's no way it'll
+			// point back to us.
+			continue
+		}
+		actionVarUUIdBytes := action.VarId()
 		varBytes, err := cursor.RTxn.Get(db.DB.Vars, actionVarUUIdBytes)
 		if err == mdb.NotFound {
 			continue
@@ -1888,8 +1878,8 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	msg.SetMigrationComplete(mc)
 	bites := server.SegToBytes(seg)
 
-	for connOrig := range it.batch {
-		if conn, found := conns[connOrig.RMId()]; found && connOrig == conn {
+	for _, sb := range it.batch {
+		if conn, found := conns[sb.conn.RMId()]; found && sb.conn == conn {
 			// The connection has not changed since we started sending to
 			// it (because we cached it, you can discount the issue of
 			// memory reuse here - phew). Therefore, it's safe to send
@@ -1901,4 +1891,60 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 }
 func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]paxos.Connection) {}
 func (it *dbIterator) ConnectionEstablished(common.RMId, paxos.Connection, map[common.RMId]paxos.Connection) {
+}
+
+type sendBatch struct {
+	version uint32
+	conn    paxos.Connection
+	cond    configuration.Cond
+	vars    []*msgs.Var
+	txns    []*msgs.Txn
+}
+
+const (
+	sendBatchTxnCount = 64
+)
+
+func (e *emigrator) newBatch(conn paxos.Connection, cond configuration.Cond) *sendBatch {
+	return &sendBatch{
+		version: e.topology.Next().Version,
+		conn:    conn,
+		cond:    cond,
+		vars:    make([]*msgs.Var, 0, sendBatchTxnCount),
+		txns:    make([]*msgs.Txn, 0, sendBatchTxnCount),
+	}
+}
+
+func (sb *sendBatch) flush() {
+	if len(sb.vars) == 0 {
+		return
+	}
+	seg := capn.NewBuffer(nil)
+	msg := msgs.NewRootMessage(seg)
+	migration := msgs.NewMigration(seg)
+	msg.SetMigration(migration)
+	migration.SetVersion(sb.version)
+	txns := msgs.NewTxnList(seg, len(sb.txns))
+	migration.SetTxns(txns)
+	for idx, txnCap := range sb.txns {
+		txns.Set(idx, *txnCap)
+	}
+	vars := msgs.NewVarList(seg, len(sb.vars))
+	migration.SetVars(vars)
+	for idx, varCap := range sb.vars {
+		vars.Set(idx, *varCap)
+	}
+	bites := server.SegToBytes(seg)
+	server.Log("Migrating", len(sb.vars), "vars on", len(sb.txns), "txns to", sb.conn.RMId())
+	sb.conn.Send(bites)
+	sb.vars = sb.vars[:0]
+	sb.txns = sb.txns[:0]
+}
+
+func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
+	sb.txns = append(sb.txns, txnCap)
+	sb.vars = append(sb.vars, varCaps...)
+	if len(sb.txns) == sendBatchTxnCount {
+		sb.flush()
+	}
 }
