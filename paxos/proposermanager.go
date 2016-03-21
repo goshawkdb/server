@@ -76,7 +76,7 @@ func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 	if _, found := pm.proposers[*txnId]; !found {
 		server.Log(txnId, "Received")
 		if pm.topology == nil ||
-			(pm.topology.Next() == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
+			(pm.topology.Version == txnCap.TopologyVersion()) ||
 			(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion()) {
 			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter)
 			pm.proposers[*txnId] = proposer
