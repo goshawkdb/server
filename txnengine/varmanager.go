@@ -19,11 +19,12 @@ type VarManager struct {
 	LocalConnection
 	disk       *mdbs.MDBServer
 	active     map[common.VarUUId]*Var
-	exe        *dispatcher.Executor
 	onIdle     func()
+	onVarIdle  map[common.VarUUId][]func()
 	lc         LocalConnection
 	callbacks  []func()
 	beaterLive bool
+	exe        *dispatcher.Executor
 }
 
 func init() {
@@ -35,8 +36,9 @@ func NewVarManager(exe *dispatcher.Executor, server *mdbs.MDBServer, lc LocalCon
 		LocalConnection: lc,
 		disk:            server,
 		active:          make(map[common.VarUUId]*Var),
-		exe:             exe,
+		onVarIdle:       make(map[common.VarUUId][]func()),
 		callbacks:       []func(){},
+		exe:             exe,
 	}
 }
 
@@ -53,10 +55,10 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	fun(v, nil)
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
-	} else if found && vm.onIdle != nil {
-		v.ForceToIdle()
-		vm.checkAllIdle()
 	} else if vm.onIdle != nil {
+		if found {
+			v.ForceToIdle()
+		}
 		vm.checkAllIdle()
 	}
 }
@@ -102,13 +104,19 @@ func (vm *VarManager) SetInactive(v *Var) {
 	default:
 		//fmt.Printf("%v is now inactive. ", v.UUId)
 		delete(vm.active, *v.UUId)
+		if funcs, found := vm.onVarIdle[*v.UUId]; found {
+			delete(vm.onVarIdle, *v.UUId)
+			for _, f := range funcs {
+				f()
+			}
+		}
 	}
 }
 
 func (vm *VarManager) Immigrate(uuid *common.VarUUId, varCap *msgs.Var, txnId *common.TxnId, txnCap *msgs.Txn, cont func(error)) {
 	if _, found := vm.active[*uuid]; found {
-		server.Log("Immigration ignored as var is active. Assuming it arrived late.", uuid, txnId)
-		cont(nil)
+		funcs := vm.onVarIdle[*uuid]
+		vm.onVarIdle[*uuid] = append(funcs, func() { vm.Immigrate(uuid, varCap, txnId, txnCap, cont) })
 		return
 	}
 
