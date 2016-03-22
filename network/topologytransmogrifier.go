@@ -1133,7 +1133,7 @@ type migrate struct {
 	*targetConfig
 	varBarrierReached *configuration.Configuration
 	migrateInstall
-	migrateAwaitClientDrain
+	migrateAwaitProposerBarrier
 	migrateAwaitVarBarrier
 	migrateAwaitImmigrations
 	migrateAwaitNoPending
@@ -1155,7 +1155,7 @@ func (task *migrate) tick() error {
 
 	if task.currentState == nil {
 		task.migrateInstall.init(task)
-		task.migrateAwaitClientDrain.init(task)
+		task.migrateAwaitProposerBarrier.init(task)
 		task.migrateAwaitVarBarrier.init(task)
 		task.migrateAwaitImmigrations.init(task)
 		task.migrateAwaitNoPending.init(task)
@@ -1179,8 +1179,8 @@ func (task *migrate) completed() error {
 func (task *migrate) nextState() error {
 	switch task.currentState {
 	case &task.migrateInstall:
-		task.currentState = &task.migrateAwaitClientDrain
-	case &task.migrateAwaitClientDrain:
+		task.currentState = &task.migrateAwaitProposerBarrier
+	case &task.migrateAwaitProposerBarrier:
 		task.currentState = &task.migrateAwaitVarBarrier
 	case &task.migrateAwaitVarBarrier:
 		task.currentState = &task.migrateAwaitImmigrations
@@ -1210,14 +1210,14 @@ func (task *migrateInstall) tick() error {
 	return task.nextState()
 }
 
-type migrateAwaitClientDrain struct{ *migrate }
+type migrateAwaitProposerBarrier struct{ *migrate }
 
-func (task *migrateAwaitClientDrain) witness() migrateInnerState { return task }
-func (task *migrateAwaitClientDrain) init(migrate *migrate)      { task.migrate = migrate }
-func (task *migrateAwaitClientDrain) tick() error {
+func (task *migrateAwaitProposerBarrier) witness() migrateInnerState { return task }
+func (task *migrateAwaitProposerBarrier) init(migrate *migrate)      { task.migrate = migrate }
+func (task *migrateAwaitProposerBarrier) tick() error {
 	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
 		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
-		log.Println("Topology: Topology installed on clients. Waiting for vars to go quiet.")
+		log.Println("Topology: Topology installed in proposer managers. Waiting for vars to go quiet.")
 		nextConfig := task.active.Next().Configuration
 		task.connectionManager.Dispatchers.VarDispatcher.ForceToIdle(func() {
 			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
