@@ -23,21 +23,21 @@ import (
 )
 
 type TopologyTransmogrifier struct {
-	disk               *mdbs.MDBServer
-	connectionManager  *ConnectionManager
-	localConnection    *client.LocalConnection
-	active             *configuration.Topology
-	installedOnClients *configuration.Topology
-	hostToConnection   map[string]paxos.Connection
-	activeConnections  map[common.RMId]paxos.Connection
-	migrations         map[uint32]map[common.RMId]*int32
-	task               topologyTask
-	cellTail           *cc.ChanCellTail
-	enqueueQueryInner  func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan          <-chan topologyTransmogrifierMsg
-	listenPort         uint16
-	rng                *rand.Rand
-	localEstablished   chan struct{}
+	disk                 *mdbs.MDBServer
+	connectionManager    *ConnectionManager
+	localConnection      *client.LocalConnection
+	active               *configuration.Topology
+	installedOnProposers *configuration.Topology
+	hostToConnection     map[string]paxos.Connection
+	activeConnections    map[common.RMId]paxos.Connection
+	migrations           map[uint32]map[common.RMId]*int32
+	task                 topologyTask
+	cellTail             *cc.ChanCellTail
+	enqueueQueryInner    func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan            <-chan topologyTransmogrifierMsg
+	listenPort           uint16
+	rng                  *rand.Rand
+	localEstablished     chan struct{}
 }
 
 type topologyTransmogrifierMsg interface {
@@ -327,23 +327,24 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 
 func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology) {
 	server.Log("Installing topology to connection manager, et al:", topology)
-	var installedOnClients func()
+	installed := func() error {
+		if tt.localEstablished != nil {
+			close(tt.localEstablished)
+			tt.localEstablished = nil
+		}
+		if tt.task != nil {
+			return tt.task.tick()
+		}
+		return nil
+	}
 	if topology.Next() != nil {
-		installedOnClients = func() {
-			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-				tt.installedOnClients = topology
-				if tt.localEstablished != nil {
-					close(tt.localEstablished)
-					tt.localEstablished = nil
-				}
-				if tt.task != nil {
-					return tt.task.tick()
-				}
-				return nil
-			}))
+		orig := installed
+		installed = func() error {
+			tt.installedOnProposers = topology
+			return orig()
 		}
 	}
-	tt.connectionManager.SetTopology(topology, installedOnClients)
+	tt.connectionManager.SetTopology(topology, func() { tt.enqueueQuery(topologyTransmogrifierMsgExe(installed)) })
 }
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
@@ -1214,8 +1215,8 @@ type migrateAwaitClientDrain struct{ *migrate }
 func (task *migrateAwaitClientDrain) witness() migrateInnerState { return task }
 func (task *migrateAwaitClientDrain) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitClientDrain) tick() error {
-	if task.installedOnClients != nil && task.installedOnClients.Next() != nil &&
-		task.installedOnClients.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
+	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
+		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
 		log.Println("Topology: Topology installed on clients. Waiting for vars to go quiet.")
 		nextConfig := task.active.Next().Configuration
 		task.connectionManager.Dispatchers.VarDispatcher.ForceToIdle(func() {

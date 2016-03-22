@@ -46,9 +46,8 @@ type localConnectionMsgOutcomeReceived func(*LocalConnection)
 func (lcmor localConnectionMsgOutcomeReceived) localConnectionMsgWitness() {}
 
 type localConnectionMsgTopologyChange struct {
-	topology  *configuration.Topology
-	servers   map[common.RMId]paxos.Connection
-	installed func()
+	topology *configuration.Topology
+	servers  map[common.RMId]paxos.Connection
 }
 
 func (lcmtc *localConnectionMsgTopologyChange) localConnectionMsgWitness() {}
@@ -190,11 +189,10 @@ func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *
 	}))
 }
 
-func (lc *LocalConnection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection, installed func()) {
+func (lc *LocalConnection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
 	lc.enqueueQuery(&localConnectionMsgTopologyChange{
-		topology:  topology,
-		servers:   servers,
-		installed: installed,
+		topology: topology,
+		servers:  servers,
 	})
 }
 
@@ -257,9 +255,6 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 				terminate = true
 			case *localConnectionMsgTopologyChange:
 				lc.submitter.TopologyChange(msgT.topology, msgT.servers)
-				if msgT.installed != nil {
-					msgT.installed()
-				}
 			case *localConnectionMsgRunTxn:
 				lc.runTransaction(msgT)
 			case *localConnectionMsgRunClientTxn:

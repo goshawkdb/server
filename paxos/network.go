@@ -30,7 +30,7 @@ type Connection interface {
 }
 
 type ClientConnection interface {
-	TopologyChange(*configuration.Topology, map[common.RMId]Connection, func())
+	TopologyChange(*configuration.Topology, map[common.RMId]Connection)
 	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *msgs.Outcome)
 }
 

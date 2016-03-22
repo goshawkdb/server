@@ -145,7 +145,11 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		}
 		return nil
 	}
-	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap)
+	version := sts.topology.Version
+	if next := sts.topology.Next(); !bufferOnTopologyChange && next != nil {
+		version = next.Version
+	}
+	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version)
 	if err != nil {
 		return err
 	}
@@ -191,7 +195,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewTxn(outgoingSeg)
 
@@ -200,7 +204,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn) 
 	txnCap.SetSubmitter(uint32(sts.rmId))
 	txnCap.SetSubmitterBootCount(sts.bootCount)
 	txnCap.SetFInc(sts.topology.FInc)
-	txnCap.SetTopologyVersion(sts.topology.Version)
+	txnCap.SetTopologyVersion(topologyVersion)
 
 	clientActions := clientTxnCap.Actions()
 	actions := msgs.NewActionList(outgoingSeg, clientActions.Len())

@@ -15,7 +15,6 @@ import (
 	"goshawkdb.io/server/paxos"
 	"log"
 	"sync"
-	"sync/atomic"
 )
 
 type ConnectionManager struct {
@@ -541,7 +540,7 @@ func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
 	}
 }
 
-func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, clientsInstalled func()) {
+func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, installed func()) {
 	if cm.topology != nil && cm.topology.Configuration.Equal(topology.Configuration) {
 		return
 	}
@@ -570,24 +569,15 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, cl
 		}
 	}
 	rmToServerCopy := cm.cloneRMToServer()
-	if clientsInstalled != nil {
-		count := int32(len(cm.connCountToClient))
-		orig := clientsInstalled
-		clientsInstalled = func() {
-			if atomic.AddInt32(&count, -1) == 0 {
-				orig()
-			}
-		}
-	}
 	for _, cconn := range cm.connCountToClient {
-		cconn.TopologyChange(topology, rmToServerCopy, clientsInstalled)
+		cconn.TopologyChange(topology, rmToServerCopy)
 	}
 	for _, sconn := range cm.rmToServer {
 		if sconn.Connection != nil {
-			sconn.Connection.TopologyChange(topology, rmToServerCopy, nil)
+			sconn.Connection.TopologyChange(topology, rmToServerCopy)
 		}
 	}
-	cm.Dispatchers.ProposerDispatcher.SetTopology(topology)
+	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, installed)
 	cm.Dispatchers.AcceptorDispatcher.SetTopology(topology)
 }
 
