@@ -416,37 +416,60 @@ func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask) {
 
 func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogrifierMsgMigration) error {
 	version := migration.migration.Version()
-	if version > tt.active.Version {
-		senders, found := tt.migrations[version]
-		if !found {
-			senders = make(map[common.RMId]*int32)
-			tt.migrations[version] = senders
+	if version <= tt.active.Version {
+		// This topology change has been completed. Ignore this migration.
+		return nil
+	} else if next := tt.active.Next(); next != nil {
+		if version < next.Version {
+			// Whatever change that was for, it isn't happening any
+			// more. Ignore.
+			return nil
+		} else if _, found := next.Pending[tt.connectionManager.RMId]; version == next.Version && !found {
+			// Migration is for the current topology change, but we've
+			// declared ourselves done, so Ignore.
+			return nil
 		}
-		sender := migration.sender
-		inprogressPtr, found := senders[sender]
-		if found {
-			atomic.AddInt32(inprogressPtr, 1)
-		} else {
-			inprogress := int32(2)
-			inprogressPtr = &inprogress
-			senders[sender] = inprogressPtr
-		}
-		varCount := int32(migration.migration.Vars().Len())
-		tt.connectionManager.Dispatchers.VarDispatcher.Immigrate(migration.migration, func(err error) {
-			if err != nil {
-				panic(fmt.Sprintf("Error when processing immigration: %v", err))
-			}
-			if atomic.AddInt32(&varCount, -1) == 0 &&
-				atomic.AddInt32(inprogressPtr, -1) == 0 {
-				tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-					if tt.task != nil {
-						return tt.task.tick()
-					}
-					return nil
-				}))
-			}
-		})
 	}
+
+	// So ftr, there is an interesting window here: 1. We've done
+	// enough immigration such that we have removed our own pending
+	// condition and rewritten the topology again. Before we observe
+	// that change, another migration comes in. We still process that
+	// (by dfn, it shouldn't cause any change). However, during this
+	// time, new transactions from clients of other nodes could start
+	// streaming in again and start keeping our vars active (esp eg
+	// retries). So there is a chance for a leak at this point, which
+	// for the time being we're just going to ignore. TODO.
+
+	senders, found := tt.migrations[version]
+	if !found {
+		senders = make(map[common.RMId]*int32)
+		tt.migrations[version] = senders
+	}
+	sender := migration.sender
+	inprogressPtr, found := senders[sender]
+	if found {
+		atomic.AddInt32(inprogressPtr, 1)
+	} else {
+		inprogress := int32(2)
+		inprogressPtr = &inprogress
+		senders[sender] = inprogressPtr
+	}
+	varCount := int32(migration.migration.Vars().Len())
+	tt.connectionManager.Dispatchers.VarDispatcher.Immigrate(migration.migration, func(err error) {
+		if err != nil {
+			panic(fmt.Sprintf("Error when processing immigration: %v", err))
+		}
+		if atomic.AddInt32(&varCount, -1) == 0 &&
+			atomic.AddInt32(inprogressPtr, -1) == 0 {
+			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				if tt.task != nil {
+					return tt.task.tick()
+				}
+				return nil
+			}))
+		}
+	})
 	return nil
 }
 
