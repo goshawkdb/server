@@ -11,10 +11,14 @@ using Var = import "var.capnp";
 
 struct Migration {
   version @0: UInt32;
-  txns    @1: List(Txn.Txn);
-  vars    @2: List(Var.Var);
+  elems   @1: List(MigrationElement);
 }
 
 struct MigrationComplete {
   version  @0: UInt32;
+}
+
+struct MigrationElement {
+  txn  @0: Txn.Txn;
+  vars @1: List(Var.Var);
 }

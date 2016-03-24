@@ -65,6 +65,18 @@ func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnSubmissionAbortReceived(sender, txnId) })
 }
 
+func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, stateChange eng.TxnLocalStateChange) {
+	elemsList := migration.Elems()
+	elemsCount := elemsList.Len()
+	for idx := 0; idx < elemsCount; idx++ {
+		elem := elemsList.At(idx)
+		txnCap := elem.Txn()
+		txnId := common.MakeTxnId(txnCap.Id())
+		varCaps := elem.Vars()
+		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txnId, &txnCap, &varCaps, stateChange) })
+	}
+}
+
 func (pd *ProposerDispatcher) SetTopology(topology *configuration.Topology, installed func()) {
 	if installed != nil {
 		orig := installed

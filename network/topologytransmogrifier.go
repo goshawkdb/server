@@ -455,21 +455,25 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 		inprogressPtr = &inprogress
 		senders[sender] = inprogressPtr
 	}
-	varCount := int32(migration.migration.Vars().Len())
-	tt.connectionManager.Dispatchers.VarDispatcher.Immigrate(migration.migration, func(err error) {
-		if err != nil {
-			panic(fmt.Sprintf("Error when processing immigration: %v", err))
-		}
-		if atomic.AddInt32(&varCount, -1) == 0 &&
-			atomic.AddInt32(inprogressPtr, -1) == 0 {
-			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-				if tt.task != nil {
-					return tt.task.tick()
-				}
-				return nil
-			}))
-		}
-	})
+	txnCount := int32(migration.migration.Elems().Len())
+	var stateChange eng.TxnLocalStateChange
+	tt.connectionManager.Dispatchers.ProposerDispatcher.ImmigrationReceived(migration.migration, stateChange)
+	/*
+	   func(err error) {
+	   		if err != nil {
+	   			panic(fmt.Sprintf("Error when processing immigration: %v", err))
+	   		}
+	   		if atomic.AddInt32(&txnCount, -1) == 0 &&
+	   			atomic.AddInt32(inprogressPtr, -1) == 0 {
+	   			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+	   				if tt.task != nil {
+	   					return tt.task.tick()
+	   				}
+	   				return nil
+	   			}))
+	   		}
+	   	})
+	*/
 	return nil
 }
 
@@ -1926,12 +1930,16 @@ type sendBatch struct {
 	version uint32
 	conn    paxos.Connection
 	cond    configuration.Cond
-	vars    []*msgs.Var
-	txns    []*msgs.Txn
+	elems   []*migrationElem
+}
+
+type migrationElem struct {
+	txn  *msgs.Txn
+	vars []*msgs.Var
 }
 
 const (
-	sendBatchTxnCount = 64
+	sendBatchElemCount = 64
 )
 
 func (e *emigrator) newBatch(conn paxos.Connection, cond configuration.Cond) *sendBatch {
@@ -1939,41 +1947,44 @@ func (e *emigrator) newBatch(conn paxos.Connection, cond configuration.Cond) *se
 		version: e.topology.Next().Version,
 		conn:    conn,
 		cond:    cond,
-		vars:    make([]*msgs.Var, 0, sendBatchTxnCount),
-		txns:    make([]*msgs.Txn, 0, sendBatchTxnCount),
+		elems:   make([]*migrationElem, 0, sendBatchElemCount),
 	}
 }
 
 func (sb *sendBatch) flush() {
-	if len(sb.vars) == 0 {
+	if len(sb.elems) == 0 {
 		return
 	}
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	migration := msgs.NewMigration(seg)
-	msg.SetMigration(migration)
 	migration.SetVersion(sb.version)
-	txns := msgs.NewTxnList(seg, len(sb.txns))
-	migration.SetTxns(txns)
-	for idx, txnCap := range sb.txns {
-		txns.Set(idx, *txnCap)
+	elems := msgs.NewMigrationElementList(seg, len(sb.elems))
+	for idx, elem := range sb.elems {
+		elemCap := msgs.NewMigrationElement(seg)
+		elemCap.SetTxn(*elem.txn)
+		vars := msgs.NewVarList(seg, len(elem.vars))
+		for idy, varCap := range elem.vars {
+			vars.Set(idy, *varCap)
+		}
+		elemCap.SetVars(vars)
+		elems.Set(idx, elemCap)
 	}
-	vars := msgs.NewVarList(seg, len(sb.vars))
-	migration.SetVars(vars)
-	for idx, varCap := range sb.vars {
-		vars.Set(idx, *varCap)
-	}
+	migration.SetElems(elems)
+	msg.SetMigration(migration)
 	bites := server.SegToBytes(seg)
-	server.Log("Migrating", len(sb.vars), "vars on", len(sb.txns), "txns to", sb.conn.RMId())
+	server.Log("Migrating", len(sb.elems), "txns to", sb.conn.RMId())
 	sb.conn.Send(bites)
-	sb.vars = sb.vars[:0]
-	sb.txns = sb.txns[:0]
+	sb.elems = sb.elems[:0]
 }
 
 func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
-	sb.txns = append(sb.txns, txnCap)
-	sb.vars = append(sb.vars, varCaps...)
-	if len(sb.txns) == sendBatchTxnCount {
+	elem := &migrationElem{
+		txn:  txnCap,
+		vars: varCaps,
+	}
+	sb.elems = append(sb.elems, elem)
+	if len(sb.elems) == sendBatchElemCount {
 		sb.flush()
 	}
 }

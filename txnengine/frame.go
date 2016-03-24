@@ -621,7 +621,9 @@ func (fo *frameOpen) maybeCreateChild() {
 	for _, localElemVal := range localElemVals {
 		actions := localElemValToTxns[localElemVal]
 		for _, action := range *actions {
-			action.outcomeClockCopy = action.outcomeClock.Clone()
+			if action.outcomeClockCopy == nil {
+				action.outcomeClockCopy = action.outcomeClock.Clone()
+			}
 			action.outcomeClockCopy.MergeInMissing(clock)
 			winner = maxTxnByOutcomeClock(winner, action)
 
@@ -630,8 +632,12 @@ func (fo *frameOpen) maybeCreateChild() {
 			}
 
 			clock.MergeInMax(action.outcomeClockCopy)
-			for _, k := range action.writes {
-				written.SetVarIdMax(*k, action.outcomeClockCopy.Clock[*k])
+			if action.writesClock == nil {
+				for _, k := range action.writes {
+					written.SetVarIdMax(*k, action.outcomeClockCopy.Clock[*k])
+				}
+			} else {
+				written.MergeInMax(action.writesClock)
 			}
 		}
 	}

@@ -70,6 +70,10 @@ func (pm *ProposerManager) SetTopology(topology *configuration.Topology, install
 	}
 }
 
+func (pm *ProposerManager) ImmigrationReceived(txnId *common.TxnId, txnCap *msgs.Txn, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {
+	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txnCap, varCaps)
+}
+
 func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other

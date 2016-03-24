@@ -66,6 +66,7 @@ type localAction struct {
 	createPositions  *common.Positions
 	roll             bool
 	outcomeClockCopy *VectorClock
+	writesClock      *VectorClock
 }
 
 func (action *localAction) IsRead() bool {
@@ -138,6 +139,45 @@ func (action localAction) String() string {
 		b = "|b"
 	}
 	return fmt.Sprintf("Action for %v: create:%v|read:%v|write:%v|roll:%v%v%v", action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b)
+}
+
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, txnCap *msgs.Txn, varCaps *msgs.Var_List) {
+	txn := TxnFromCap(exe, vd, stateChange, ourRMId, txnCap)
+	actions := make([]*localAction, varCaps.Len())
+	for idx, l := 0, varCaps.Len(); idx < l; idx++ {
+		varCap := varCaps.At(idx)
+		vUUId := common.MakeVarUUId(varCap.Id())
+		var action *localAction
+		for idx := range txn.localActions {
+			action = &txn.localActions[idx]
+			if action.vUUId.Compare(vUUId) == common.EQ {
+				break
+			}
+		}
+		positions := varCap.Positions()
+		action.createPositions = (*common.Positions)(&positions)
+		action.outcomeClockCopy = VectorClockFromCap(varCap.WriteTxnClock())
+		action.writesClock = VectorClockFromCap(varCap.WritesClock())
+		actions[idx] = action
+	}
+	txn.localActions = txn.localActions[:len(actions)]
+	for idx, action := range actions {
+		txn.localActions[idx] = *action
+	}
+
+	txn.Start(false)
+	txn.nextState()
+	for idx := range txn.localActions {
+		action := &txn.localActions[idx]
+		f := func(v *Var, err error) {
+			if err != nil {
+				panic(fmt.Sprintf("%v immigration error: %v", txn.Id, err))
+			} else {
+				v.ReceiveTxnOutcome(action)
+			}
+		}
+		vd.ApplyToVar(f, true, action.vUUId)
+	}
 }
 
 func TxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, txnCap *msgs.Txn) *Txn {

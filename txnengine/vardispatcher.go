@@ -44,34 +44,6 @@ func (vd *VarDispatcher) ForceToIdle(onIdleOrig func()) {
 	}
 }
 
-func (vd *VarDispatcher) Immigrate(migration *msgs.Migration, cont func(error)) {
-	// Technically, the way that the message is built means that we
-	// don't have to create this map because every use of each txn will
-	// occur in a block. However, we're not going to make that
-	// guarantee, and this is more obvious code anyway.
-	txnsList := migration.Txns()
-	txnsCount := txnsList.Len()
-	txns := make(map[common.TxnId]*msgs.Txn, txnsCount)
-	for idx := 0; idx < txnsCount; idx++ {
-		txnCap := txnsList.At(idx)
-		txnId := common.MakeTxnId(txnCap.Id())
-		txns[*txnId] = &txnCap
-	}
-
-	varsList := migration.Vars()
-	for idx, l := 0, varsList.Len(); idx < l; idx++ {
-		varCap := varsList.At(idx)
-		vUUId := common.MakeVarUUId(varCap.Id())
-		txnId := common.MakeTxnId(varCap.WriteTxnId())
-		txnCap, found := txns[*txnId]
-		if !found {
-			panic(fmt.Sprintf("Migration contained %v which has write txn %v which is not found in message! %v",
-				vUUId, txnId, txns))
-		}
-		vd.withVarManager(vUUId, func(vm *VarManager) { vm.Immigrate(vUUId, &varCap, txnId, txnCap, cont) })
-	}
-}
-
 func (vd *VarDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Vars")
 	for idx, executor := range vd.Executors {
