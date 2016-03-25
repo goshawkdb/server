@@ -403,8 +403,9 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 }
 
 func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask) {
+	sleep := time.Duration(tt.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
 	go func() {
-		time.Sleep(time.Duration(tt.rng.Intn(int(server.SubmissionMaxSubmitDelay))))
+		time.Sleep(sleep)
 		tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 			if tt.task == task {
 				return tt.task.tick()
@@ -456,24 +457,8 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 		senders[sender] = inprogressPtr
 	}
 	txnCount := int32(migration.migration.Elems().Len())
-	var stateChange eng.TxnLocalStateChange
-	tt.connectionManager.Dispatchers.ProposerDispatcher.ImmigrationReceived(migration.migration, stateChange)
-	/*
-	   func(err error) {
-	   		if err != nil {
-	   			panic(fmt.Sprintf("Error when processing immigration: %v", err))
-	   		}
-	   		if atomic.AddInt32(&txnCount, -1) == 0 &&
-	   			atomic.AddInt32(inprogressPtr, -1) == 0 {
-	   			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-	   				if tt.task != nil {
-	   					return tt.task.tick()
-	   				}
-	   				return nil
-	   			}))
-	   		}
-	   	})
-	*/
+	lsc := tt.newTxnLSC(txnCount, inprogressPtr)
+	tt.connectionManager.Dispatchers.ProposerDispatcher.ImmigrationReceived(migration.migration, lsc)
 	return nil
 }
 
@@ -503,6 +488,40 @@ func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *t
 	}
 	return nil
 }
+
+func (tt *TopologyTransmogrifier) newTxnLSC(txnCount int32, inprogressPtr *int32) eng.TxnLocalStateChange {
+	return &migrationTxnLocalStateChange{
+		TopologyTransmogrifier: tt,
+		pendingLocallyComplete: txnCount,
+		inprogressPtr:          inprogressPtr,
+	}
+}
+
+type migrationTxnLocalStateChange struct {
+	*TopologyTransmogrifier
+	pendingLocallyComplete int32
+	inprogressPtr          *int32
+}
+
+func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(*eng.Txn, ...*eng.Ballot) {
+	panic("TxnBallotsComplete called on migrating txn.")
+}
+
+// Careful: we're in the proposer dispatcher go routine here!
+func (mtlsc *migrationTxnLocalStateChange) TxnLocallyComplete(txn *eng.Txn) {
+	txn.CompletionReceived()
+	if atomic.AddInt32(&mtlsc.pendingLocallyComplete, -1) == 0 &&
+		atomic.AddInt32(mtlsc.inprogressPtr, -1) == 0 {
+		mtlsc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			if mtlsc.task != nil {
+				return mtlsc.task.tick()
+			}
+			return nil
+		}))
+	}
+}
+
+func (mtlsc *migrationTxnLocalStateChange) TxnFinished(*eng.Txn) {}
 
 // topologyTask
 
@@ -1884,7 +1903,7 @@ func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBy
 }
 
 func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*msgs.Var) ([]*msgs.Var, error) {
-	result := make([]*msgs.Var, len(varCaps)>>1)
+	result := make([]*msgs.Var, 0, len(varCaps)>>1)
 	for _, varCap := range varCaps {
 		pos := varCap.Positions()
 		server.Log("Testing", common.MakeVarUUId(varCap.Id()), (*common.Positions)(&pos), "against condition", cond)

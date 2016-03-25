@@ -621,20 +621,18 @@ func (fo *frameOpen) maybeCreateChild() {
 	for _, localElemVal := range localElemVals {
 		actions := localElemValToTxns[localElemVal]
 		for _, action := range *actions {
-			if action.outcomeClockCopy == nil {
-				action.outcomeClockCopy = action.outcomeClock.Clone()
-			}
-			action.outcomeClockCopy.MergeInMissing(clock)
+			action.outcomeClock = action.outcomeClock.Clone()
+			action.outcomeClock.MergeInMissing(clock)
 			winner = maxTxnByOutcomeClock(winner, action)
 
 			if positions == nil && action.createPositions != nil {
 				positions = action.createPositions
 			}
 
-			clock.MergeInMax(action.outcomeClockCopy)
+			clock.MergeInMax(action.outcomeClock)
 			if action.writesClock == nil {
 				for _, k := range action.writes {
-					written.SetVarIdMax(*k, action.outcomeClockCopy.Clock[*k])
+					written.SetVarIdMax(*k, action.outcomeClock.Clock[*k])
 				}
 			} else {
 				written.MergeInMax(action.writesClock)
@@ -642,7 +640,7 @@ func (fo *frameOpen) maybeCreateChild() {
 		}
 	}
 
-	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.writeTxnActions, winner.outcomeClockCopy, written)
+	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.writeTxnActions, winner.outcomeClock, written)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
 		if !fo.child.ReadLearnt(action) {
@@ -857,11 +855,7 @@ func (fe *frameErase) WriteGloballyComplete(action *localAction) {
 	}
 	if node := fe.writes.Get(action); node != nil && node.Value == completing {
 		node.Remove()
-		if action.outcomeClockCopy == nil {
-			fe.v.curFrame.subtractClock(action.outcomeClock)
-		} else {
-			fe.v.curFrame.subtractClock(action.outcomeClockCopy)
-		}
+		fe.v.curFrame.subtractClock(action.outcomeClock)
 		fe.maybeErase()
 	} else {
 		panic(fmt.Sprintf("ReadGloballyComplete for invalid action %v %v", fe.frame, node))
@@ -895,8 +889,8 @@ func maxTxnByOutcomeClock(a, b *localAction) *localAction {
 	case b == nil:
 		return a
 	default:
-		agt := b.outcomeClockCopy.LessThan(a.outcomeClockCopy)
-		bgt := a.outcomeClockCopy.LessThan(b.outcomeClockCopy)
+		agt := b.outcomeClock.LessThan(a.outcomeClock)
+		bgt := a.outcomeClock.LessThan(b.outcomeClock)
 		switch {
 		case agt == bgt:
 			if a.Id.Compare(b.Id) == common.LT {

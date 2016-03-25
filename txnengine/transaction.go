@@ -57,16 +57,16 @@ func (txnA *Txn) Compare(txnB *Txn) common.Cmp {
 
 type localAction struct {
 	*Txn
-	vUUId            *common.VarUUId
-	ballot           *Ballot
-	frame            *frame
-	readVsn          *common.TxnId
-	writeTxnActions  *msgs.Action_List
-	writeAction      *msgs.Action
-	createPositions  *common.Positions
-	roll             bool
-	outcomeClockCopy *VectorClock
-	writesClock      *VectorClock
+	vUUId           *common.VarUUId
+	ballot          *Ballot
+	frame           *frame
+	readVsn         *common.TxnId
+	writeTxnActions *msgs.Action_List
+	writeAction     *msgs.Action
+	createPositions *common.Positions
+	roll            bool
+	outcomeClock    *VectorClock
+	writesClock     *VectorClock
 }
 
 func (action *localAction) IsRead() bool {
@@ -143,26 +143,28 @@ func (action localAction) String() string {
 
 func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, txnCap *msgs.Txn, varCaps *msgs.Var_List) {
 	txn := TxnFromCap(exe, vd, stateChange, ourRMId, txnCap)
-	actions := make([]*localAction, varCaps.Len())
+	txnActions := txnCap.Actions()
+	txn.localActions = make([]localAction, varCaps.Len())
+	actionsMap := make(map[common.VarUUId]*localAction)
 	for idx, l := 0, varCaps.Len(); idx < l; idx++ {
 		varCap := varCaps.At(idx)
-		vUUId := common.MakeVarUUId(varCap.Id())
-		var action *localAction
-		for idx := range txn.localActions {
-			action = &txn.localActions[idx]
-			if action.vUUId.Compare(vUUId) == common.EQ {
-				break
-			}
-		}
+		action := &txn.localActions[idx]
+		action.Txn = txn
+		action.vUUId = common.MakeVarUUId(varCap.Id())
+		action.writeTxnActions = &txnActions
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
-		action.outcomeClockCopy = VectorClockFromCap(varCap.WriteTxnClock())
+		action.outcomeClock = VectorClockFromCap(varCap.WriteTxnClock())
 		action.writesClock = VectorClockFromCap(varCap.WritesClock())
-		actions[idx] = action
+		actionsMap[*action.vUUId] = action
 	}
-	txn.localActions = txn.localActions[:len(actions)]
-	for idx, action := range actions {
-		txn.localActions[idx] = *action
+
+	for idx, l := 0, txnActions.Len(); idx < l; idx++ {
+		actionCap := txnActions.At(idx)
+		vUUId := common.MakeVarUUId(actionCap.VarId())
+		if action, found := actionsMap[*vUUId]; found {
+			action.writeAction = &actionCap
+		}
 	}
 
 	txn.Start(false)
@@ -541,6 +543,7 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	}
 	for idx := 0; idx < len(tro.localActions); idx++ {
 		action := &tro.localActions[idx]
+		action.outcomeClock = tro.outcomeClock
 		f := func(v *Var, err error) {
 			if err != nil {
 				panic(fmt.Sprintf("%v error (%v, aborted? %v, preAborted? %v, frame == nil? %v): %v", tro.Id, tro, tro.aborted, tro.preAbortedBool, action.frame == nil, err))

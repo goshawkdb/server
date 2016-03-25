@@ -191,30 +191,32 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 		v.positions = positions
 	}
 
-	actionCap := action.writeAction
-	var (
-		value      []byte
-		references msgs.VarIdPos_List
-	)
-	switch actionCap.Which() {
-	case msgs.ACTION_WRITE:
-		write := actionCap.Write()
-		value = write.Value()
-		references = write.References()
-	case msgs.ACTION_READWRITE:
-		rw := actionCap.Readwrite()
-		value = rw.Value()
-		references = rw.References()
-	case msgs.ACTION_CREATE:
-		create := actionCap.Create()
-		value = create.Value()
-		references = create.References()
-	case msgs.ACTION_ROLL: // deliberately do nothing
-	default:
-		panic(fmt.Sprintf("Unexpected action type: %v", actionCap.Which()))
-	}
-	for _, sub := range v.subscribers {
-		sub.Observe(v, value, &references, action.Txn)
+	if len(v.subscribers) != 0 {
+		actionCap := action.writeAction
+		var (
+			value      []byte
+			references msgs.VarIdPos_List
+		)
+		switch actionCap.Which() {
+		case msgs.ACTION_WRITE:
+			write := actionCap.Write()
+			value = write.Value()
+			references = write.References()
+		case msgs.ACTION_READWRITE:
+			rw := actionCap.Readwrite()
+			value = rw.Value()
+			references = rw.References()
+		case msgs.ACTION_CREATE:
+			create := actionCap.Create()
+			value = create.Value()
+			references = create.References()
+		case msgs.ACTION_ROLL: // deliberately do nothing
+		default:
+			panic(fmt.Sprintf("Unexpected action type: %v", actionCap.Which()))
+		}
+		for _, sub := range v.subscribers {
+			sub.Observe(v, value, &references, action.Txn)
+		}
 	}
 
 	// diffLen := len(action.outcomeClock.Clock) - action.TxnCap.Actions().Len()
