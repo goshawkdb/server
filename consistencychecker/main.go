@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
-	"flag"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
@@ -12,7 +12,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
-	eng "goshawkdb.io/server/txnengine"
+	_ "goshawkdb.io/server/txnengine"
 	"io/ioutil"
 	"log"
 	"os"
@@ -34,22 +34,18 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println(os.Args)
 
-	procs := runtime.NumCPU()
-	if procs < 2 {
-		procs = 2
-	}
-	runtime.GOMAXPROCS(procs)
-
-	dirs := flag.Args()
+	dirs := os.Args[1:]
 	if len(dirs) == 0 {
 		log.Fatal("No dirs supplied")
 	}
 
+	runtime.GOMAXPROCS(1 + (2 * len(dirs)))
+
 	stores := stores(make([]*store, 0, len(dirs)))
 	defer stores.Shutdown()
-	for _, d := range dirs {
-		log.Printf("...loading from %v\n", d)
-		store := &store{dir: d}
+	for _, dir := range dirs {
+		log.Printf("...loading from %v\n", dir)
+		store := &store{dir: dir}
 		var err error
 		if err = store.LoadRMId(); err == nil {
 			if err = store.StartDisk(); err == nil {
@@ -59,6 +55,7 @@ func main() {
 		if err != nil {
 			log.Println(err)
 		}
+		stores = append(stores, store)
 	}
 
 	if err := stores.CheckEqualTopology(); err != nil {
@@ -66,6 +63,12 @@ func main() {
 		return
 	}
 
+	if err := stores.IterateVars(func(cell *varWrapperCell) error {
+		fmt.Println(cell.vUUId, cell.store)
+		return nil
+	}); err != nil {
+		log.Println(err)
+	}
 }
 
 func (ss stores) CheckEqualTopology() error {
@@ -81,13 +84,13 @@ func (ss stores) CheckEqualTopology() error {
 	return nil
 }
 
-func (ss stores) IterateVars(f func(*varWrapper) error) error {
+func (ss stores) IterateVars(f func(*varWrapperCell) error) error {
 	is := &iterateState{
 		stores:   ss,
-		wrappers: make([]*varWrapper, 0, len(ss)),
+		wrappers: make([]*varWrapper, len(ss)),
 		f:        f,
 	}
-	return is.init()
+	return is.iterate()
 }
 
 func (ss stores) Shutdown() {
@@ -118,7 +121,8 @@ func (s *store) LoadRMId() error {
 }
 
 func (s *store) StartDisk() error {
-	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, 1, time.Millisecond, db.DB)
+	log.Printf("Starting disk server on %v", s.dir)
+	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, 1, 10*time.Millisecond, db.DB)
 	if err != nil {
 		return err
 	}
@@ -202,34 +206,137 @@ func (s *store) LoadTopology() error {
 }
 
 type varWrapper struct {
-	*iterateState
+	store   *store
+	c       chan *varWrapperCell
+	curCell *varWrapperCell
+}
+
+type varWrapperCell struct {
+	*varWrapper
 	vUUId  *common.VarUUId
-	rtxn   *mdbs.RTxn
-	cursor *mdbs.Cursor
+	varCap *msgs.Var
+	err    error
+	other  *varWrapperCell
+}
+
+func (vw *varWrapper) start() {
+	defer close(vw.c)
+
+	c1 := &varWrapperCell{varWrapper: vw}
+	c2 := &varWrapperCell{varWrapper: vw}
+	c1.other, c2.other = c2, c1
+
+	curCell := c1
+	_, err := vw.store.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
+			vUUIdBytes, varBytes, err := cursor.Get(nil, nil, mdb.FIRST)
+			if err != nil {
+				cursor.Error(fmt.Errorf("Err on finding first var in %v: %v", vw.store, err))
+				return nil
+			}
+			if !bytes.Equal(vUUIdBytes, configuration.TopologyVarUUId[:]) {
+				vUUId := common.MakeVarUUId(vUUIdBytes)
+				cursor.Error(fmt.Errorf("Err on finding first var in %v: expected to find topology var, but found %v instead! (%v)", vw.store, vUUId, varBytes))
+				return nil
+			}
+			for ; err == nil; vUUIdBytes, varBytes, err = cursor.Get(nil, nil, mdb.NEXT) {
+				vUUId := common.MakeVarUUId(vUUIdBytes)
+				fmt.Printf("%v %v %v\n", vw.store, vUUId, varBytes)
+				seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
+				if err != nil {
+					cursor.Error(fmt.Errorf("Err on decoding %v in %v: %v (%v)", vUUId, vw.store, err, varBytes))
+					return nil
+				}
+				varCap := msgs.ReadRootVar(seg)
+				curCell.vUUId = vUUId
+				curCell.varCap = &varCap
+				vw.c <- curCell
+				curCell = curCell.other
+			}
+			if err != nil && err != mdb.NotFound {
+				cursor.Error(err)
+			}
+			return nil
+		})
+		return nil
+	}).ResultError()
+	if err != nil {
+		curCell.err = err
+		vw.c <- curCell
+	}
+}
+
+func (vw *varWrapper) next() error {
+	cell, ok := <-vw.c
+	if ok {
+		vw.curCell = cell
+		return cell.err
+	} else {
+		vw.curCell = nil
+		return nil
+	}
 }
 
 type iterateState struct {
 	stores   stores
 	wrappers []*varWrapper
-	f        func(*varWrapper) error
+	f        func(*varWrapperCell) error
 }
 
-func (is *iterateState) init() error {
-	if len(is.stores) == len(is.wrappers) {
-		return nil // actually do nextState
+func (is *iterateState) init() {
+	for idx, store := range is.stores {
+		wrapper := &varWrapper{
+			store: store,
+			c:     make(chan *varWrapperCell, 0),
+		}
+		is.wrappers[idx] = wrapper
+		go wrapper.start()
 	}
-	s := is.stores[len(is.wrappers)]
-	_, err := s.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
-			is.wrappers = append(is.wrappers, &varWrapper{
-				iterateState: is,
-				rtxn:         rtxn,
-				cursor:       cursor,
-			})
-			return is.init()
-		})
-		return nil
-	}).ResultError()
-	return err
+}
 
+func (is *iterateState) shutdown() {
+	log.Println("Shutting down iterator")
+	for _, wrapper := range is.wrappers {
+		for wrapper.curCell != nil && wrapper.curCell.err != nil {
+			wrapper.next()
+		}
+	}
+}
+
+func (is *iterateState) iterate() error {
+	is.init()
+	defer is.shutdown()
+
+	for _, wrapper := range is.wrappers {
+		if err := wrapper.next(); err != nil {
+			return wrapper.curCell.err
+		} else if wrapper.curCell.vUUId.Compare(configuration.TopologyVarUUId) == common.EQ {
+			if err := wrapper.next(); err != nil {
+				return wrapper.curCell.err
+			}
+		}
+	}
+	for cell := is.minWrapperCell(); cell != nil; cell = is.minWrapperCell() {
+		if err := is.f(cell); err != nil {
+			return err
+		}
+		if err := cell.next(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (is *iterateState) minWrapperCell() *varWrapperCell {
+	var cell *varWrapperCell
+	for _, wrapper := range is.wrappers {
+		switch {
+		case wrapper.curCell == nil:
+		case cell == nil:
+			cell = wrapper.curCell
+		case wrapper.curCell.vUUId.Compare(cell.vUUId) == common.LT:
+			cell = wrapper.curCell
+		}
+	}
+	return cell
 }
