@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"flag"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
@@ -9,16 +10,27 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
+	"io/ioutil"
 	"log"
 	"os"
 	"runtime"
 	"time"
 )
 
+type store struct {
+	dir      string
+	disk     *mdbs.MDBServer
+	rmId     common.RMId
+	topology *configuration.Topology
+}
+
+type stores []*store
+
 func main() {
-	log.SetPrefix(common.ProductName + " ")
+	log.SetPrefix(common.ProductName + "ConsistencyChecker ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println(os.Args)
 
@@ -28,113 +40,196 @@ func main() {
 	}
 	runtime.GOMAXPROCS(procs)
 
-	var vUUIdStr string
-	flag.StringVar(&vUUIdStr, "var", "", "var to interrogate")
-	flag.Parse()
-
 	dirs := flag.Args()
 	if len(dirs) == 0 {
 		log.Fatal("No dirs supplied")
 	}
 
-	vars := make(map[common.VarUUId]*varstate)
+	stores := stores(make([]*store, 0, len(dirs)))
+	defer stores.Shutdown()
 	for _, d := range dirs {
-		dir := d
-		log.Printf("...loading from %v\n", dir)
-		disk, err := mdbs.NewMDBServer(dir, 0, 0600, server.MDBInitialSize, 1, time.Millisecond, db.DB)
+		log.Printf("...loading from %v\n", d)
+		store := &store{dir: d}
+		var err error
+		if err = store.LoadRMId(); err == nil {
+			if err = store.StartDisk(); err == nil {
+				err = store.LoadTopology()
+			}
+		}
 		if err != nil {
 			log.Println(err)
-			continue
-		}
-		loadVars(disk, vars)
-		disk.Shutdown()
-	}
-
-	log.Printf("Found %v unique vars", len(vars))
-
-	if vUUIdStr != "" {
-		vUUId := common.MakeVarUUIdFromStr(vUUIdStr)
-		if vUUId == nil {
-			log.Printf("Unable to parse %v as vUUId\n", vUUIdStr)
-		}
-		if state, found := vars[*vUUId]; found {
-			log.Println(state)
-		} else {
-			log.Printf("Unable to find %v\n", vUUId)
 		}
 	}
-}
 
-func loadVars(disk *mdbs.MDBServer, vars map[common.VarUUId]*varstate) {
-	_, err := disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		_, err := rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
-			key, data, err := cursor.Get(nil, nil, mdb.FIRST)
-			for ; err == nil; key, data, err = cursor.Get(nil, nil, mdb.NEXT) {
-				vUUId := common.MakeVarUUId(key)
-				seg, _, err := capn.ReadFromMemoryZeroCopy(data)
-				if err != nil {
-					log.Printf("Error when decoding %v: %v\n", vUUId, err)
-					continue
-				}
-
-				varCap := msgs.ReadRootVar(seg)
-				pos := varCap.Positions()
-				positions := (*common.Positions)(&pos)
-				writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
-				writeTxnClock := eng.VectorClockFromCap(varCap.WriteTxnClock())
-				writesClock := eng.VectorClockFromCap(varCap.WritesClock())
-
-				if state, found := vars[*vUUId]; found {
-					if err := state.matches(disk, writeTxnId, writeTxnClock, writesClock, positions); err != nil {
-						log.Println(err)
-					}
-				} else {
-					state = &varstate{
-						vUUId:            vUUId,
-						disks:            []*mdbs.MDBServer{disk},
-						writeTxnId:       writeTxnId,
-						writeTxnClock:    writeTxnClock,
-						writeWritesClock: writesClock,
-						positions:        positions,
-					}
-					vars[*vUUId] = state
-				}
-			}
-			return nil
-		})
-		return err
-	}).ResultError()
-	if err != nil {
+	if err := stores.CheckEqualTopology(); err != nil {
 		log.Println(err)
+		return
 	}
+
 }
 
-type varstate struct {
-	vUUId            *common.VarUUId
-	disks            []*mdbs.MDBServer
-	writeTxnId       *common.TxnId
-	writeTxnClock    *eng.VectorClock
-	writeWritesClock *eng.VectorClock
-	positions        *common.Positions
-}
-
-func (vs *varstate) matches(disk *mdbs.MDBServer, writeTxnId *common.TxnId, writeTxnClock, writesClock *eng.VectorClock, positions *common.Positions) error {
-	if vs.writeTxnId.Compare(writeTxnId) != common.EQ {
-		return fmt.Errorf("%v TxnId divergence: %v vs %v", vs.vUUId, vs.writeTxnId, writeTxnId)
+func (ss stores) CheckEqualTopology() error {
+	var first *store
+	for idx, s := range ss {
+		if idx == 0 {
+			first = s
+		} else if !first.topology.Configuration.Equal(s.topology.Configuration) {
+			return fmt.Errorf("Unequal topologies: %v has %v; %v has %v",
+				first, first.topology, s, s.topology)
+		}
 	}
-	if !vs.positions.Equal(positions) {
-		return fmt.Errorf("%v positions divergence: %v vs %v", vs.vUUId, vs.positions, positions)
-	}
-	if !vs.writeTxnClock.Equal(writeTxnClock) {
-		return fmt.Errorf("%v Txn %v Clock divergence: %v vs %v", vs.vUUId, vs.writeTxnId, vs.writeTxnClock, writeTxnClock)
-	}
-	if !vs.writeWritesClock.Equal(writesClock) {
-		return fmt.Errorf("%v Txn %v WritesClock divergence: %v vs %v", vs.vUUId, vs.writeTxnId, vs.writeWritesClock, writesClock)
-	}
-	vs.disks = append(vs.disks, disk)
 	return nil
 }
 
-func (vs *varstate) String() string {
-	return fmt.Sprintf("%v found in %v stores:\n positions:\t%v\n writeTxnId:\t%v\n writeTxnClock:\t%v\n writesClock:\t%v\n", vs.vUUId, len(vs.disks), vs.positions, vs.writeTxnId, vs.writeTxnClock, vs.writeWritesClock)
+func (ss stores) IterateVars(f func(*varWrapper) error) error {
+	is := &iterateState{
+		stores:   ss,
+		wrappers: make([]*varWrapper, 0, len(ss)),
+		f:        f,
+	}
+	return is.init()
+}
+
+func (ss stores) Shutdown() {
+	for _, s := range ss {
+		s.Shutdown()
+	}
+}
+
+func (s *store) Shutdown() {
+	if s.disk == nil {
+		return
+	}
+	s.disk.Shutdown()
+	s.disk = nil
+}
+
+func (s *store) String() string {
+	return fmt.Sprintf("%v(%v)", s.rmId, s.dir)
+}
+
+func (s *store) LoadRMId() error {
+	rmIdBytes, err := ioutil.ReadFile(s.dir + "/rmid")
+	if err != nil {
+		return err
+	}
+	s.rmId = common.RMId(binary.BigEndian.Uint32(rmIdBytes))
+	return nil
+}
+
+func (s *store) StartDisk() error {
+	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, 1, time.Millisecond, db.DB)
+	if err != nil {
+		return err
+	}
+	s.disk = disk
+	return nil
+}
+
+func (s *store) LoadTopology() error {
+	res, err := s.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		bites, err := rtxn.Get(db.DB.Vars, configuration.TopologyVarUUId[:])
+		if err != nil {
+			rtxn.Error(err)
+			return nil
+		}
+		seg, _, err := capn.ReadFromMemoryZeroCopy(bites)
+		if err != nil {
+			rtxn.Error(err)
+			return nil
+		}
+		varCap := msgs.ReadRootVar(seg)
+		txnId := common.MakeTxnId(varCap.WriteTxnId())
+		bites = db.ReadTxnBytesFromDisk(rtxn, txnId)
+		if bites == nil {
+			rtxn.Error(fmt.Errorf("Unable to find txn for topology: %v", txnId))
+			return nil
+		}
+		seg, _, err = capn.ReadFromMemoryZeroCopy(bites)
+		if err != nil {
+			rtxn.Error(err)
+			return nil
+		}
+		txnCap := msgs.ReadRootTxn(seg)
+		actions := txnCap.Actions()
+		if actions.Len() != 1 {
+			rtxn.Error(fmt.Errorf("Topology txn has %v actions; expected 1", actions.Len()))
+			return nil
+		}
+		action := actions.At(0)
+		var refs msgs.VarIdPos_List
+		switch action.Which() {
+		case msgs.ACTION_WRITE:
+			w := action.Write()
+			bites = w.Value()
+			refs = w.References()
+		case msgs.ACTION_READWRITE:
+			rw := action.Readwrite()
+			bites = rw.Value()
+			refs = rw.References()
+		case msgs.ACTION_CREATE:
+			c := action.Create()
+			bites = c.Value()
+			refs = c.References()
+		default:
+			rtxn.Error(fmt.Errorf("Expected topology txn action to be w, rw, or c; found %v", action.Which()))
+			return nil
+		}
+
+		if refs.Len() != 1 {
+			rtxn.Error(fmt.Errorf("Topology txn action has %v references; expected 1", refs.Len()))
+			return nil
+		}
+		rootRef := refs.At(0)
+
+		seg, _, err = capn.ReadFromMemoryZeroCopy(bites)
+		if err != nil {
+			rtxn.Error(err)
+			return nil
+		}
+		topology, err := configuration.TopologyFromCap(txnId, &rootRef, bites)
+		if err != nil {
+			rtxn.Error(err)
+			return nil
+		}
+		return topology
+	}).ResultError()
+	if err != nil {
+		return err
+	}
+	s.topology = res.(*configuration.Topology)
+	return nil
+}
+
+type varWrapper struct {
+	*iterateState
+	vUUId  *common.VarUUId
+	rtxn   *mdbs.RTxn
+	cursor *mdbs.Cursor
+}
+
+type iterateState struct {
+	stores   stores
+	wrappers []*varWrapper
+	f        func(*varWrapper) error
+}
+
+func (is *iterateState) init() error {
+	if len(is.stores) == len(is.wrappers) {
+		return nil // actually do nextState
+	}
+	s := is.stores[len(is.wrappers)]
+	_, err := s.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
+			is.wrappers = append(is.wrappers, &varWrapper{
+				iterateState: is,
+				rtxn:         rtxn,
+				cursor:       cursor,
+			})
+			return is.init()
+		})
+		return nil
+	}).ResultError()
+	return err
+
 }
