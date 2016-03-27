@@ -11,6 +11,7 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
+	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/db"
 	_ "goshawkdb.io/server/txnengine"
 	"io/ioutil"
@@ -64,12 +65,109 @@ func main() {
 		return
 	}
 
-	if err := stores.IterateVars(func(cell *varWrapperCell) error {
-		fmt.Println(cell.vUUId, cell.store)
-		return nil
-	}); err != nil {
+	locationChecker := newLocationChecker(stores)
+	if err := stores.IterateVars(locationChecker.locationCheck); err != nil {
 		log.Println(err)
+	} else {
+		log.Println("Finished with no fatal errors.")
 	}
+}
+
+type locationChecker struct {
+	resolver *ch.Resolver
+	stores   map[common.RMId]*store
+}
+
+func newLocationChecker(stores stores) *locationChecker {
+	resolver := ch.NewResolver(stores[0].topology.RMs(), stores[0].topology.TwoFInc)
+	m := make(map[common.RMId]*store, len(stores))
+	for _, s := range stores {
+		m[s.rmId] = s
+	}
+	return &locationChecker{
+		resolver: resolver,
+		stores:   m,
+	}
+}
+
+func (lc *locationChecker) locationCheck(cell *varWrapperCell) error {
+	vUUId := cell.vUUId
+	varCap := cell.varCap
+	foundIn := cell.store
+	fmt.Printf("%v %v\n", foundIn, vUUId)
+	txnId := common.MakeTxnId(varCap.WriteTxnId())
+
+	res, err := foundIn.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		return foundIn.db.ReadTxnBytesFromDisk(rtxn, txnId)
+	}).ResultError()
+	if err != nil {
+		return err
+	}
+	txnBites, ok := res.([]byte)
+	if res == nil || (ok && txnBites == nil) {
+		return fmt.Errorf("Failed to find %v from %v in %v", txnId, vUUId, foundIn)
+	}
+	seg, _, err := capn.ReadFromMemoryZeroCopy(txnBites)
+	if err != nil {
+		return err
+	}
+	txnCap := msgs.ReadRootTxn(seg)
+
+	positions := varCap.Positions().ToArray()
+	rmIds, err := lc.resolver.ResolveHashCodes(positions)
+	if err != nil {
+		return err
+	}
+	foundLocal := false
+	for _, rmId := range rmIds {
+		if foundLocal = rmId == foundIn.rmId; foundLocal {
+			break
+		}
+	}
+	if !foundLocal {
+		// it must have emigrated but we don't delete. Ignore it.
+		fmt.Printf("Ignoring %v on %v as it's emigrated.\n", vUUId, foundIn)
+		return nil
+	}
+	for _, rmId := range rmIds {
+		if rmId == foundIn.rmId {
+			continue
+		} else if remote, found := lc.stores[rmId]; found {
+			res, err := remote.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+				bites, err := rtxn.Get(remote.db.Vars, vUUId[:])
+				if err == mdb.NotFound {
+					return nil
+				} else if err == nil {
+					return bites
+				} else {
+					return nil
+				}
+			}).ResultError()
+			if err != nil {
+				return err
+			}
+			varBites, ok := res.([]byte)
+			if res == nil || (ok && varBites == nil) {
+				if vUUId.BootCount() == 1 && vUUId.ConnectionCount() == 0 &&
+					txnId.BootCount() == 1 && txnId.ConnectionCount() == 0 &&
+					txnCap.Actions().Len() == 1 && txnCap.Actions().At(0).Which() == msgs.ACTION_CREATE {
+					fmt.Printf("Failed to find %v in %v (%v, %v, %v) but it looks like it's a bad root.\n", vUUId, remote, rmIds, positions, foundIn)
+				} else {
+					return fmt.Errorf("Failed to find %v in %v (%v, %v, %v)", vUUId, remote, rmIds, positions, foundIn)
+				}
+			} else {
+				seg, _, err := capn.ReadFromMemoryZeroCopy(varBites)
+				if err != nil {
+					return err
+				}
+				remoteTxnId := common.MakeTxnId(msgs.ReadRootVar(seg).WriteTxnId())
+				if remoteTxnId.Compare(txnId) != common.EQ {
+					return fmt.Errorf("%v on %v is at %v; on %v is at %v", vUUId, foundIn, txnId, remote, remoteTxnId)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (ss stores) CheckEqualTopology() error {
@@ -123,7 +221,7 @@ func (s *store) LoadRMId() error {
 
 func (s *store) StartDisk() error {
 	log.Printf("Starting disk server on %v", s.dir)
-	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, 1, 10*time.Millisecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, 2, 10*time.Millisecond, db.DB)
 	if err != nil {
 		return err
 	}
@@ -207,6 +305,7 @@ func (s *store) LoadTopology() error {
 }
 
 type varWrapper struct {
+	*iterateState
 	store   *store
 	c       chan *varWrapperCell
 	curCell *varWrapperCell
@@ -286,8 +385,9 @@ type iterateState struct {
 func (is *iterateState) init() {
 	for idx, store := range is.stores {
 		wrapper := &varWrapper{
-			store: store,
-			c:     make(chan *varWrapperCell, 0),
+			iterateState: is,
+			store:        store,
+			c:            make(chan *varWrapperCell, 0),
 		}
 		is.wrappers[idx] = wrapper
 		go wrapper.start()
@@ -318,6 +418,7 @@ func (is *iterateState) iterate() error {
 	}
 	for cell := is.minWrapperCell(); cell != nil; cell = is.minWrapperCell() {
 		if err := is.f(cell); err != nil {
+			// log.Println(err)
 			return err
 		}
 		if err := cell.next(); err != nil {

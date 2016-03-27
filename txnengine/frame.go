@@ -374,6 +374,9 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		panic(fmt.Sprintf("%v ReadLearnt called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
 	actClockElem := action.outcomeClock.Clock[*fo.v.UUId] - 1
+	if action.outcomeClock.Clock[*fo.v.UUId] == 0 {
+		panic("Just did 0 - 1 in int64")
+	}
 	reqClockElem := fo.frameTxnClock.Clock[*fo.v.UUId]
 	if action.readVsn.Compare(fo.frameTxnId) != common.EQ {
 		// The write would be one less than the read. We want to know if

@@ -1890,7 +1890,11 @@ func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBy
 			return nil, err
 		}
 		varCap := msgs.ReadRootVar(seg)
-		if bytes.Compare(actionVarUUIdBytes, vUUIdBytes) < 0 && bytes.Equal(txnIdBytes, varCap.WriteTxnId()) {
+		if !bytes.Equal(txnIdBytes, varCap.WriteTxnId()) {
+			// this var has moved on to a different txn
+			continue
+		}
+		if bytes.Compare(actionVarUUIdBytes, vUUIdBytes) < 0 {
 			// We've found an action on a var that is 'before' the
 			// current var (will match ordering in lmdb) and it's on the
 			// same txn as the current var. Therefore we've already done

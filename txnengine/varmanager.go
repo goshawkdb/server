@@ -51,7 +51,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	fun(v, nil)
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
-	} else if vm.onIdle != nil {
+	} else if vm.onIdle != nil && configuration.TopologyVarUUId.Compare(v.UUId) != common.EQ {
 		if found {
 			v.ForceToIdle()
 		}
