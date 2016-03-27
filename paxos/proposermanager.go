@@ -31,13 +31,13 @@ type ProposerManager struct {
 	VarDispatcher     *eng.VarDispatcher
 	Exe               *dispatcher.Executor
 	ConnectionManager ConnectionManager
-	Disk              *mdbs.MDBServer
+	DB                *db.Databases
 	proposals         map[instanceIdPrefix]*proposal
 	proposers         map[common.TxnId]*Proposer
 	topology          *configuration.Topology
 }
 
-func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerManager {
+func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, db *db.Databases) *ProposerManager {
 	pm := &ProposerManager{
 		RMId:              rmId,
 		proposals:         make(map[instanceIdPrefix]*proposal),
@@ -45,7 +45,7 @@ func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatche
 		VarDispatcher:     varDispatcher,
 		Exe:               exe,
 		ConnectionManager: cm,
-		Disk:              server,
+		DB:                db,
 		topology:          nil,
 	}
 	return pm

@@ -7,7 +7,6 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 )
@@ -369,8 +368,8 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 
 	data := server.SegToBytes(stateSeg)
 
-	future := palc.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-		rwtxn.Put(db.DB.Proposers, palc.txnId[:], data, 0)
+	future := palc.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Put(palc.proposerManager.DB.Proposers, palc.txnId[:], data, 0)
 		return nil
 	})
 	go func() {
@@ -458,8 +457,8 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 	server.Log(paf.txnId, "Txn Finished Callback")
 	if paf.currentState == paf {
 		paf.nextState()
-		future := paf.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-			rwtxn.Del(db.DB.Proposers, paf.txnId[:], nil)
+		future := paf.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+			rwtxn.Del(paf.proposerManager.DB.Proposers, paf.txnId[:], nil)
 			return nil
 		})
 		go func() {

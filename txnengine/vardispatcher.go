@@ -2,11 +2,11 @@ package txnengine
 
 import (
 	"fmt"
-	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"sync/atomic"
 )
@@ -16,13 +16,13 @@ type VarDispatcher struct {
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, server *mdbs.MDBServer, lc LocalConnection) *VarDispatcher {
+func NewVarDispatcher(count uint8, db *db.Databases, lc LocalConnection) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
 	vd.Dispatcher.Init(count)
 	for idx, exe := range vd.Executors {
-		vd.varmanagers[idx] = NewVarManager(exe, server, lc)
+		vd.varmanagers[idx] = NewVarManager(exe, db, lc)
 	}
 	return vd
 }

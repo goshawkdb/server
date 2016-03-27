@@ -15,7 +15,7 @@ import (
 
 type VarManager struct {
 	LocalConnection
-	disk       *mdbs.MDBServer
+	db         *db.Databases
 	active     map[common.VarUUId]*Var
 	onIdle     func()
 	lc         LocalConnection
@@ -28,10 +28,10 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, server *mdbs.MDBServer, lc LocalConnection) *VarManager {
+func NewVarManager(exe *dispatcher.Executor, db *db.Databases, lc LocalConnection) *VarManager {
 	return &VarManager{
 		LocalConnection: lc,
-		disk:            server,
+		db:              db,
 		active:          make(map[common.VarUUId]*Var),
 		callbacks:       []func(){},
 		exe:             exe,
@@ -41,7 +41,7 @@ func NewVarManager(exe *dispatcher.Executor, server *mdbs.MDBServer, lc LocalCon
 func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uuid *common.VarUUId) {
 	v, err := vm.find(uuid)
 	if err == mdb.NotFound && createIfMissing {
-		v = NewVar(uuid, vm.exe, vm.disk, vm)
+		v = NewVar(uuid, vm.exe, vm.db, vm)
 		vm.active[*v.UUId] = v
 		server.Log(uuid, "New var")
 	} else if err != nil {
@@ -108,10 +108,10 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
 		return v, nil
 	}
 
-	result, err := vm.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+	result, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		// rtxn.Get returns a copy of the data, so we don't need to
-		// worry about pointers into the disk
-		if bites, err := rtxn.Get(db.DB.Vars, uuid[:]); err == nil {
+		// worry about pointers into the db
+		if bites, err := rtxn.Get(vm.db.Vars, uuid[:]); err == nil {
 			return bites
 		} else {
 			return err
@@ -124,7 +124,7 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
 	if nf, ok := result.(mdb.Errno); ok && nf == mdb.NotFound {
 		return nil, nf
 	}
-	v, err := VarFromData(result.([]byte), vm.exe, vm.disk, vm)
+	v, err := VarFromData(result.([]byte), vm.exe, vm.db, vm)
 	if err == nil {
 		vm.active[*v.UUId] = v
 	}

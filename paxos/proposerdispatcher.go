@@ -20,15 +20,15 @@ type ProposerDispatcher struct {
 	proposermanagers []*ProposerManager
 }
 
-func NewProposerDispatcher(count uint8, rmId common.RMId, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerDispatcher {
+func NewProposerDispatcher(count uint8, rmId common.RMId, varDispatcher *eng.VarDispatcher, cm ConnectionManager, db *db.Databases) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
 		proposermanagers: make([]*ProposerManager, count),
 	}
 	pd.Dispatcher.Init(count)
 	for idx, exe := range pd.Executors {
-		pd.proposermanagers[idx] = NewProposerManager(rmId, exe, varDispatcher, cm, server)
+		pd.proposermanagers[idx] = NewProposerManager(rmId, exe, varDispatcher, cm, db)
 	}
-	pd.loadFromDisk(server)
+	pd.loadFromDisk(db)
 	return pd
 }
 
@@ -104,9 +104,9 @@ func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (pd *ProposerDispatcher) loadFromDisk(server *mdbs.MDBServer) {
-	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		res, err := rtxn.WithCursor(db.DB.Proposers, func(cursor *mdbs.Cursor) interface{} {
+func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
+	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, err := rtxn.WithCursor(db.Proposers, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.

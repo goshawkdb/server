@@ -23,7 +23,7 @@ import (
 )
 
 type TopologyTransmogrifier struct {
-	disk                 *mdbs.MDBServer
+	db                   *db.Databases
 	connectionManager    *ConnectionManager
 	localConnection      *client.LocalConnection
 	active               *configuration.Topology
@@ -121,9 +121,9 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(disk *mdbs.MDBServer, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
-		disk:              disk,
+		db:                db,
 		connectionManager: cm,
 		localConnection:   lc,
 		hostToConnection:  make(map[string]paxos.Connection),
@@ -303,7 +303,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			}
 			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
 
-			future := tt.disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
+			future := tt.db.WithEnv(func(env *mdb.Env) (interface{}, error) {
 				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
 			})
 			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
@@ -1736,14 +1736,14 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 
 type emigrator struct {
 	stop              int32
-	disk              *mdbs.MDBServer
+	db                *db.Databases
 	connectionManager *ConnectionManager
 	topology          *configuration.Topology
 }
 
 func newEmigrator(task *migrateAwaitVarBarrier) *emigrator {
 	e := &emigrator{
-		disk:              task.disk,
+		db:                task.db,
 		connectionManager: task.connectionManager,
 		topology:          task.active,
 	}
@@ -1797,8 +1797,8 @@ type dbIterator struct {
 }
 
 func (it *dbIterator) iterate() {
-	_, err := it.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		result, err := rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
+	_, err := it.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		result, err := rtxn.WithCursor(it.db.Vars, func(cursor *mdbs.Cursor) interface{} {
 			vUUIdBytes, varBytes, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; vUUIdBytes, varBytes, err = cursor.Get(nil, nil, mdb.NEXT) {
 				seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
@@ -1811,7 +1811,7 @@ func (it *dbIterator) iterate() {
 					continue
 				}
 				txnId := common.MakeTxnId(varCap.WriteTxnId())
-				txnBytes := db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
+				txnBytes := it.db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
 				if txnBytes == nil {
 					return nil
 				}

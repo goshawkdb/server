@@ -26,20 +26,20 @@ type Var struct {
 	writeInProgress func()
 	subscribers     map[common.TxnId]*VarWriteSubscriber
 	exe             *dispatcher.Executor
-	disk            *mdbs.MDBServer
+	db              *db.Databases
 	vm              *VarManager
 	varCap          *msgs.Var
 	rng             *rand.Rand
 }
 
-func VarFromData(data []byte, exe *dispatcher.Executor, disk *mdbs.MDBServer, vm *VarManager) (*Var, error) {
+func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) (*Var, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
 		return nil, err
 	}
 	varCap := msgs.ReadRootVar(seg)
 
-	v := newVar(common.MakeVarUUId(varCap.Id()), exe, disk, vm)
+	v := newVar(common.MakeVarUUId(varCap.Id()), exe, db, vm)
 	positions := varCap.Positions()
 	if positions.Len() != 0 {
 		v.positions = (*common.Positions)(&positions)
@@ -50,7 +50,7 @@ func VarFromData(data []byte, exe *dispatcher.Executor, disk *mdbs.MDBServer, vm
 	writesClock := VectorClockFromCap(varCap.WritesClock())
 	server.Log(v.UUId, "Restored", writeTxnId)
 
-	if result, err := disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
 	}).ResultError(); err == nil {
 		bites := result.([]byte)
@@ -71,8 +71,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, disk *mdbs.MDBServer, vm
 	return v, nil
 }
 
-func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, disk *mdbs.MDBServer, vm *VarManager) *Var {
-	v := newVar(uuid, exe, disk, vm)
+func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
+	v := newVar(uuid, exe, db, vm)
 
 	clock := NewVectorClock().Bump(*v.UUId, 0)
 	written := NewVectorClock().Bump(*v.UUId, 0)
@@ -86,7 +86,7 @@ func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, disk *mdbs.MDBServer
 	return v
 }
 
-func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, disk *mdbs.MDBServer, vm *VarManager) *Var {
+func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &Var{
 		UUId:            uuid,
@@ -96,7 +96,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, disk *mdbs.MDBServer
 		writeInProgress: nil,
 		subscribers:     make(map[common.TxnId]*VarWriteSubscriber),
 		exe:             exe,
-		disk:            disk,
+		db:              db,
 		vm:              vm,
 		rng:             rng,
 	}
@@ -260,11 +260,11 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
-	future := v.disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-		if err := db.WriteTxnToDisk(rwtxn, f.frameTxnId, txnBytes); err == nil {
-			if err = rwtxn.Put(db.DB.Vars, v.UUId[:], varData, 0); err == nil {
+	future := v.db.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		if err := v.db.WriteTxnToDisk(rwtxn, f.frameTxnId, txnBytes); err == nil {
+			if err = rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err == nil {
 				if v.curFrameOnDisk != nil {
-					db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameTxnId)
+					v.db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameTxnId)
 				}
 			}
 		}

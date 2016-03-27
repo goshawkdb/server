@@ -152,8 +152,9 @@ func (s *server) start() {
 	s.maybeShutdown(err)
 
 	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
-	s.addOnShutdown(disk.Shutdown)
 	s.maybeShutdown(err)
+	db := disk.(*db.Databases)
+	s.addOnShutdown(db.Shutdown)
 
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
@@ -162,7 +163,7 @@ func (s *server) start() {
 		commandLineConfig = configuration.BlankTopology("").Configuration
 	}
 
-	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair, s.port, commandLineConfig)
+	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, commandLineConfig)
 	s.addOnShutdown(cm.Shutdown)
 	s.addOnShutdown(transmogrifier.Shutdown)
 	s.connectionManager = cm

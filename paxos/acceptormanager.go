@@ -20,7 +20,7 @@ func init() {
 }
 
 type AcceptorManager struct {
-	Disk              *mdbs.MDBServer
+	DB                *db.Databases
 	ConnectionManager ConnectionManager
 	Exe               *dispatcher.Executor
 	instances         map[instanceId]*instance
@@ -28,9 +28,9 @@ type AcceptorManager struct {
 	Topology          *configuration.Topology
 }
 
-func NewAcceptorManager(exe *dispatcher.Executor, cm ConnectionManager, server *mdbs.MDBServer) *AcceptorManager {
+func NewAcceptorManager(exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
 	return &AcceptorManager{
-		Disk:              server,
+		DB:                db,
 		ConnectionManager: cm,
 		Exe:               exe,
 		instances:         make(map[instanceId]*instance),

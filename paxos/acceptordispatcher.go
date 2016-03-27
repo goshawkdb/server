@@ -19,15 +19,15 @@ type AcceptorDispatcher struct {
 	acceptormanagers  []*AcceptorManager
 }
 
-func NewAcceptorDispatcher(cm ConnectionManager, count uint8, server *mdbs.MDBServer) *AcceptorDispatcher {
+func NewAcceptorDispatcher(cm ConnectionManager, count uint8, db *db.Databases) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
 		acceptormanagers: make([]*AcceptorManager, count),
 	}
 	ad.Dispatcher.Init(count)
 	for idx, exe := range ad.Executors {
-		ad.acceptormanagers[idx] = NewAcceptorManager(exe, cm, server)
+		ad.acceptormanagers[idx] = NewAcceptorManager(exe, cm, db)
 	}
-	ad.loadFromDisk(server)
+	ad.loadFromDisk(db)
 	return ad
 }
 
@@ -69,9 +69,9 @@ func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (ad *AcceptorDispatcher) loadFromDisk(server *mdbs.MDBServer) {
-	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		res, err := rtxn.WithCursor(db.DB.BallotOutcomes, func(cursor *mdbs.Cursor) interface{} {
+func (ad *AcceptorDispatcher) loadFromDisk(db *db.Databases) {
+	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, err := rtxn.WithCursor(db.BallotOutcomes, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.

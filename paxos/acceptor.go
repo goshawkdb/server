@@ -8,7 +8,6 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/db"
 	"log"
 )
 
@@ -160,8 +159,8 @@ func (awtd *acceptorWriteToDisk) start() {
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	server.Log(awtd.txnId, "Writing 2B to disk...")
-	future := awtd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-		rwtxn.Put(db.DB.BallotOutcomes, awtd.txnId[:], data, 0)
+	future := awtd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Put(awtd.acceptorManager.DB.BallotOutcomes, awtd.txnId[:], data, 0)
 		return nil
 	})
 	go func() {
@@ -311,8 +310,8 @@ func (adfd *acceptorDeleteFromDisk) start() {
 		adfd.acceptorManager.ConnectionManager.RemoveSenderSync(adfd.twoBSender)
 		adfd.twoBSender = nil
 	}
-	future := adfd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-		rwtxn.Del(db.DB.BallotOutcomes, adfd.txnId[:], nil)
+	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Del(adfd.acceptorManager.DB.BallotOutcomes, adfd.txnId[:], nil)
 		return nil
 	})
 	go func() {

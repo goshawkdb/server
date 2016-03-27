@@ -22,7 +22,7 @@ import (
 
 type store struct {
 	dir      string
-	disk     *mdbs.MDBServer
+	db       *db.Databases
 	rmId     common.RMId
 	topology *configuration.Topology
 }
@@ -54,6 +54,7 @@ func main() {
 		}
 		if err != nil {
 			log.Println(err)
+			return
 		}
 		stores = append(stores, store)
 	}
@@ -100,11 +101,11 @@ func (ss stores) Shutdown() {
 }
 
 func (s *store) Shutdown() {
-	if s.disk == nil {
+	if s.db == nil {
 		return
 	}
-	s.disk.Shutdown()
-	s.disk = nil
+	s.db.Shutdown()
+	s.db = nil
 }
 
 func (s *store) String() string {
@@ -126,13 +127,13 @@ func (s *store) StartDisk() error {
 	if err != nil {
 		return err
 	}
-	s.disk = disk
+	s.db = disk.(*db.Databases)
 	return nil
 }
 
 func (s *store) LoadTopology() error {
-	res, err := s.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		bites, err := rtxn.Get(db.DB.Vars, configuration.TopologyVarUUId[:])
+	res, err := s.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		bites, err := rtxn.Get(s.db.Vars, configuration.TopologyVarUUId[:])
 		if err != nil {
 			rtxn.Error(err)
 			return nil
@@ -144,7 +145,7 @@ func (s *store) LoadTopology() error {
 		}
 		varCap := msgs.ReadRootVar(seg)
 		txnId := common.MakeTxnId(varCap.WriteTxnId())
-		bites = db.ReadTxnBytesFromDisk(rtxn, txnId)
+		bites = s.db.ReadTxnBytesFromDisk(rtxn, txnId)
 		if bites == nil {
 			rtxn.Error(fmt.Errorf("Unable to find txn for topology: %v", txnId))
 			return nil
@@ -227,8 +228,8 @@ func (vw *varWrapper) start() {
 	c1.other, c2.other = c2, c1
 
 	curCell := c1
-	_, err := vw.store.disk.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		rtxn.WithCursor(db.DB.Vars, func(cursor *mdbs.Cursor) interface{} {
+	_, err := vw.store.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		rtxn.WithCursor(vw.store.db.Vars, func(cursor *mdbs.Cursor) interface{} {
 			vUUIdBytes, varBytes, err := cursor.Get(nil, nil, mdb.FIRST)
 			if err != nil {
 				cursor.Error(fmt.Errorf("Err on finding first var in %v: %v", vw.store, err))
@@ -241,7 +242,6 @@ func (vw *varWrapper) start() {
 			}
 			for ; err == nil; vUUIdBytes, varBytes, err = cursor.Get(nil, nil, mdb.NEXT) {
 				vUUId := common.MakeVarUUId(vUUIdBytes)
-				fmt.Printf("%v %v %v\n", vw.store, vUUId, varBytes)
 				seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
 				if err != nil {
 					cursor.Error(fmt.Errorf("Err on decoding %v in %v: %v (%v)", vUUId, vw.store, err, varBytes))

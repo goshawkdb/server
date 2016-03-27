@@ -5,13 +5,13 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
-	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
 	"log"
 	"sync"
@@ -287,7 +287,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *mdbs.MDBServer, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair, port uint16, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair, port uint16, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
 	cm := &ConnectionManager{
 		RMId:                          rmId,
 		BootCount:                     bootCount,
@@ -326,8 +326,8 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 	cm.rmToServer[cd.rmId] = cd
 	cm.servers[cd.host] = cd
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
-	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(disk, cm, lc, port, config)
+	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), db, lc)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, config)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	cm.ClientEstablished(0, lc)
