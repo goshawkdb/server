@@ -1876,7 +1876,7 @@ func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBy
 			continue
 		}
 		actionVarUUIdBytes := action.VarId()
-		varBytes, err := cursor.RTxn.Get(db.DB.Vars, actionVarUUIdBytes)
+		varBytes, err := cursor.RTxn.Get(it.db.Vars, actionVarUUIdBytes)
 		if err == mdb.NotFound {
 			continue
 		} else if err != nil {
