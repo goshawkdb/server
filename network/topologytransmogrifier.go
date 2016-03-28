@@ -469,7 +469,7 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *topologyTransmogrifierMsgMigrationComplete) error {
 	version := migrationComplete.complete.Version()
 	sender := migrationComplete.sender
-	log.Printf("MCR from %v (v%v)\n", sender, version)
+	server.Log("MCR from", sender, "v", version)
 	senders, found := tt.migrations[version]
 	if !found {
 		if version > tt.active.Version {
@@ -1944,7 +1944,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 			// it (because we cached it, you can discount the issue of
 			// memory reuse here - phew). Therefore, it's safe to send
 			// the completion msg.
-			log.Println("Sending migration completion to", conn.RMId())
+			server.Log("Sending migration completion to", conn.RMId())
 			conn.Send(bites)
 		}
 	}
