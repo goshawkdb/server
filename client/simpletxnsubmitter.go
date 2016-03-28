@@ -168,14 +168,6 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 		if topology.Root.VarUUId != nil {
 			sts.hashCache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
 		}
-
-		if !topology.IsBlank() && sts.bufferedSubmissions != nil {
-			funcs := sts.bufferedSubmissions
-			sts.bufferedSubmissions = nil
-			for _, fun := range funcs {
-				fun()
-			}
-		}
 	}
 	if servers != nil && sts.topology != nil {
 		sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
@@ -186,6 +178,15 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 		}
 		sts.connections = servers
 		server.Log("TM disabled hash codes", sts.disabledHashCodes)
+	}
+	// need to wait until we've updated disabledHashCodes before
+	// starting up any buffered txns.
+	if topology != nil && !topology.IsBlank() && sts.bufferedSubmissions != nil {
+		funcs := sts.bufferedSubmissions
+		sts.bufferedSubmissions = nil
+		for _, fun := range funcs {
+			fun()
+		}
 	}
 }
 
