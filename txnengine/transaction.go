@@ -81,6 +81,10 @@ func (action *localAction) IsRoll() bool {
 	return action.roll
 }
 
+func (action *localAction) IsImmigrant() bool {
+	return action.writesClock != nil
+}
+
 func (action *localAction) VoteDeadlock(clock *VectorClock) {
 	if action.ballot == nil {
 		action.ballot = NewBallot(action.vUUId, AbortDeadlock, clock)
@@ -138,7 +142,11 @@ func (action localAction) String() string {
 	if action.ballot != nil {
 		b = "|b"
 	}
-	return fmt.Sprintf("Action for %v: create:%v|read:%v|write:%v|roll:%v%v%v", action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b)
+	i := ""
+	if action.writesClock != nil {
+		i = "|i"
+	}
+	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
 }
 
 func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, txnCap *msgs.Txn, varCaps *msgs.Var_List) {

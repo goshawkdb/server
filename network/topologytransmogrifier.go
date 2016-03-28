@@ -1075,7 +1075,7 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 		}
 	}
 
-	if from.F < to.F {
+	if from.F < to.F && len(survived) > 1 {
 		for _, rmId := range survived {
 			conditions.DisjoinWith(rmId, &configuration.Conjunction{
 				Left: &configuration.Generator{

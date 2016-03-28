@@ -434,12 +434,15 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 		server.Log(fo.frame, "WriteLearnt", txn, "ignored, too old")
 		return false
 	}
+	if action.IsImmigrant() && action.Id.Compare(fo.frameTxnId) == common.EQ {
+		return false
+	}
 	if actClockElem == reqClockElem {
 		// ok, so ourself and this txn were actually siblings, but we
 		// created this frame before we knew that. By definition, there
 		// cannot be any committed reads of us.
 		if fo.reads.Len() > fo.uncommittedReads {
-			panic(fmt.Sprintf("%v Found committed reads where there should have been none", fo.frame))
+			panic(fmt.Sprintf("%v (%v) Found committed reads where there should have been none for action %v (%v)", fo.frame, fo.frameTxnClock, action, action.outcomeClock))
 		}
 	}
 	if fo.writes.Get(action) == nil {
@@ -468,13 +471,20 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 }
 
 func (fo *frameOpen) isLocked() bool {
-	if fo.frameTxnActions == nil || fo.parent == nil {
-		return false
-	}
-	rvcLen := len(fo.readVoteClock.Clock)
-	actionsLen := fo.frameTxnActions.Len()
-	excess := rvcLen - actionsLen
-	return excess > server.FrameLockMinExcessSize && rvcLen > actionsLen*server.FrameLockMinRatio
+	return false
+	// Locking is disabled because it's unsafe when there are temporary
+	// node failures around: with node failures, TGCs don't get issued
+	// so the clocks don't get tidied up, so the frame can lock itself
+	// and then we can't make progress. TODO FIXME.
+	/*
+		if fo.frameTxnActions == nil || fo.parent == nil {
+			return false
+		}
+		rvcLen := len(fo.readVoteClock.Clock)
+		actionsLen := fo.frameTxnActions.Len()
+		excess := rvcLen - actionsLen
+		return excess > server.FrameLockMinExcessSize && rvcLen > actionsLen*server.FrameLockMinRatio
+	*/
 }
 
 func (fo *frameOpen) maybeFindMaxReadFrom(action *localAction, node *sl.Node) {

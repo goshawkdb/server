@@ -297,7 +297,9 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 			}
 
 			if clientAction.Which() == cmsgs.CLIENTACTION_ROLL && hashCodes[0] != sts.rmId {
-				return nil, eng.AbortRollError
+				if _, found := sts.disabledHashCodes[hashCodes[0]]; !found {
+					return nil, eng.AbortRollError
+				}
 			}
 		}
 		hashCodes = hashCodes[:sts.topology.TwoFInc]
