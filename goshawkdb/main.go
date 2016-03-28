@@ -140,6 +140,8 @@ type server struct {
 }
 
 func (s *server) start() {
+	os.Stdin.Close()
+
 	procs := runtime.NumCPU()
 	if procs < 2 {
 		procs = 2
@@ -240,6 +242,7 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 }
 
 func (s *server) signalShutdown() {
+	// this may file if stdout has died
 	log.Println("Shutting down.")
 	s.Done()
 }
@@ -336,14 +339,20 @@ func (s *server) signalToggleTrace() {
 
 func (s *server) signalHandler() {
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, os.Interrupt)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGPIPE, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, os.Interrupt)
 	for {
 		sig := <-sigs
 		switch sig {
+		case syscall.SIGPIPE:
+			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
+				s.signalShutdown()
+				return
+			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.signalShutdown()
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
+			return
 		case syscall.SIGQUIT:
 			s.signalDumpStacks()
 		case syscall.SIGUSR1:
