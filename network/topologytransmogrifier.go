@@ -1965,16 +1965,12 @@ type migrationElem struct {
 	vars []*msgs.Var
 }
 
-const (
-	sendBatchElemCount = 64
-)
-
 func (e *emigrator) newBatch(conn paxos.Connection, cond configuration.Cond) *sendBatch {
 	return &sendBatch{
 		version: e.topology.Next().Version,
 		conn:    conn,
 		cond:    cond,
-		elems:   make([]*migrationElem, 0, sendBatchElemCount),
+		elems:   make([]*migrationElem, 0, server.MigrationBatchElemCount),
 	}
 }
 
@@ -2011,7 +2007,7 @@ func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
 		vars: varCaps,
 	}
 	sb.elems = append(sb.elems, elem)
-	if len(sb.elems) == sendBatchElemCount {
+	if len(sb.elems) == server.MigrationBatchElemCount {
 		sb.flush()
 	}
 }

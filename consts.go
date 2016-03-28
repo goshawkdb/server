@@ -18,4 +18,5 @@ const (
 	ConnectionRestartDelayRangeMS = 5000
 	ConnectionRestartDelayMin     = 3 * time.Second
 	MostRandomByteIndex           = 7 // will be the lsb of a big-endian client-n in the txnid.
+	MigrationBatchElemCount       = 64
 )
