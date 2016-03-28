@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 )
 
 // OutcomeAccumulator groups together all the different outcomes we've
@@ -33,6 +33,21 @@ func NewOutcomeAccumulator(fInc int, acceptors common.RMIds) *OutcomeAccumulator
 		fInc:                   fInc,
 		acceptorCount:          len(acceptors),
 	}
+}
+
+func (oa *OutcomeAccumulator) RMRemoved(rmId common.RMId) bool {
+	if _, found := oa.pendingTGC[rmId]; found {
+		delete(oa.pendingTGC, rmId)
+		if outcome, found := oa.acceptorIdToTxnOutcome[rmId]; found {
+			delete(oa.acceptorIdToTxnOutcome, rmId)
+			outcome.outcomeReceivedCount--
+		}
+		oa.acceptorCount--
+		if oa.decidingOutcome != nil {
+			return oa.decidingOutcome.outcomeReceivedCount == oa.acceptorCount
+		}
+	}
+	return false
 }
 
 func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outcome *msgs.Outcome) (*msgs.Outcome, bool) {

@@ -123,6 +123,21 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
+func (p *Proposer) RMsRemovedFromTopology(rms map[common.RMId]server.EmptyStruct) {
+	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rms)
+	if p.currentState == &p.proposerReceiveGloballyComplete {
+		for rmId := range rms {
+			p.TxnGloballyCompleteReceived(rmId)
+		}
+	} else {
+		for rmId := range rms {
+			if p.outcomeAccumulator.RMRemoved(rmId) {
+				p.allAcceptorsAgree()
+			}
+		}
+	}
+}
+
 type proposerStateMachineComponent interface {
 	init(*Proposer)
 	start()

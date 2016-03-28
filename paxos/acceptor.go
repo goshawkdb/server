@@ -65,6 +65,7 @@ func (a *Acceptor) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Current State: %v", a.currentState))
 	sc.Emit(fmt.Sprintf("- Outcome determined? %v", a.outcome != nil))
 	sc.Emit(fmt.Sprintf("- Pending TLC: %v", a.pendingTLC))
+	sc.Emit(fmt.Sprintf("- Received TSC: %v", a.tscReceived))
 	a.ballotAccumulator.Status(sc.Fork())
 	sc.Join()
 }
@@ -199,11 +200,13 @@ type acceptorAwaitLocallyComplete struct {
 	tgcRecipients common.RMIds
 	tscReceived   bool
 	twoBSender    *twoBTxnVotesSender
+	txnSubmitter  common.RMId
 }
 
 func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *msgs.Txn) {
 	aalc.Acceptor = a
 	aalc.tlcsReceived = make(map[common.RMId]server.EmptyStruct, aalc.ballotAccumulator.Txn.Allocations().Len())
+	aalc.txnSubmitter = common.RMId(txn.Submitter())
 }
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
@@ -251,6 +254,10 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 		}
 	}
 
+	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
+		aalc.tscReceived = true
+	}
+
 	if len(aalc.pendingTLC) == 0 && aalc.tscReceived {
 		aalc.maybeDelete()
 
@@ -284,9 +291,14 @@ func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(sender c
 }
 
 func (aalc *acceptorAwaitLocallyComplete) TopologyChange(topology *configuration.Topology) {
-	for rmId := range topology.RMsRemoved() {
+	rmsRemoved := topology.RMsRemoved()
+	for rmId := range rmsRemoved {
 		aalc.TxnLocallyCompleteReceived(rmId)
 	}
+	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
+		aalc.TxnSubmissionCompleteReceived(aalc.txnSubmitter)
+	}
+
 }
 
 func (aalc *acceptorAwaitLocallyComplete) maybeDelete() {
