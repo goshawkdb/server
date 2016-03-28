@@ -358,6 +358,10 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 				tt.active.ClusterId, goal.ClusterId)
 			return
 
+		case goal.MaxRMCount != tt.active.MaxRMCount && tt.active.Version != 0:
+			log.Printf("Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
+			return
+
 		case goal.Version < tt.active.Version:
 			log.Printf("Ignoring config with version %v as newer version already active (%v).",
 				goal.Version, tt.active.Version)
