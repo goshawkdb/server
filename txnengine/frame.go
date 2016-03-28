@@ -434,7 +434,8 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 		server.Log(fo.frame, "WriteLearnt", txn, "ignored, too old")
 		return false
 	}
-	if action.IsImmigrant() && action.Id.Compare(fo.frameTxnId) == common.EQ {
+	if action.Id.Compare(fo.frameTxnId) == common.EQ {
+		server.Log(fo.frame, "WriteLearnt", txn, "is duplicate of current frame")
 		return false
 	}
 	if actClockElem == reqClockElem {
