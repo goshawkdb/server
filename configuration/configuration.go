@@ -756,16 +756,22 @@ func (g *Generator) String() string {
 }
 
 func (g *Generator) SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error) {
-	server.Log("Generator:SatisfiedBy:NewResolver:", topology.Next().RMs(), uint16(g.PermLen))
-	resolver := ch.NewResolver(topology.Next().RMs(), uint16(g.PermLen))
-	perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
-	if err != nil {
-		return false, err
-	}
 	var slice common.RMIds
 	if len(g.LenAdjustIntersect) == 0 {
+		server.Log("Generator:SatisfiedBy:NewResolver:", topology.Next().RMs(), uint16(g.PermLen))
+		resolver := ch.NewResolver(topology.Next().RMs(), uint16(g.PermLen))
+		perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
+		if err != nil {
+			return false, err
+		}
 		slice = perm[g.Start : g.Start+g.Len]
 	} else {
+		server.Log("Generator:SatisfiedBy:NewResolver:", topology.RMs(), uint16(g.PermLen))
+		resolver := ch.NewResolver(topology.RMs(), uint16(g.PermLen))
+		perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
+		if err != nil {
+			return false, err
+		}
 		set := make(map[common.RMId]server.EmptyStruct, len(g.LenAdjustIntersect))
 		for _, rmId := range g.LenAdjustIntersect {
 			set[rmId] = server.EmptyStructVal
