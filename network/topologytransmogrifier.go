@@ -227,10 +227,10 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 			case topologyTransmogrifierMsgSetActiveConnections:
 				err = tt.activeConnectionsChange(msgT)
 			case *topologyTransmogrifierMsgTopologyObserved:
-				server.Log("New topology observed:", msgT)
+				server.Log("Topology: New topology observed:", msgT)
 				err = tt.setActive((*configuration.Topology)(msgT))
 			case *topologyTransmogrifierMsgRequestConfigChange:
-				server.Log("Topology change request:", msgT)
+				server.Log("Topology: Topology change request:", msgT)
 				tt.selectGoal((*configuration.NextConfiguration)(msgT))
 			case *topologyTransmogrifierMsgMigration:
 				err = tt.migrationReceived(msgT)
@@ -269,11 +269,11 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	if tt.active != nil {
 		switch {
 		case tt.active.ClusterId != topology.ClusterId:
-			return fmt.Errorf("Fatal: config with ClusterId change from '%s' to '%s'.",
+			return fmt.Errorf("Topology: Fatal: config with ClusterId change from '%s' to '%s'.",
 				tt.active.ClusterId, topology.ClusterId)
 
 		case topology.Version < tt.active.Version:
-			log.Printf("Ignoring config with version %v as newer version already active (%v).",
+			log.Printf("Topology: Ignoring config with version %v as newer version already active (%v).",
 				topology.Version, tt.active.Version)
 			return nil
 
@@ -326,7 +326,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 }
 
 func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology) {
-	server.Log("Installing topology to connection manager, et al:", topology)
+	server.Log("Topology: Installing topology to connection manager, et al:", topology)
 	installed := func() error {
 		if tt.localEstablished != nil {
 			close(tt.localEstablished)
@@ -469,7 +469,7 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *topologyTransmogrifierMsgMigrationComplete) error {
 	version := migrationComplete.complete.Version()
 	sender := migrationComplete.sender
-	server.Log("MCR from", sender, "v", version)
+	server.Log("Topology: MCR from", sender, "v", version)
 	senders, found := tt.migrations[version]
 	if !found {
 		if version > tt.active.Version {
@@ -602,18 +602,20 @@ func (task *targetConfig) witness() topologyTask                  { return task 
 func (task *targetConfig) fatal(err error) error {
 	task.ensureRemoveTaskSender()
 	task.task = nil
+	log.Printf("Topology: fatal error: %v", err)
 	return err
 }
 
 func (task *targetConfig) error(err error) error {
 	task.ensureRemoveTaskSender()
 	task.task = nil
-	log.Println(err)
+	log.Printf("Topology: error: %v", err)
 	return nil
 }
 
 func (task *targetConfig) completed() error {
 	task.ensureRemoveTaskSender()
+	log.Printf("Topology: task completed.")
 	task.task = nil
 	return nil
 }
@@ -1199,7 +1201,7 @@ type migrateInnerState interface {
 }
 
 func (task *migrate) tick() error {
-	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0 && len(next.Pending) > 0) {
+	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0) {
 		return task.completed()
 	}
 
@@ -1321,7 +1323,7 @@ func (task *migrateAwaitImmigrations) witness() migrateInnerState { return task 
 func (task *migrateAwaitImmigrations) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitImmigrations) tick() error {
 	if _, found := task.active.Next().Pending[task.connectionManager.RMId]; !found {
-		log.Println("Topology: All migration into this RM completed.")
+		log.Println("Topology: All migration into all this RM completed. Awaiting others.")
 		return task.nextState()
 	}
 
@@ -1386,7 +1388,10 @@ type migrateAwaitNoPending struct{ *migrate }
 func (task *migrateAwaitNoPending) witness() migrateInnerState { return task }
 func (task *migrateAwaitNoPending) init(migrate *migrate)      { task.migrate = migrate }
 func (task *migrateAwaitNoPending) tick() error {
-	// do nothing here: the migrate tick() will spot when the Pending array has emptied.
+	if next := task.active.Next(); next != nil && len(task.active.Next().Pending) == 0 {
+		log.Println("Topology: All migration into all RMs completed.")
+		return task.completed()
+	}
 	return nil
 }
 
@@ -1400,6 +1405,7 @@ type installCompletion struct {
 func (task *installCompletion) tick() error {
 	next := task.active.Next()
 	if !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0 && len(next.Pending) == 0) {
+		log.Println("Topology: completion installed")
 		return task.completed()
 	}
 
@@ -1676,7 +1682,7 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 	nonEmpties = nonEmpties[fInc:]
 	copy(passive, nonEmpties[:f])
 
-	server.Log("Creating Root. Actives:", active, "; Passives:", passive)
+	server.Log("Topology: Creating Root. Actives:", active, "; Passives:", passive)
 
 	seg := capn.NewBuffer(nil)
 	txn := msgs.NewTxn(seg)
@@ -1724,7 +1730,7 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 		return false, nil
 	}
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		server.Log("Root created in", vUUId)
+		server.Log("Topology: Root created in", vUUId)
 		topology.Root.VarUUId = vUUId
 		topology.Root.Positions = (*common.Positions)(&positions)
 		return false, nil
@@ -1914,7 +1920,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 	result := make([]*msgs.Var, 0, len(varCaps)>>1)
 	for _, varCap := range varCaps {
 		pos := varCap.Positions()
-		server.Log("Testing", common.MakeVarUUId(varCap.Id()), (*common.Positions)(&pos), "against condition", cond)
+		server.Log("Topology: Testing", common.MakeVarUUId(varCap.Id()), (*common.Positions)(&pos), "against condition", cond)
 		if b, err := cond.SatisfiedBy(it.topology, (*common.Positions)(&pos)); err == nil && b {
 			result = append(result, varCap)
 		} else if err != nil {
@@ -1944,7 +1950,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 			// it (because we cached it, you can discount the issue of
 			// memory reuse here - phew). Therefore, it's safe to send
 			// the completion msg.
-			server.Log("Sending migration completion to", conn.RMId())
+			server.Log("Topology: Sending migration completion to", conn.RMId())
 			conn.Send(bites)
 		}
 	}
@@ -1996,7 +2002,7 @@ func (sb *sendBatch) flush() {
 	migration.SetElems(elems)
 	msg.SetMigration(migration)
 	bites := server.SegToBytes(seg)
-	server.Log("Migrating", len(sb.elems), "txns to", sb.conn.RMId())
+	server.Log("Topology: Migrating", len(sb.elems), "txns to", sb.conn.RMId())
 	sb.conn.Send(bites)
 	sb.elems = sb.elems[:0]
 }
