@@ -181,7 +181,7 @@ func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, 
 	}
 	// need to wait until we've updated disabledHashCodes before
 	// starting up any buffered txns.
-	if topology != nil && !topology.IsBlank() && sts.bufferedSubmissions != nil {
+	if sts.topology != nil && !sts.topology.IsBlank() && sts.bufferedSubmissions != nil {
 		funcs := sts.bufferedSubmissions
 		sts.bufferedSubmissions = nil
 		for _, fun := range funcs {
