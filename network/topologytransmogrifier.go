@@ -1063,21 +1063,19 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 		})
 	}
 
-	if len(lost) > 0 {
-		if int(twoFIncOld) < from.RMs().NonEmptyLen() && len(survived) > 1 {
-			for _, rmId := range survived {
-				conditions.DisjoinWith(rmId, &configuration.Generator{
-					RMId:               rmId,
-					PermLen:            uint16(from.RMs().NonEmptyLen()),
-					Start:              twoFIncOld,
-					LenAdjustIntersect: lost,
-					Includes:           true,
-				})
-			}
+	if len(lost) > len(added) && int(twoFIncOld) < from.RMs().NonEmptyLen() {
+		for _, rmId := range survived {
+			conditions.DisjoinWith(rmId, &configuration.Generator{
+				RMId:               rmId,
+				PermLen:            uint16(from.RMs().NonEmptyLen()),
+				Start:              twoFIncOld,
+				LenAdjustIntersect: lost,
+				Includes:           true,
+			})
 		}
 	}
 
-	if from.F < to.F && len(survived) > 1 {
+	if from.F < to.F {
 		for _, rmId := range survived {
 			conditions.DisjoinWith(rmId, &configuration.Conjunction{
 				Left: &configuration.Generator{
@@ -1296,6 +1294,7 @@ func (task *migrateAwaitVarBarrier) tick() error {
 	if task.varBarrierReached != nil && task.varBarrierReached.Equal(task.active.Next().Configuration) {
 		log.Println("Topology: Var barrier achieved. Migration can proceed.")
 		_, _, err := task.active.LocalRemoteHosts(task.listenPort)
+		// don't attempt any emigration unless we were in the old topology
 		if err == nil {
 			task.ensureEmigrator()
 		}
