@@ -350,9 +350,9 @@ func (s *server) signalHandler() {
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.signalShutdown()
+			return
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
-			return
 		case syscall.SIGQUIT:
 			s.signalDumpStacks()
 		case syscall.SIGUSR1:
