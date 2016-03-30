@@ -1063,36 +1063,38 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 		})
 	}
 
-	if len(lost) > len(added) && int(twoFIncOld) < from.RMs().NonEmptyLen() {
-		for _, rmId := range survived {
-			conditions.DisjoinWith(rmId, &configuration.Generator{
-				RMId:               rmId,
-				PermLen:            uint16(from.RMs().NonEmptyLen()),
-				Start:              twoFIncOld,
-				LenAdjustIntersect: lost,
-				Includes:           true,
-			})
+	if int(twoFIncOld) < from.RMs().NonEmptyLen() {
+		if len(lost) > len(added) {
+			for _, rmId := range survived {
+				conditions.DisjoinWith(rmId, &configuration.Generator{
+					RMId:               rmId,
+					PermLen:            uint16(from.RMs().NonEmptyLen()),
+					Start:              twoFIncOld,
+					LenAdjustIntersect: lost,
+					Includes:           true,
+				})
+			}
 		}
-	}
 
-	if from.F < to.F {
-		for _, rmId := range survived {
-			conditions.DisjoinWith(rmId, &configuration.Conjunction{
-				Left: &configuration.Generator{
-					RMId:     rmId,
-					PermLen:  uint16(to.RMs().NonEmptyLen()),
-					Start:    0,
-					Len:      twoFIncNew,
-					Includes: true,
-				},
-				Right: &configuration.Generator{
-					RMId:     rmId,
-					PermLen:  uint16(from.RMs().NonEmptyLen()),
-					Start:    0,
-					Len:      twoFIncOld,
-					Includes: false,
-				},
-			})
+		if from.F < to.F {
+			for _, rmId := range survived {
+				conditions.DisjoinWith(rmId, &configuration.Conjunction{
+					Left: &configuration.Generator{
+						RMId:     rmId,
+						PermLen:  uint16(to.RMs().NonEmptyLen()),
+						Start:    0,
+						Len:      twoFIncNew,
+						Includes: true,
+					},
+					Right: &configuration.Generator{
+						RMId:     rmId,
+						PermLen:  uint16(from.RMs().NonEmptyLen()),
+						Start:    0,
+						Len:      twoFIncOld,
+						Includes: false,
+					},
+				})
+			}
 		}
 	}
 	return conditions
