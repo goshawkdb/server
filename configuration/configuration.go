@@ -737,7 +737,7 @@ func (g *Generator) String() string {
 		for _, rmId := range g.LenAdjustIntersect {
 			set += fmt.Sprintf(",%s", rmId)
 		}
-		end = fmt.Sprintf("%v+|(p,%v)[:%v] ∩ {%v}|", g.Start, g.PermLen, g.Start+g.Len, set[1:])
+		end = fmt.Sprintf("%v+|(p,%v)[:%v] ∩ {%v}|", g.Start, g.PermLen, len(g.LenAdjustIntersect), set[1:])
 	}
 	return fmt.Sprintf("%v %v (p,%v)[%s:%v]", g.RMId, op, g.PermLen, start, end)
 }
@@ -764,7 +764,7 @@ func (g *Generator) SatisfiedBy(topology *Topology, positions *common.Positions)
 			set[rmId] = server.EmptyStructVal
 		}
 		end := g.Start + g.Len
-		for _, rmId := range perm[:end] {
+		for _, rmId := range perm[:len(g.LenAdjustIntersect)] {
 			if _, found := set[rmId]; found {
 				end++
 			}
