@@ -1043,7 +1043,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		NewRMIds:       rmIdsAdded,
 		SurvivingRMIds: rmIdsSurvived,
 		LostRMIds:      rmIdsLost,
-		InstalledOnNew: len(rmIdsAdded) > 0,
+		InstalledOnNew: len(rmIdsAdded) == 0,
 		Pending:        conds,
 	})
 
@@ -1118,11 +1118,9 @@ func (task *installTargetNew) tick() error {
 		return task.completed()
 	}
 
-	localHost, err := task.firstLocalHost(task.active.Next().Configuration)
+	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
-		log.Printf("Topology: Awaiting new cluster members.")
-		// this step must be performed by the new RMs
-		return nil
+		return task.fatal(err)
 	}
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
@@ -1133,6 +1131,13 @@ func (task *installTargetNew) tick() error {
 	}
 	task.shareGoalWithAll()
 
+	_, _, err = task.active.LocalRemoteHosts(task.listenPort)
+	if err == nil {
+		log.Printf("Topology: Awaiting new cluster members.")
+		// this step must be performed by the new RMs
+		return nil
+	}
+
 	allFound, err := task.verifyRoots(task.active.Root.VarUUId, remoteHosts)
 	if err != nil {
 		return task.error(err)
@@ -1140,38 +1145,35 @@ func (task *installTargetNew) tick() error {
 		return nil
 	}
 
-	// Figure out what needs to be done to extend to the new
-	// topology. Strategy is to figure out how much work we've done so
-	// far and therefore how much of the pending work we can do in one
-	// shot.
+	// Similar to allJoining, we use all of the new nodes as active,
+	// but we must also have F+1 of the old nodes as actives too to
+	// make sure the old nodes don't diverge and then get confused by
+	// learning from the new nodes.  If any of the new nodes are down,
+	// we can't make progress, but that seems sane because we're going
+	// to have to do migrations to the new nodes anyway.
 
-	// Candidates are survivors + new progress. Lost/replaced always passive.
-	added := next.NewRMIds
-	alreadyExtendedTo := added[:len(added)-len(next.PendingInstall)]
-	active, passive := task.partitionByActiveConnection(next.SurvivingRMIds, alreadyExtendedTo)
-
-	maxPassive := len(active) - 1
-	if task.active.RMs().NonEmptyLen() == 1 {
-		log.Println("Topology: You've asked to extend the cluster from a single node.\n This is not guaranteed to be safe: if a distinct node within the target\n configuration is performing a different configuration change concurrently\n then it's possible I won't be able to prevent divergence.\n Odds are it'll be fine though, I just can't guarantee it.")
-		maxPassive++
-	}
-	if (maxPassive - len(passive)) <= 0 {
-		// we're not going to make any progress here, Stop now.
-		log.Printf("Topology: Topology change: No progress possible (active: %v, passive %v)\n", active, passive)
+	active, passive := task.partitionByActiveConnection(task.active.RMs())
+	if len(active) <= len(passive) {
+		log.Printf("Topology: Can not make progress at this time due to too many failures (failures: %v)",
+			passive)
 		return nil
 	}
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	active, passive = active[:fInc], append(active[fInc:], passive...)
 
-	passive = append(passive, next.PendingInstall...)
-	if maxPassive > len(passive) {
-		maxPassive = len(passive)
+	newActive := task.active.Next().NewRMIds
+	for _, rmId := range newActive {
+		if _, found := task.activeConnections[rmId]; !found {
+			log.Printf("Topology: awaiting connections to new cluster members.")
+			return nil
+		}
 	}
-	passive, pendingInstall := passive[:maxPassive], passive[maxPassive:]
-	// do it this way around otherwise we risk overwriting pendingInstall
-	passive = append(next.LostRMIds, passive...)
-	log.Printf("Topology: Extending topology. Actives: %v; Passives: %v, PendingInstall: %v", active, passive, pendingInstall)
+	active = append(active, newActive...)
+
+	log.Printf("Topology: Installing on new cluster members. Active: %v, Passive: %v", active, passive)
 
 	topology := task.active.Clone()
-	topology.Next().PendingInstall = pendingInstall
+	topology.Next().InstalledOnNew = true
 	task.installTopology(topology)
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
@@ -1205,7 +1207,7 @@ type migrateInnerState interface {
 }
 
 func (task *migrate) tick() error {
-	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0) {
+	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && next.InstalledOnNew) {
 		return task.completed()
 	}
 
@@ -1409,7 +1411,7 @@ type installCompletion struct {
 
 func (task *installCompletion) tick() error {
 	next := task.active.Next()
-	if !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) == 0 && len(next.Pending) == 0) {
+	if !(next != nil && next.Version == task.config.Version && next.InstalledOnNew && len(next.Pending) == 0) {
 		log.Println("Topology: completion installed")
 		return task.completed()
 	}
