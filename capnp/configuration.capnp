@@ -22,7 +22,7 @@ struct Configuration {
       newRMIds       @11: List(UInt32);
       survivingRMIds @12: List(UInt32);
       lostRMIds      @13: List(UInt32);
-      pendingInstall @14: List(UInt32);
+      installedOnNew @14: Bool;
       pending        @15: List(ConditionPair);
     }
     stable           @16: Void;

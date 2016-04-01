@@ -36,13 +36,13 @@ type NextConfiguration struct {
 	NewRMIds       common.RMIds
 	SurvivingRMIds common.RMIds
 	LostRMIds      common.RMIds
-	PendingInstall common.RMIds
+	InstalledOnNew bool
 	Pending        Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n PendingInstall: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.PendingInstall, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -61,7 +61,7 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 	return a.NewRMIds.Equal(b.NewRMIds) &&
 		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
 		a.LostRMIds.Equal(b.LostRMIds) &&
-		a.PendingInstall.Equal(b.PendingInstall) &&
+		a.InstalledOnNew == b.InstalledOnNew &&
 		a.Pending.Equal(b.Pending) &&
 		a.Configuration.Equal(b.Configuration)
 }
@@ -83,9 +83,6 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	lostRMIds := make([]common.RMId, len(next.LostRMIds))
 	copy(lostRMIds, next.LostRMIds)
 
-	pendingInstall := make([]common.RMId, len(next.PendingInstall))
-	copy(pendingInstall, next.PendingInstall)
-
 	// Assumption is that conditions are immutable. So the only thing
 	// we'll want to do is shrink the map, so we do a copy of the map,
 	// not a deep copy of the conditions.
@@ -105,7 +102,7 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 		NewRMIds:       newRMIds,
 		SurvivingRMIds: survivingRMIds,
 		LostRMIds:      lostRMIds,
-		PendingInstall: pendingInstall,
+		InstalledOnNew: next.InstalledOnNew,
 		Pending:        pending,
 	}
 }
@@ -240,12 +237,6 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			lostRMIds[idx] = common.RMId(lostRMIdsCap.At(idx))
 		}
 
-		pendingInstallCap := next.PendingInstall()
-		pendingInstall := make([]common.RMId, pendingInstallCap.Len())
-		for idx := range pendingInstall {
-			pendingInstall[idx] = common.RMId(pendingInstallCap.At(idx))
-		}
-
 		pending := next.Pending()
 
 		c.nextConfiguration = &NextConfiguration{
@@ -254,7 +245,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			NewRMIds:       newRMIds,
 			SurvivingRMIds: survivingRMIds,
 			LostRMIds:      lostRMIds,
-			PendingInstall: pendingInstall,
+			InstalledOnNew: next.InstalledOnNew(),
 			Pending:        ConditionsFromCap(&pending),
 		}
 	}
@@ -422,11 +413,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		}
 		next.SetLostRMIds(lostRMIdsCap)
 
-		pendingInstallCap := seg.NewUInt32List(len(nextConfig.PendingInstall))
-		for idx, rmId := range nextConfig.PendingInstall {
-			pendingInstallCap.Set(idx, uint32(rmId))
-		}
-		next.SetPendingInstall(pendingInstallCap)
+		next.SetInstalledOnNew(nextConfig.InstalledOnNew)
 
 		next.SetPending(nextConfig.Pending.AddToSeg(seg))
 	}

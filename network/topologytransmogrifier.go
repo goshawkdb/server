@@ -354,21 +354,21 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			return // done.
 
 		case goal.ClusterId != tt.active.ClusterId:
-			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'.",
+			log.Printf("Topology: Illegal config: ClusterId should be '%s' instead of '%s'.",
 				tt.active.ClusterId, goal.ClusterId)
 			return
 
 		case goal.MaxRMCount != tt.active.MaxRMCount && tt.active.Version != 0:
-			log.Printf("Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
+			log.Printf("Topology: Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
 			return
 
 		case goal.Version < tt.active.Version:
-			log.Printf("Ignoring config with version %v as newer version already active (%v).",
+			log.Printf("Topology: Ignoring config with version %v as newer version already active (%v).",
 				goal.Version, tt.active.Version)
 			return
 
 		case goal.Version == tt.active.Version:
-			log.Printf("Config transition to version %v completed.", goal.Version)
+			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
 			return
 		}
 	}
@@ -377,17 +377,17 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 		existingGoal := tt.task.goal()
 		switch {
 		case goal.ClusterId != existingGoal.ClusterId:
-			log.Printf("Illegal config: ClusterId should be '%s' instead of '%s'.",
+			log.Printf("Topology: Illegal config: ClusterId should be '%s' instead of '%s'.",
 				existingGoal.ClusterId, goal.ClusterId)
 			return
 
 		case goal.Version < existingGoal.Version:
-			log.Printf("Ignoring config with version %v as newer version already targetted (%v).",
+			log.Printf("Topology: Ignoring config with version %v as newer version already targetted (%v).",
 				goal.Version, existingGoal.Version)
 			return
 
 		case goal.Version == existingGoal.Version:
-			log.Printf("Config transition to version %v already in progress.", goal.Version)
+			log.Printf("Topology: Config transition to version %v already in progress.", goal.Version)
 			return // goal already in progress
 
 		default:
@@ -547,31 +547,31 @@ type targetConfig struct {
 func (task *targetConfig) tick() error {
 	switch {
 	case task.active == nil:
-		log.Println("Ensuring local topology.")
+		log.Println("Topology: Ensuring local topology.")
 		task.task = &ensureLocalTopology{task}
 
 	case task.active.Version == 0:
-		log.Printf("Attempting to join cluster with configuration: %v", task.config)
+		log.Printf("Topology: Attempting to join cluster with configuration: %v", task.config)
 		task.task = &joinCluster{targetConfig: task}
 
 	case task.active.Next() == nil || task.active.Next().Version < task.config.Version:
-		log.Printf("Attempting to install topology change target: %v", task.config)
+		log.Printf("Topology: Attempting to install topology change target: %v", task.config)
 		task.task = &installTargetOld{targetConfig: task}
 
-	case task.active.Next() != nil && task.active.Next().Version == task.config.Version && len(task.active.Next().PendingInstall) > 0:
-		log.Printf("Attempting to install topology change to new cluster: %v", task.config)
+	case task.active.Next() != nil && task.active.Next().Version == task.config.Version && !task.active.Next().InstalledOnNew:
+		log.Printf("Topology: Attempting to install topology change to new cluster: %v", task.config)
 		task.task = &installTargetNew{targetConfig: task}
 
-	case task.active.Next() != nil && task.active.Next().Version == task.config.Version && len(task.active.Next().PendingInstall) == 0 && len(task.active.Next().Pending) > 0:
-		log.Printf("Attempting to perform object migration for topology target: %v", task.config)
+	case task.active.Next() != nil && task.active.Next().Version == task.config.Version && task.active.Next().InstalledOnNew && len(task.active.Next().Pending) > 0:
+		log.Printf("Topology: Attempting to perform object migration for topology target: %v", task.config)
 		task.task = &migrate{targetConfig: task}
 
-	case task.active.Next() != nil && task.active.Next().Version == task.config.Version && len(task.active.Next().PendingInstall) == 0 && len(task.active.Next().Pending) == 0:
-		log.Printf("Object migration completed, switching to new topology: %v", task.config)
+	case task.active.Next() != nil && task.active.Next().Version == task.config.Version && task.active.Next().InstalledOnNew && len(task.active.Next().Pending) == 0:
+		log.Printf("Topology: Object migration completed, switching to new topology: %v", task.config)
 		task.task = &installCompletion{targetConfig: task}
 
 	default:
-		return fmt.Errorf("Confused about what to do. Active topology is: %v; goal is %v",
+		return fmt.Errorf("Topology: Confused about what to do. Active topology is: %v; goal is %v",
 			task.active, task.config)
 	}
 	return nil
@@ -803,7 +803,7 @@ func (task *joinCluster) tick() error {
 		// of the oldies and then we ask them to do the config change
 		// for us.
 
-		log.Println("Requesting help from existing cluster members for topology change.")
+		log.Println("Topology: Requesting help from existing cluster members for topology change.")
 		return nil
 	}
 }
@@ -886,14 +886,16 @@ func (task *installTargetOld) tick() error {
 	// Here, we just want to use the RMs in the old topology only.
 	active, passive := task.partitionByActiveConnection(task.active.RMs())
 	if len(active) <= len(passive) {
-		log.Printf("Can not make progress at this time due to too many failures (failures: %v)",
+		log.Printf("Topology: Can not make progress at this time due to too many failures (failures: %v)",
 			passive)
 		return nil
 	}
 	fInc := ((len(active) + len(passive)) >> 1) + 1
 	active, passive = active[:fInc], append(active[fInc:], passive...)
+	// add on all new (if there are any) as passives
+	passive = append(passive, targetTopology.Next().NewRMIds...)
 
-	log.Printf("Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
+	log.Printf("Topology: Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
 
 	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
 	if err != nil {
@@ -1041,7 +1043,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		NewRMIds:       rmIdsAdded,
 		SurvivingRMIds: rmIdsSurvived,
 		LostRMIds:      rmIdsLost,
-		PendingInstall: rmIdsAdded,
+		InstalledOnNew: len(rmIdsAdded) > 0,
 		Pending:        conds,
 	})
 
@@ -1112,13 +1114,15 @@ type installTargetNew struct {
 
 func (task *installTargetNew) tick() error {
 	next := task.active.Next()
-	if !(next != nil && next.Version == task.config.Version && len(next.PendingInstall) > 0) {
+	if !(next != nil && next.Version == task.config.Version && !next.InstalledOnNew) {
 		return task.completed()
 	}
 
-	localHost, err := task.firstLocalHost(task.active.Configuration)
+	localHost, err := task.firstLocalHost(task.active.Next().Configuration)
 	if err != nil {
-		return task.fatal(err)
+		log.Printf("Topology: Awaiting new cluster members.")
+		// this step must be performed by the new RMs
+		return nil
 	}
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
@@ -1148,12 +1152,12 @@ func (task *installTargetNew) tick() error {
 
 	maxPassive := len(active) - 1
 	if task.active.RMs().NonEmptyLen() == 1 {
-		log.Println("You've asked to extend the cluster from a single node.\n This is not guaranteed to be safe: if a distinct node within the target\n configuration is performing a different configuration change concurrently\n then it's possible I won't be able to prevent divergence.\n Odds are it'll be fine though, I just can't guarantee it.")
+		log.Println("Topology: You've asked to extend the cluster from a single node.\n This is not guaranteed to be safe: if a distinct node within the target\n configuration is performing a different configuration change concurrently\n then it's possible I won't be able to prevent divergence.\n Odds are it'll be fine though, I just can't guarantee it.")
 		maxPassive++
 	}
 	if (maxPassive - len(passive)) <= 0 {
 		// we're not going to make any progress here, Stop now.
-		log.Printf("Topology change: No progress possible (active: %v, passive %v)\n", active, passive)
+		log.Printf("Topology: Topology change: No progress possible (active: %v, passive %v)\n", active, passive)
 		return nil
 	}
 
@@ -1164,7 +1168,7 @@ func (task *installTargetNew) tick() error {
 	passive, pendingInstall := passive[:maxPassive], passive[maxPassive:]
 	// do it this way around otherwise we risk overwriting pendingInstall
 	passive = append(next.LostRMIds, passive...)
-	log.Printf("Extending topology. Actives: %v; Passives: %v, PendingInstall: %v", active, passive, pendingInstall)
+	log.Printf("Topology: Extending topology. Actives: %v; Passives: %v, PendingInstall: %v", active, passive, pendingInstall)
 
 	topology := task.active.Clone()
 	topology.Next().PendingInstall = pendingInstall
@@ -1869,7 +1873,7 @@ func (it *dbIterator) iterate() {
 		return nil
 	}).ResultError()
 	if err != nil {
-		log.Println(err)
+		log.Println("Topology iterator:", err)
 	}
 	for _, sb := range it.batch {
 		sb.flush()
