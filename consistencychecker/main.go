@@ -125,7 +125,7 @@ func (lc *locationChecker) locationCheck(cell *varWrapperCell) error {
 		}
 	}
 	if !foundLocal {
-		// it must have emigrated but we don't delete.
+		// It must have emigrated but we don't delete.
 		txnId = nil
 	}
 	for _, rmId := range rmIds {
@@ -148,9 +148,9 @@ func (lc *locationChecker) locationCheck(cell *varWrapperCell) error {
 			varBites, ok := res.([]byte)
 			if res == nil || (ok && varBites == nil) {
 				if vUUId.BootCount() == 1 && vUUId.ConnectionCount() == 0 &&
-					txnId != nil &&
-					txnId.BootCount() == 1 && txnId.ConnectionCount() == 0 &&
-					txnCap.Actions().Len() == 1 && txnCap.Actions().At(0).Which() == msgs.ACTION_CREATE {
+					(txnId == nil ||
+						(txnId.BootCount() == 1 && txnId.ConnectionCount() == 0 &&
+							txnCap.Actions().Len() == 1 && txnCap.Actions().At(0).Which() == msgs.ACTION_CREATE)) {
 					fmt.Printf("Failed to find %v in %v (%v, %v, %v) but it looks like it's a bad root.\n", vUUId, remote, rmIds, positions, foundIn)
 				} else {
 					return fmt.Errorf("Failed to find %v in %v (%v, %v, %v)", vUUId, remote, rmIds, positions, foundIn)

@@ -1052,48 +1052,29 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
 	conditions := configuration.Conds(make(map[common.RMId]*configuration.CondSuppliers))
-	twoFIncNew := (uint16(to.F) * 2) + 1
 	twoFIncOld := (uint16(from.F) * 2) + 1
 
 	for _, rmIdNew := range added {
 		conditions.DisjoinWith(rmIdNew, &configuration.Generator{
 			RMId:     rmIdNew,
-			PermLen:  uint16(to.RMs().NonEmptyLen()),
-			Start:    0,
-			Len:      twoFIncNew,
+			UseNext:  true,
 			Includes: true,
 		})
 	}
 
 	if int(twoFIncOld) < from.RMs().NonEmptyLen() {
-		if len(lost) > len(added) {
-			for _, rmId := range survived {
-				conditions.DisjoinWith(rmId, &configuration.Generator{
-					RMId:               rmId,
-					PermLen:            uint16(from.RMs().NonEmptyLen()),
-					Start:              twoFIncOld,
-					LenAdjustIntersect: lost,
-					Includes:           true,
-				})
-			}
-		}
-
-		if from.F < to.F {
+		if from.F < to.F || len(lost) > len(added) {
 			for _, rmId := range survived {
 				conditions.DisjoinWith(rmId, &configuration.Conjunction{
 					Left: &configuration.Generator{
 						RMId:     rmId,
-						PermLen:  uint16(to.RMs().NonEmptyLen()),
-						Start:    0,
-						Len:      twoFIncNew,
-						Includes: true,
+						UseNext:  false,
+						Includes: false,
 					},
 					Right: &configuration.Generator{
 						RMId:     rmId,
-						PermLen:  uint16(from.RMs().NonEmptyLen()),
-						Start:    0,
-						Len:      twoFIncOld,
-						Includes: false,
+						UseNext:  true,
+						Includes: true,
 					},
 				})
 			}
@@ -1168,7 +1149,7 @@ func (task *installTargetNew) tick() error {
 			return nil
 		}
 	}
-	active = append(active, newActive...)
+	active = append(newActive, active...)
 
 	log.Printf("Topology: Installing on new cluster members. Active: %v, Passive: %v", active, passive)
 

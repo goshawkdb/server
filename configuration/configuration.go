@@ -620,22 +620,11 @@ func conditionFromCap(condCap *msgs.Condition) Cond {
 		}
 	case msgs.CONDITION_GENERATOR:
 		condGen := condCap.Generator()
-		gen := &Generator{
+		return &Generator{
 			RMId:     common.RMId(condGen.RmId()),
-			PermLen:  condGen.PermLen(),
-			Start:    condGen.Start(),
+			UseNext:  condGen.UseNext(),
 			Includes: condGen.Includes(),
 		}
-		if condGen.Which() == msgs.GENERATOR_LENSIMPLE {
-			gen.Len = condGen.LenSimple()
-		} else {
-			lai := condGen.LenAdjustIntersect()
-			gen.LenAdjustIntersect = make([]common.RMId, lai.Len())
-			for idx := range gen.LenAdjustIntersect {
-				gen.LenAdjustIntersect[idx] = common.RMId(lai.At(idx))
-			}
-		}
-		return gen
 	default:
 		panic(fmt.Sprintf("Unexpected Condition type (%v)", condCap.Which()))
 		return nil
@@ -713,12 +702,9 @@ func (d *Disjunction) AddToSeg(seg *capn.Segment) msgs.Condition {
 }
 
 type Generator struct {
-	RMId               common.RMId
-	PermLen            uint16
-	Start              uint16
-	Len                uint16
-	LenAdjustIntersect common.RMIds
-	Includes           bool
+	RMId     common.RMId
+	UseNext  bool
+	Includes bool
 }
 
 func (g *Generator) witness() Cond { return g }
@@ -727,51 +713,28 @@ func (g *Generator) String() string {
 	if !g.Includes {
 		op = "∉"
 	}
-	start := ""
-	if g.Start > 0 {
-		start = fmt.Sprintf("%v", g.Start)
+	which := "Old"
+	if g.UseNext {
+		which = "New"
 	}
-	end := fmt.Sprintf("%v", g.Start+g.Len)
-	if len(g.LenAdjustIntersect) > 0 {
-		set := ""
-		for _, rmId := range g.LenAdjustIntersect {
-			set += fmt.Sprintf(",%s", rmId)
-		}
-		end = fmt.Sprintf("%v+|(p,%v)[:%v] ∩ {%v}|", g.Start, g.PermLen, len(g.LenAdjustIntersect), set[1:])
-	}
-	return fmt.Sprintf("%v %v (p,%v)[%s:%v]", g.RMId, op, g.PermLen, start, end)
+	return fmt.Sprintf("%v %v (p,RMs%s)[:2F%s+1]", g.RMId, op, which, which)
 }
 
 func (g *Generator) SatisfiedBy(topology *Topology, positions *common.Positions) (bool, error) {
-	var slice common.RMIds
-	if len(g.LenAdjustIntersect) == 0 {
-		server.Log("Generator:SatisfiedBy:NewResolver:", topology.Next().RMs(), uint16(g.PermLen))
-		resolver := ch.NewResolver(topology.Next().RMs(), uint16(g.PermLen))
-		perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
-		if err != nil {
-			return false, err
-		}
-		slice = perm[g.Start : g.Start+g.Len]
-	} else {
-		server.Log("Generator:SatisfiedBy:NewResolver:", topology.RMs(), uint16(g.PermLen))
-		resolver := ch.NewResolver(topology.RMs(), uint16(g.PermLen))
-		perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
-		if err != nil {
-			return false, err
-		}
-		set := make(map[common.RMId]server.EmptyStruct, len(g.LenAdjustIntersect))
-		for _, rmId := range g.LenAdjustIntersect {
-			set[rmId] = server.EmptyStructVal
-		}
-		end := g.Start + g.Len
-		for _, rmId := range perm[:len(g.LenAdjustIntersect)] {
-			if _, found := set[rmId]; found {
-				end++
-			}
-		}
-		slice = perm[g.Start:end]
+	rms := topology.RMs()
+	twoFInc := topology.TwoFInc
+	if g.UseNext {
+		next := topology.Next()
+		rms = next.RMs()
+		twoFInc = (uint16(next.F) * 2) + 1
 	}
-	for _, rmId := range slice {
+	server.Log("Generator:SatisfiedBy:NewResolver:", rms, twoFInc)
+	resolver := ch.NewResolver(rms, twoFInc)
+	perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
+	if err != nil {
+		return false, err
+	}
+	for _, rmId := range perm {
 		if rmId == g.RMId {
 			return g.Includes, nil
 		}
@@ -788,25 +751,14 @@ func (a *Generator) Equal(b Cond) bool {
 	if a == nil || b == nil || bGen == nil {
 		return a == b || a == bGen
 	}
-	return a.RMId == bGen.RMId && a.PermLen == bGen.PermLen && a.Start == bGen.Start && a.Len == bGen.Len &&
-		a.Includes == bGen.Includes && a.LenAdjustIntersect.Equal(bGen.LenAdjustIntersect)
+	return a.RMId == bGen.RMId && a.UseNext == bGen.UseNext && a.Includes == bGen.Includes
 }
 
 func (g *Generator) AddToSeg(seg *capn.Segment) msgs.Condition {
 	genCap := msgs.NewGenerator(seg)
 	genCap.SetRmId(uint32(g.RMId))
-	genCap.SetPermLen(g.PermLen)
-	genCap.SetStart(g.Start)
+	genCap.SetUseNext(g.UseNext)
 	genCap.SetIncludes(g.Includes)
-	if len(g.LenAdjustIntersect) > 0 {
-		rmIds := seg.NewUInt32List(len(g.LenAdjustIntersect))
-		for idx, rmId := range g.LenAdjustIntersect {
-			rmIds.Set(idx, uint32(rmId))
-		}
-		genCap.SetLenAdjustIntersect(rmIds)
-	} else {
-		genCap.SetLenSimple(g.Len)
-	}
 	condCap := msgs.NewCondition(seg)
 	condCap.SetGenerator(genCap)
 	return condCap

@@ -55,11 +55,6 @@ struct Disjunction {
 
 struct Generator {
   rmId      @0: UInt32;
-  permLen   @1: UInt16;
-  start     @2: UInt16;
-  union {
-    lenSimple          @3: UInt16;
-    lenAdjustIntersect @4: List(UInt32);
-  }
-  includes  @5: Bool;
+  useNext   @1: Bool;
+  includes  @2: Bool;
 }

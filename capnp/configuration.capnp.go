@@ -25,7 +25,6 @@ func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
 func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(8)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
-func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToData() }
 func (s Configuration) SetClusterId(v string)          { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
 func (s Configuration) Version() uint32                { return C.Struct(s).Get32(0) }
 func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(0, v) }
@@ -1722,33 +1721,17 @@ func (s Disjunction_List) ToArray() []Disjunction {
 func (s Disjunction_List) Set(i int, item Disjunction) { C.PointerList(s).Set(i, C.Object(item)) }
 
 type Generator C.Struct
-type Generator_Which uint16
 
-const (
-	GENERATOR_LENSIMPLE          Generator_Which = 0
-	GENERATOR_LENADJUSTINTERSECT Generator_Which = 1
-)
-
-func NewGenerator(s *C.Segment) Generator            { return Generator(s.NewStruct(16, 1)) }
-func NewRootGenerator(s *C.Segment) Generator        { return Generator(s.NewRootStruct(16, 1)) }
-func AutoNewGenerator(s *C.Segment) Generator        { return Generator(s.NewStructAR(16, 1)) }
-func ReadRootGenerator(s *C.Segment) Generator       { return Generator(s.Root(0).ToStruct()) }
-func (s Generator) Which() Generator_Which           { return Generator_Which(C.Struct(s).Get16(10)) }
-func (s Generator) RmId() uint32                     { return C.Struct(s).Get32(0) }
-func (s Generator) SetRmId(v uint32)                 { C.Struct(s).Set32(0, v) }
-func (s Generator) PermLen() uint16                  { return C.Struct(s).Get16(4) }
-func (s Generator) SetPermLen(v uint16)              { C.Struct(s).Set16(4, v) }
-func (s Generator) Start() uint16                    { return C.Struct(s).Get16(6) }
-func (s Generator) SetStart(v uint16)                { C.Struct(s).Set16(6, v) }
-func (s Generator) LenSimple() uint16                { return C.Struct(s).Get16(8) }
-func (s Generator) SetLenSimple(v uint16)            { C.Struct(s).Set16(10, 0); C.Struct(s).Set16(8, v) }
-func (s Generator) LenAdjustIntersect() C.UInt32List { return C.UInt32List(C.Struct(s).GetObject(0)) }
-func (s Generator) SetLenAdjustIntersect(v C.UInt32List) {
-	C.Struct(s).Set16(10, 1)
-	C.Struct(s).SetObject(0, C.Object(v))
-}
-func (s Generator) Includes() bool     { return C.Struct(s).Get1(96) }
-func (s Generator) SetIncludes(v bool) { C.Struct(s).Set1(96, v) }
+func NewGenerator(s *C.Segment) Generator      { return Generator(s.NewStruct(8, 0)) }
+func NewRootGenerator(s *C.Segment) Generator  { return Generator(s.NewRootStruct(8, 0)) }
+func AutoNewGenerator(s *C.Segment) Generator  { return Generator(s.NewStructAR(8, 0)) }
+func ReadRootGenerator(s *C.Segment) Generator { return Generator(s.Root(0).ToStruct()) }
+func (s Generator) RmId() uint32               { return C.Struct(s).Get32(0) }
+func (s Generator) SetRmId(v uint32)           { C.Struct(s).Set32(0, v) }
+func (s Generator) UseNext() bool              { return C.Struct(s).Get1(32) }
+func (s Generator) SetUseNext(v bool)          { C.Struct(s).Set1(32, v) }
+func (s Generator) Includes() bool             { return C.Struct(s).Get1(33) }
+func (s Generator) SetIncludes(v bool)         { C.Struct(s).Set1(33, v) }
 func (s Generator) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -1777,12 +1760,12 @@ func (s Generator) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"permLen\":")
+	_, err = b.WriteString("\"useNext\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.PermLen()
+		s := s.UseNext()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -1790,77 +1773,6 @@ func (s Generator) WriteJSON(w io.Writer) error {
 		_, err = b.Write(buf)
 		if err != nil {
 			return err
-		}
-	}
-	err = b.WriteByte(',')
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("\"start\":")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.Start()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	if s.Which() == GENERATOR_LENSIMPLE {
-		_, err = b.WriteString("\"lenSimple\":")
-		if err != nil {
-			return err
-		}
-		{
-			s := s.LenSimple()
-			buf, err = json.Marshal(s)
-			if err != nil {
-				return err
-			}
-			_, err = b.Write(buf)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.Which() == GENERATOR_LENADJUSTINTERSECT {
-		_, err = b.WriteString("\"lenAdjustIntersect\":")
-		if err != nil {
-			return err
-		}
-		{
-			s := s.LenAdjustIntersect()
-			{
-				err = b.WriteByte('[')
-				if err != nil {
-					return err
-				}
-				for i, s := range s.ToArray() {
-					if i != 0 {
-						_, err = b.WriteString(", ")
-					}
-					if err != nil {
-						return err
-					}
-					buf, err = json.Marshal(s)
-					if err != nil {
-						return err
-					}
-					_, err = b.Write(buf)
-					if err != nil {
-						return err
-					}
-				}
-				err = b.WriteByte(']')
-			}
-			if err != nil {
-				return err
-			}
 		}
 	}
 	err = b.WriteByte(',')
@@ -1922,12 +1834,12 @@ func (s Generator) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("permLen = ")
+	_, err = b.WriteString("useNext = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.PermLen()
+		s := s.UseNext()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -1935,77 +1847,6 @@ func (s Generator) WriteCapLit(w io.Writer) error {
 		_, err = b.Write(buf)
 		if err != nil {
 			return err
-		}
-	}
-	_, err = b.WriteString(", ")
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("start = ")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.Start()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	if s.Which() == GENERATOR_LENSIMPLE {
-		_, err = b.WriteString("lenSimple = ")
-		if err != nil {
-			return err
-		}
-		{
-			s := s.LenSimple()
-			buf, err = json.Marshal(s)
-			if err != nil {
-				return err
-			}
-			_, err = b.Write(buf)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.Which() == GENERATOR_LENADJUSTINTERSECT {
-		_, err = b.WriteString("lenAdjustIntersect = ")
-		if err != nil {
-			return err
-		}
-		{
-			s := s.LenAdjustIntersect()
-			{
-				err = b.WriteByte('[')
-				if err != nil {
-					return err
-				}
-				for i, s := range s.ToArray() {
-					if i != 0 {
-						_, err = b.WriteString(", ")
-					}
-					if err != nil {
-						return err
-					}
-					buf, err = json.Marshal(s)
-					if err != nil {
-						return err
-					}
-					_, err = b.Write(buf)
-					if err != nil {
-						return err
-					}
-				}
-				err = b.WriteByte(']')
-			}
-			if err != nil {
-				return err
-			}
 		}
 	}
 	_, err = b.WriteString(", ")
@@ -2043,7 +1884,7 @@ func (s Generator) MarshalCapLit() ([]byte, error) {
 type Generator_List C.PointerList
 
 func NewGeneratorList(s *C.Segment, sz int) Generator_List {
-	return Generator_List(s.NewCompositeList(16, 1, sz))
+	return Generator_List(s.NewCompositeList(8, 0, sz))
 }
 func (s Generator_List) Len() int           { return C.PointerList(s).Len() }
 func (s Generator_List) At(i int) Generator { return Generator(C.PointerList(s).At(i).ToStruct()) }
