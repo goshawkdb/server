@@ -34,7 +34,7 @@ func NewProposerDispatcher(count uint8, rmId common.RMId, varDispatcher *eng.Var
 
 func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *msgs.Txn) {
 	txnId := common.MakeTxnId(txn.Id())
-	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(txnId, txn) })
+	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txnId, txn) })
 }
 
 func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {

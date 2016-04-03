@@ -77,7 +77,7 @@ func (pm *ProposerManager) ImmigrationReceived(txnId *common.TxnId, txnCap *msgs
 	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txnCap, varCaps)
 }
 
-func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
+func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, txnCap *msgs.Txn) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other
 	// proposers will have created abort proposals, and consensus may
@@ -85,9 +85,16 @@ func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 	// ignore this message.
 	if _, found := pm.proposers[*txnId]; !found {
 		server.Log(txnId, "Received")
-		if pm.topology == nil ||
-			(pm.topology.Next() == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
-			(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion()) {
+		accept := true
+		if pm.topology != nil {
+			accept = (pm.topology.Next() == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
+				(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion())
+			if accept {
+				_, found := pm.topology.RMsRemoved()[sender]
+				accept = !found
+			}
+		}
+		if accept {
 			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()

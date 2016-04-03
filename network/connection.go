@@ -260,7 +260,7 @@ func (conn *Connection) handleShutdown(err error) {
 		}
 	}
 	if conn.isServer {
-		conn.connectionManager.ServerLost(conn, conn.remoteRMId)
+		conn.connectionManager.ServerLost(conn, conn.remoteRMId, false)
 	}
 }
 
@@ -541,10 +541,6 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 			}
 			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
-			if _, found := topology.RMsRemoved()[cash.remoteRMId]; found {
-				return false, cash.serverError(
-					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
-			}
 			cash.nextState(nil)
 			return false, nil
 		} else {
@@ -657,6 +653,7 @@ type connectionRun struct {
 	mustSendBeat bool
 	missingBeats int
 	beatBytes    []byte
+	restart      bool
 }
 
 func (cr *connectionRun) connectionStateMachineComponentWitness() {}
@@ -675,6 +672,8 @@ func (cr *connectionRun) outcomeReceived(f func(*connectionRun)) {
 
 func (cr *connectionRun) start() (bool, error) {
 	log.Printf("Connection established to %v (%v)\n", cr.remoteHost, cr.remoteRMId)
+
+	cr.restart = true
 
 	seg := capn.NewBuffer(nil)
 	if cr.isClient {
@@ -716,12 +715,6 @@ func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) er
 		return nil
 	}
 	topology := tChange.topology
-	if cr.isServer && topology != nil {
-		if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
-			return cr.serverError(
-				fmt.Errorf("%v has been removed from topology and may not rejoin.", cr.remoteRMId))
-		}
-	}
 	if cr.isClient {
 		if topology != nil {
 			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
@@ -729,6 +722,13 @@ func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) er
 			}
 		}
 		cr.submitter.TopologyChange(tChange.topology, tChange.servers)
+	}
+	if cr.isServer {
+		if topology != nil {
+			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
+				cr.restart = false
+			}
+		}
 	}
 	return nil
 }
@@ -766,7 +766,7 @@ func (cr *connectionRun) handleMsgFromClient(msg *cmsgs.ClientMessage) error {
 			}
 		})
 	default:
-		cr.maybeRestartConnection(fmt.Errorf("Unexpected message type received from client: %v", which))
+		return cr.maybeRestartConnection(fmt.Errorf("Unexpected message type received from client: %v", which))
 	}
 	return nil
 }
@@ -822,9 +822,13 @@ func (cr *connectionRun) maybeRestartConnection(err error) error {
 
 	case cr.isServer:
 		log.Printf("Error on server connection to %v: %v", cr.remoteRMId, err)
-		cr.nextState(&cr.connectionDelay)
-		cr.connectionManager.ServerLost(cr.Connection, cr.remoteRMId)
-		return nil
+		cr.connectionManager.ServerLost(cr.Connection, cr.remoteRMId, cr.restart)
+		if cr.restart {
+			cr.nextState(&cr.connectionDelay)
+			return nil
+		} else {
+			return err
+		}
 
 	case cr.isClient:
 		log.Printf("Error on client connection to %v: %v", cr.remoteHost, err)

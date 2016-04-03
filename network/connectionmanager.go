@@ -121,7 +121,8 @@ func (cmmse *connectionManagerMsgServerEstablished) connectionManagerMsgWitness(
 
 type connectionManagerMsgServerLost struct {
 	*Connection
-	rmId common.RMId
+	rmId       common.RMId
+	restarting bool
 }
 
 func (cmmsl *connectionManagerMsgServerLost) connectionManagerMsgWitness() {}
@@ -191,10 +192,11 @@ func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rm
 	})
 }
 
-func (cm *ConnectionManager) ServerLost(conn *Connection, rmId common.RMId) {
+func (cm *ConnectionManager) ServerLost(conn *Connection, rmId common.RMId, restarting bool) {
 	cm.enqueueQuery(&connectionManagerMsgServerLost{
 		Connection: conn,
 		rmId:       rmId,
+		restarting: restarting,
 	})
 }
 
@@ -495,6 +497,20 @@ func (cm *ConnectionManager) serverLost(connLost *connectionManagerMsgServerLost
 		log.Printf("Connection to RMId %v lost\n", rmId)
 		cd.established = false
 		delete(cm.rmToServer, rmId)
+		if !connLost.restarting {
+			if cd1, found := cm.servers[cd.host]; found && cd1 == cd {
+				delete(cm.servers, cd.host)
+				for _, host := range cm.desired {
+					if host == cd.host {
+						cm.servers[host] = &connectionManagerMsgServerEstablished{
+							Connection: NewConnectionToDial(host, cm),
+							host:       host,
+						}
+						break
+					}
+				}
+			}
+		}
 		cm.sendersConnectionLost(rmId)
 	}
 }
@@ -556,18 +572,6 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, in
 		cm.sendersConnectionEstablished(cd)
 	}
 	server.Log("Topology change:", topology)
-	if topology.Next() == nil {
-		for rmId := range topology.RMsRemoved() {
-			if cd, found := cm.rmToServer[rmId]; found {
-				cd.Shutdown(false)
-				delete(cm.rmToServer, cd.rmId)
-				delete(cm.servers, cd.host)
-				if cd.established {
-					cm.sendersConnectionLost(cd.rmId)
-				}
-			}
-		}
-	}
 	rmToServerCopy := cm.cloneRMToServer()
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
