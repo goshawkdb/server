@@ -37,12 +37,13 @@ type NextConfiguration struct {
 	SurvivingRMIds common.RMIds
 	LostRMIds      common.RMIds
 	InstalledOnNew bool
+	BarrierReached common.RMIds
 	Pending        Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n BarrierReached: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.BarrierReached, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -62,6 +63,7 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
 		a.LostRMIds.Equal(b.LostRMIds) &&
 		a.InstalledOnNew == b.InstalledOnNew &&
+		a.BarrierReached.Equal(b.BarrierReached) &&
 		a.Pending.Equal(b.Pending) &&
 		a.Configuration.Equal(b.Configuration)
 }
@@ -83,6 +85,9 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	lostRMIds := make([]common.RMId, len(next.LostRMIds))
 	copy(lostRMIds, next.LostRMIds)
 
+	barrierReached := make([]common.RMId, len(next.BarrierReached))
+	copy(barrierReached, next.BarrierReached)
+
 	// Assumption is that conditions are immutable. So the only thing
 	// we'll want to do is shrink the map, so we do a copy of the map,
 	// not a deep copy of the conditions.
@@ -103,6 +108,7 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 		SurvivingRMIds: survivingRMIds,
 		LostRMIds:      lostRMIds,
 		InstalledOnNew: next.InstalledOnNew,
+		BarrierReached: barrierReached,
 		Pending:        pending,
 	}
 }
@@ -237,6 +243,12 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			lostRMIds[idx] = common.RMId(lostRMIdsCap.At(idx))
 		}
 
+		barrierReachedCap := next.BarrierReached()
+		barrierReached := make([]common.RMId, barrierReachedCap.Len())
+		for idx := range barrierReached {
+			barrierReached[idx] = common.RMId(barrierReachedCap.At(idx))
+		}
+
 		pending := next.Pending()
 
 		c.nextConfiguration = &NextConfiguration{
@@ -246,6 +258,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			SurvivingRMIds: survivingRMIds,
 			LostRMIds:      lostRMIds,
 			InstalledOnNew: next.InstalledOnNew(),
+			BarrierReached: barrierReached,
 			Pending:        ConditionsFromCap(&pending),
 		}
 	}
@@ -290,6 +303,10 @@ func (config *Configuration) String() string {
 
 func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
 	return config.fingerprints
+}
+
+func (config *Configuration) NextBarrierReached() bool {
+	return config.nextConfiguration != nil && len(config.nextConfiguration.BarrierReached) >= config.rms.NonEmptyLen()-int(config.F)
 }
 
 func (config *Configuration) Next() *NextConfiguration {
@@ -412,6 +429,12 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 			lostRMIdsCap.Set(idx, uint32(rmId))
 		}
 		next.SetLostRMIds(lostRMIdsCap)
+
+		barrierReachedCap := seg.NewUInt32List(len(nextConfig.BarrierReached))
+		for idx, rmId := range nextConfig.BarrierReached {
+			barrierReachedCap.Set(idx, uint32(rmId))
+		}
+		next.SetBarrierReached(barrierReachedCap)
 
 		next.SetInstalledOnNew(nextConfig.InstalledOnNew)
 
