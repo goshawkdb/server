@@ -68,9 +68,8 @@ func (pm *ProposerManager) SetTopology(topology *configuration.Topology, install
 	if installed != nil {
 		installed()
 	}
-	removed := topology.RMsRemoved()
 	for _, proposer := range pm.proposers {
-		proposer.RMsRemovedFromTopology(removed)
+		proposer.TopologyChange(topology)
 	}
 }
 

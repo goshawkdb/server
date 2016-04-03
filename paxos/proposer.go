@@ -7,6 +7,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 )
@@ -123,18 +124,15 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (p *Proposer) RMsRemovedFromTopology(rms map[common.RMId]server.EmptyStruct) {
+func (p *Proposer) TopologyChange(topology *configuration.Topology) {
+	rms := topology.RMsRemoved()
 	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rms)
 	if p.currentState == &p.proposerReceiveGloballyComplete {
 		for rmId := range rms {
 			p.TxnGloballyCompleteReceived(rmId)
 		}
-	} else {
-		for rmId := range rms {
-			if p.outcomeAccumulator.RMRemoved(rmId) {
-				p.allAcceptorsAgree()
-			}
-		}
+	} else if p.outcomeAccumulator.TopologyChange(topology) {
+		p.allAcceptorsAgree()
 	}
 }
 

@@ -1341,6 +1341,12 @@ func (task *migrate) tick() error {
 		task.migrateAwaitNoPending.init(task)
 
 		task.currentState = &task.migrateAwaitImmigrations
+
+		_, _, err := task.active.LocalRemoteHosts(task.listenPort)
+		// don't attempt any emigration unless we were in the old topology
+		if err == nil {
+			task.ensureEmigrator()
+		}
 	}
 
 	return task.currentState.tick()
@@ -1388,12 +1394,6 @@ func (task *migrateAwaitImmigrations) tick() error {
 	if _, found := task.active.Next().Pending[task.connectionManager.RMId]; !found {
 		log.Println("Topology: All migration into all this RM completed. Awaiting others.")
 		return task.nextState()
-	}
-
-	_, _, err := task.active.LocalRemoteHosts(task.listenPort)
-	// don't attempt any emigration unless we were in the old topology
-	if err == nil {
-		task.ensureEmigrator()
 	}
 
 	senders, found := task.migrations[task.active.Next().Version]
@@ -1598,13 +1598,16 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 		offset += len(rmIds)
 	}
 
-	txn.SetFInc(uint8(len(active)))
 	if read == nil {
+		txn.SetFInc(uint8(len(active)))
 		txn.SetTopologyVersion(0)
-	} else if next := read.Next(); next != nil {
-		txn.SetTopologyVersion(next.Version)
 	} else {
-		txn.SetTopologyVersion(read.Version)
+		txn.SetFInc(read.FInc)
+		if next := read.Next(); next != nil {
+			txn.SetTopologyVersion(next.Version)
+		} else {
+			txn.SetTopologyVersion(read.Version)
+		}
 	}
 
 	return &txn
