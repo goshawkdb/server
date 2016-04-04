@@ -1177,7 +1177,7 @@ func (task *awaitBarrierProposer) tick() error {
 		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
 		log.Println("Topology: Topology installed in proposer managers. Waiting for vars to go quiet.")
 		nextConfig := task.active.Next().Configuration
-		task.connectionManager.Dispatchers.VarDispatcher.ForceToIdle(func() {
+		task.connectionManager.Dispatchers.VarDispatcher.OnDisk(func() {
 			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				task.varBarrierReached = nextConfig
 				if task.task == task.awaitBarrier {

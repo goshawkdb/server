@@ -299,16 +299,6 @@ func (v *Var) TxnGloballyComplete(action *localAction) {
 	}
 }
 
-func (v *Var) ForceToIdle() {
-	// bascially, we just cancel all the subscribers here
-	if len(v.subscribers) != 0 {
-		for _, sub := range v.subscribers {
-			sub.Cancel(v)
-		}
-	}
-	v.maybeMakeInactive()
-}
-
 func (v *Var) maybeMakeInactive() {
 	if v.isIdle() {
 		v.vm.SetInactive(v)
@@ -317,6 +307,10 @@ func (v *Var) maybeMakeInactive() {
 
 func (v *Var) isIdle() bool {
 	return len(v.subscribers) == 0 && v.writeInProgress == nil && v.curFrame.isIdle()
+}
+
+func (v *Var) isOnDisk() bool {
+	return v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty()
 }
 
 func (v *Var) applyToVar(fun func()) {

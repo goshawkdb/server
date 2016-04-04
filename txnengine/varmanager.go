@@ -6,7 +6,6 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -17,7 +16,7 @@ type VarManager struct {
 	LocalConnection
 	db         *db.Databases
 	active     map[common.VarUUId]*Var
-	onIdle     func()
+	onDisk     func()
 	lc         LocalConnection
 	callbacks  []func()
 	beaterLive bool
@@ -51,41 +50,29 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	fun(v, nil)
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
-	} else if vm.onIdle != nil && configuration.TopologyVarUUId.Compare(v.UUId) != common.EQ {
-		if found {
-			v.ForceToIdle()
-		}
-		vm.checkAllIdle()
+	} else if vm.onDisk != nil {
+		vm.checkAllDisk()
 	}
 }
 
-func (vm *VarManager) ForceToIdle(onIdle func()) {
-	vm.onIdle = onIdle
-	if !vm.checkAllIdle() {
-		for uuid, v := range vm.active {
-			if configuration.TopologyVarUUId.Compare(&uuid) == common.EQ {
-				continue
-			}
-			v.ForceToIdle()
-		}
-		vm.checkAllIdle()
-	}
+func (vm *VarManager) OnDisk(onDisk func()) {
+	vm.onDisk = onDisk
+	vm.checkAllDisk()
 }
 
-func (vm *VarManager) checkAllIdle() bool {
-	onIdle := vm.onIdle
-	if onIdle == nil {
-		return true
-	} else if l := len(vm.active); l == 0 {
-		vm.onIdle = nil
-		onIdle()
-		return true
-	} else if _, found := vm.active[*configuration.TopologyVarUUId]; l == 1 && found {
-		vm.onIdle = nil
-		onIdle()
+func (vm *VarManager) checkAllDisk() bool {
+	onDisk := vm.onDisk
+	if onDisk == nil {
 		return true
 	}
-	return false
+	for _, v := range vm.active {
+		if !v.isOnDisk() {
+			return false
+		}
+	}
+	vm.onDisk = nil
+	onDisk()
+	return true
 }
 
 // var.VarLifecycle interface

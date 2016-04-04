@@ -31,16 +31,16 @@ func (vd *VarDispatcher) ApplyToVar(fun func(*Var, error), createIfMissing bool,
 	vd.withVarManager(vUUId, func(vm *VarManager) { vm.ApplyToVar(fun, createIfMissing, vUUId) })
 }
 
-func (vd *VarDispatcher) ForceToIdle(onIdleOrig func()) {
+func (vd *VarDispatcher) OnDisk(onDiskOrig func()) {
 	count := int32(vd.ExecutorCount)
-	onIdle := func() {
+	onDisk := func() {
 		if atomic.AddInt32(&count, -1) == 0 {
-			onIdleOrig()
+			onDiskOrig()
 		}
 	}
 	for idx, exe := range vd.Executors {
 		mgr := vd.varmanagers[idx]
-		exe.Enqueue(func() { mgr.ForceToIdle(onIdle) })
+		exe.Enqueue(func() { mgr.OnDisk(onDisk) })
 	}
 }
 
