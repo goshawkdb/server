@@ -19,13 +19,13 @@ type AcceptorDispatcher struct {
 	acceptormanagers  []*AcceptorManager
 }
 
-func NewAcceptorDispatcher(cm ConnectionManager, count uint8, db *db.Databases) *AcceptorDispatcher {
+func NewAcceptorDispatcher(rmId common.RMId, cm ConnectionManager, count uint8, db *db.Databases) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
 		acceptormanagers: make([]*AcceptorManager, count),
 	}
 	ad.Dispatcher.Init(count)
 	for idx, exe := range ad.Executors {
-		ad.acceptormanagers[idx] = NewAcceptorManager(exe, cm, db)
+		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db)
 	}
 	ad.loadFromDisk(db)
 	return ad

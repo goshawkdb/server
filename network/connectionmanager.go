@@ -576,9 +576,15 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, in
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
 	}
-	for _, sconn := range cm.rmToServer {
+	removed := topology.RMsRemoved()
+	for _, sconn := range cm.servers {
 		if sconn.Connection != nil {
 			sconn.Connection.TopologyChange(topology, rmToServerCopy)
+		}
+		if !sconn.established {
+			if _, found := removed[sconn.rmId]; found {
+				sconn.Shutdown(false)
+			}
 		}
 	}
 	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, installed)

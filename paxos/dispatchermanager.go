@@ -27,7 +27,7 @@ func NewDispatchers(cm ConnectionManager, rmId common.RMId, count uint8, db *db.
 
 	d := &Dispatchers{
 		db:                 db,
-		AcceptorDispatcher: NewAcceptorDispatcher(cm, count, db),
+		AcceptorDispatcher: NewAcceptorDispatcher(rmId, cm, count, db),
 		VarDispatcher:      eng.NewVarDispatcher(count, db, lc),
 		connectionManager:  cm,
 	}

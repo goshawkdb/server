@@ -127,6 +127,9 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 	rms := topology.RMsRemoved()
 	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rms)
+	if _, found := rms[p.proposerManager.RMId]; found {
+		return
+	}
 	if p.currentState == &p.proposerReceiveGloballyComplete {
 		for rmId := range rms {
 			p.TxnGloballyCompleteReceived(rmId)

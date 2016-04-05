@@ -20,6 +20,7 @@ func init() {
 }
 
 type AcceptorManager struct {
+	RMId              common.RMId
 	DB                *db.Databases
 	ConnectionManager ConnectionManager
 	Exe               *dispatcher.Executor
@@ -28,8 +29,9 @@ type AcceptorManager struct {
 	Topology          *configuration.Topology
 }
 
-func NewAcceptorManager(exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
+func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
 	return &AcceptorManager{
+		RMId:              rmId,
 		DB:                db,
 		ConnectionManager: cm,
 		Exe:               exe,
