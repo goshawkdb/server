@@ -295,6 +295,12 @@ func (aalc *acceptorAwaitLocallyComplete) TopologyChange(topology *configuration
 	if _, found := rmsRemoved[aalc.acceptorManager.RMId]; found {
 		return
 	}
+	for idx := 0; idx < len(aalc.tgcRecipients); idx++ {
+		if _, found := rmsRemoved[aalc.tgcRecipients[idx]]; found {
+			aalc.tgcRecipients = append(aalc.tgcRecipients[:idx], aalc.tgcRecipients[idx+1:]...)
+			idx--
+		}
+	}
 	for rmId := range rmsRemoved {
 		aalc.TxnLocallyCompleteReceived(rmId)
 	}

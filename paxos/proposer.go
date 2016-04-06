@@ -130,6 +130,12 @@ func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 	if _, found := rms[p.proposerManager.RMId]; found {
 		return
 	}
+	for idx := 0; idx < len(p.acceptors); idx++ {
+		if _, found := rms[p.acceptors[idx]]; found {
+			p.acceptors = append(p.acceptors[:idx], p.acceptors[idx+1:]...)
+			idx--
+		}
+	}
 	if p.currentState == &p.proposerReceiveGloballyComplete {
 		for rmId := range rms {
 			p.TxnGloballyCompleteReceived(rmId)
