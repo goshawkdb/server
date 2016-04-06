@@ -408,12 +408,20 @@ func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDes
 		cm.sendersConnectionEstablished(cd)
 	}
 
+	desiredMap := make(map[string]server.EmptyStruct, len(hosts.remote))
 	for _, host := range hosts.remote {
+		desiredMap[host] = server.EmptyStructVal
 		if _, found := cm.servers[host]; !found {
 			cm.servers[host] = &connectionManagerMsgServerEstablished{
 				Connection: NewConnectionToDial(host, cm),
 				host:       host,
 			}
+		}
+	}
+	for host, sconn := range cm.servers {
+		if _, found := desiredMap[host]; !found && !sconn.established {
+			sconn.Shutdown(false)
+			delete(cm.servers, host)
 		}
 	}
 }
@@ -576,15 +584,9 @@ func (cm *ConnectionManager) updateTopology(topology *configuration.Topology, in
 	for _, cconn := range cm.connCountToClient {
 		cconn.TopologyChange(topology, rmToServerCopy)
 	}
-	removed := topology.RMsRemoved()
 	for _, sconn := range cm.servers {
 		if sconn.Connection != nil {
 			sconn.Connection.TopologyChange(topology, rmToServerCopy)
-		}
-		if !sconn.established {
-			if _, found := removed[sconn.rmId]; found {
-				sconn.Shutdown(false)
-			}
 		}
 	}
 	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, installed)
