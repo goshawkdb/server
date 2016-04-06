@@ -1146,23 +1146,8 @@ type awaitBarrierInnerState interface {
 }
 
 func (task *awaitBarrier) tick() error {
-	next := task.active.Next()
-	if !(next != nil && next.Version == task.config.Version && !task.active.NextBarrierReached()) {
+	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && !task.active.NextBarrierReached()) {
 		return task.completed()
-	}
-
-	for _, rmId := range next.NewRMIds {
-		if rmId == task.connectionManager.RMId {
-			log.Printf("Topology: Awaiting existing cluster members to reach barrier.")
-			return nil
-		}
-	}
-
-	for _, rmId := range next.BarrierReached {
-		if rmId == task.connectionManager.RMId {
-			log.Printf("Topology: Awaiting other cluster members to reach barrier.")
-			return nil
-		}
 	}
 
 	if task.currentState == nil {
@@ -1202,6 +1187,22 @@ func (task *awaitBarrierInstall) tick() error {
 	task.installTopology(task.active)
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
+
+	next := task.active.Next()
+	for _, rmId := range next.NewRMIds {
+		if rmId == task.connectionManager.RMId {
+			log.Printf("Topology: Awaiting existing cluster members to reach barrier.")
+			return nil
+		}
+	}
+
+	for _, rmId := range next.BarrierReached {
+		if rmId == task.connectionManager.RMId {
+			log.Printf("Topology: Awaiting other cluster members to reach barrier.")
+			return nil
+		}
+	}
+
 	return task.nextState()
 }
 
