@@ -535,6 +535,12 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 		if cash.verifyTopology(topology, &hello) {
 			cash.remoteHost = hello.LocalHost()
 			cash.remoteRMId = common.RMId(hello.RmId())
+
+			if _, found := topology.RMsRemoved()[cash.remoteRMId]; found {
+				return false, cash.serverError(
+					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
+			}
+
 			rootId := hello.RootId()
 			if len(rootId) == common.KeyLen {
 				cash.remoteRootId = common.MakeVarUUId(rootId)
