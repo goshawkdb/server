@@ -137,7 +137,9 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 func (am *AcceptorManager) SetTopology(topology *configuration.Topology) {
 	am.Topology = topology
 	for _, ai := range am.acceptors {
-		ai.acceptor.TopologyChange(topology)
+		if ai.acceptor != nil {
+			ai.acceptor.TopologyChange(topology)
+		}
 	}
 }
 

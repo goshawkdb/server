@@ -776,11 +776,11 @@ func (fo *frameOpen) subtractClock(clock *VectorClock) {
 }
 
 func (fo *frameOpen) isIdle() bool {
-	return fo.parent == nil && fo.isEmpty()
+	return fo.parent == nil && fo.currentState == fo && !fo.rollScheduled && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
 }
 
 func (fo *frameOpen) isEmpty() bool {
-	return fo.currentState == fo && !fo.rollScheduled && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
+	return fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0
 }
 
 // closed

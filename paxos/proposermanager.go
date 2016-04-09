@@ -53,7 +53,7 @@ func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatche
 
 func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error {
 	if _, found := pm.proposers[*txnId]; !found {
-		proposer, err := ProposerFromData(pm, txnId, data)
+		proposer, err := ProposerFromData(pm, txnId, data, pm.topology)
 		if err != nil {
 			return err
 		}
@@ -95,7 +95,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, 
 			}
 		}
 		if accept {
-			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter)
+			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 
@@ -106,8 +106,10 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, 
 			alloc := AllocForRMId(txnCap, pm.RMId)
 			ballots := MakeAbortBallots(txnCap, alloc)
 			pm.NewPaxosProposals(txnId, txnCap, fInc, ballots, acceptors, pm.RMId, true)
-
-			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveLearner)
+			// ActiveLearner is right - we don't want the proposer to
+			// vote, but it should exist to collect the 2Bs that should
+			// come back.
+			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveLearner, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 		}
@@ -207,7 +209,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			ballots := MakeAbortBallots(&txnCap, alloc)
 			pm.NewPaxosProposals(txnId, &txnCap, fInc, ballots, acceptors, pm.RMId, false)
 
-			proposer := NewProposer(pm, txnId, &txnCap, ProposerActiveLearner)
+			proposer := NewProposer(pm, txnId, &txnCap, ProposerActiveLearner, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 			proposer.BallotOutcomeReceived(sender, &outcome)
@@ -216,7 +218,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
 				server.Log(txnId, "2B outcome received from", sender, "(unknown learner)")
 				// we must be a learner.
-				proposer := NewProposer(pm, txnId, &txnCap, ProposerPassiveLearner)
+				proposer := NewProposer(pm, txnId, &txnCap, ProposerPassiveLearner, pm.topology)
 				pm.proposers[*txnId] = proposer
 				proposer.Start()
 				proposer.BallotOutcomeReceived(sender, &outcome)

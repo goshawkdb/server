@@ -27,6 +27,7 @@ type Proposer struct {
 	txn             *eng.Txn
 	txnId           *common.TxnId
 	acceptors       common.RMIds
+	topology        *configuration.Topology
 	fInc            int
 	currentState    proposerStateMachineComponent
 	proposerAwaitBallots
@@ -40,12 +41,13 @@ type Proposer struct {
 // we receive outcomes before the txn itself, we do not vote. So you
 // can be active, but not a voter.
 
-func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mode ProposerMode) *Proposer {
+func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mode ProposerMode, topology *configuration.Topology) *Proposer {
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            mode,
 		txnId:           txnId,
 		acceptors:       GetAcceptorsFromTxn(txnCap),
+		topology:        topology,
 		fInc:            int(txnCap.FInc()),
 	}
 	if mode == ProposerActiveVoter {
@@ -55,7 +57,7 @@ func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mod
 	return p
 }
 
-func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) (*Proposer, error) {
+func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, topology *configuration.Topology) (*Proposer, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
 		return nil, err
@@ -76,6 +78,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) (*P
 		mode:            proposerTLCSender,
 		txnId:           txnId,
 		acceptors:       acceptors,
+		topology:        topology,
 		fInc:            -1,
 	}
 	p.init()
@@ -107,6 +110,12 @@ func (p *Proposer) Start() {
 		p.currentState = &p.proposerReceiveGloballyComplete
 	}
 
+	if p.topology != nil {
+		topology := p.topology
+		p.topology = nil
+		p.TopologyChange(topology)
+	}
+
 	p.currentState.start()
 }
 
@@ -125,23 +134,36 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 }
 
 func (p *Proposer) TopologyChange(topology *configuration.Topology) {
-	rms := topology.RMsRemoved()
-	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rms)
-	if _, found := rms[p.proposerManager.RMId]; found {
+	if topology == p.topology {
 		return
 	}
-	for idx := 0; idx < len(p.acceptors); idx++ {
-		if _, found := rms[p.acceptors[idx]]; found {
-			p.acceptors = append(p.acceptors[:idx], p.acceptors[idx+1:]...)
-			idx--
+	p.topology = topology
+	rmsRemoved := topology.RMsRemoved()
+	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rmsRemoved)
+	if _, found := rmsRemoved[p.proposerManager.RMId]; found {
+		return
+	}
+	// create new acceptors slice because the initial slice can be
+	// shared with proposals.
+	acceptors := make([]common.RMId, 0, len(p.acceptors))
+	for _, rmId := range p.acceptors {
+		if _, found := rmsRemoved[rmId]; !found {
+			acceptors = append(acceptors, rmId)
 		}
 	}
-	if p.currentState == &p.proposerReceiveGloballyComplete {
-		for rmId := range rms {
+	p.acceptors = acceptors
+
+	switch p.currentState {
+	case &p.proposerAwaitBallots, &p.proposerReceiveOutcomes, &p.proposerAwaitLocallyComplete:
+		if p.outcomeAccumulator.TopologyChange(topology) {
+			p.allAcceptorsAgree()
+		}
+	case &p.proposerReceiveGloballyComplete:
+		for rmId := range rmsRemoved {
 			p.TxnGloballyCompleteReceived(rmId)
 		}
-	} else if p.outcomeAccumulator.TopologyChange(topology) {
-		p.allAcceptorsAgree()
+	case &p.proposerAwaitFinished:
+		// do nothing
 	}
 }
 

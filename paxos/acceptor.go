@@ -307,7 +307,6 @@ func (aalc *acceptorAwaitLocallyComplete) TopologyChange(topology *configuration
 	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
 		aalc.TxnSubmissionCompleteReceived(aalc.txnSubmitter)
 	}
-
 }
 
 func (aalc *acceptorAwaitLocallyComplete) maybeDelete() {

@@ -1466,7 +1466,11 @@ func (task *migrateAwaitImmigrations) tick() error {
 		// too many failures right now
 		return nil
 	}
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	active, passive = active[:fInc], append(active[fInc:], passive...)
 	passive = append(passive, next.LostRMIds...)
+
+	log.Printf("Topology: Marking local immigration completed. Active: %v, Passive: %v", active, passive)
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
@@ -1532,6 +1536,8 @@ func (task *installCompletion) tick() error {
 		// too many failures right now
 		return nil
 	}
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	active, passive = active[:fInc], append(active[fInc:], passive...)
 	passive = append(passive, next.LostRMIds...)
 
 	topology := task.active.Clone()
