@@ -11,101 +11,131 @@ import (
 
 // OutcomeAccumulator groups together all the different outcomes we've
 // received for a given txn. Once we have at least fInc outcomes from
-// distinct acceptors which all have equal Clocks, we know we have a
+// distinct acceptors which all have equal Ids, we know we have a
 // consensus on the result.
 type OutcomeAccumulator struct {
-	acceptorIdToTxnOutcome map[common.RMId]*txnOutcome
-	outcomes               []*txnOutcome
-	decidingOutcome        *txnOutcome
-	pendingTGC             map[common.RMId]server.EmptyStruct
+	acceptors              common.RMIds
+	acceptorIdToTxnOutcome map[common.RMId]*acceptorIdxWithTxnOutcome
+	winningOutcome         *txnOutcome
+	allKnownOutcomes       []*txnOutcome
 	fInc                   int
-	acceptorCount          int
+	pendingTGC             int
+}
+
+type acceptorIdxWithTxnOutcome struct {
+	idx         int
+	tgcReceived bool
+	tOut        *txnOutcome
+}
+
+type txnOutcome struct {
+	outcome              *outcomeEqualId
+	acceptors            common.RMIds
+	outcomeReceivedCount int
 }
 
 func NewOutcomeAccumulator(fInc int, acceptors common.RMIds) *OutcomeAccumulator {
-	pendingTGC := make(map[common.RMId]server.EmptyStruct, len(acceptors))
-	for _, rmId := range acceptors {
-		pendingTGC[rmId] = server.EmptyStructVal
+	acceptorIdToTxnOutcome := make(map[common.RMId]*acceptorIdxWithTxnOutcome, len(acceptors))
+	ids := make([]acceptorIdxWithTxnOutcome, len(acceptors))
+	for idx, rmId := range acceptors {
+		ptr := &ids[idx]
+		ptr.idx = idx
+		acceptorIdToTxnOutcome[rmId] = ptr
 	}
 	return &OutcomeAccumulator{
-		acceptorIdToTxnOutcome: make(map[common.RMId]*txnOutcome),
-		outcomes:               []*txnOutcome{},
-		pendingTGC:             pendingTGC,
+		acceptors:              acceptors,
+		acceptorIdToTxnOutcome: acceptorIdToTxnOutcome,
+		winningOutcome:         nil,
+		allKnownOutcomes:       make([]*txnOutcome, 0, 1),
 		fInc:                   fInc,
-		acceptorCount:          len(acceptors),
+		pendingTGC:             len(acceptors),
 	}
 }
 
 func (oa *OutcomeAccumulator) TopologyChange(topology *configuration.Topology) bool {
-	result := false
 	for rmId := range topology.RMsRemoved() {
-		if _, found := oa.pendingTGC[rmId]; found {
-			delete(oa.pendingTGC, rmId)
-			if outcome, found := oa.acceptorIdToTxnOutcome[rmId]; found {
-				delete(oa.acceptorIdToTxnOutcome, rmId)
-				outcome.outcomeReceivedCount--
+		if accIdxTOut, found := oa.acceptorIdToTxnOutcome[rmId]; found {
+			delete(oa.acceptorIdToTxnOutcome, rmId)
+			oa.acceptors[accIdxTOut.idx] = common.RMIdEmpty
+			if l := len(oa.acceptors); l > oa.fInc {
+				oa.fInc = l
 			}
-			oa.acceptorCount--
-			if oa.acceptorCount > oa.fInc {
-				oa.fInc = oa.acceptorCount
-			}
-			if oa.decidingOutcome != nil {
-				result = result || oa.decidingOutcome.outcomeReceivedCount == oa.acceptorCount
+
+			accIdxTOut.tgcReceived = true
+			if tOut := accIdxTOut.tOut; tOut != nil {
+				accIdxTOut.tOut = nil
+				tOut.outcomeReceivedCount--
+				tOut.acceptors[accIdxTOut.idx] = common.RMIdEmpty
 			}
 		}
 	}
-	return result
+	return oa.winningOutcome != nil && oa.winningOutcome.outcomeReceivedCount == oa.acceptors.NonEmptyLen()
 }
 
-func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outcome *msgs.Outcome) (*msgs.Outcome, bool) {
-	outcomeEq := (*outcomeEqualId)(outcome)
-	if tOut, found := oa.acceptorIdToTxnOutcome[acceptorId]; found {
-		if tOut.outcome.Equal(outcomeEq) {
-			// It's completely a duplicate msg. No change to our state so just return
-			return nil, false
+func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outcome *msgs.Outcome) (*msgs.Outcome, common.RMIds, bool) {
+	if accIdxTOut, found := oa.acceptorIdToTxnOutcome[acceptorId]; found {
+		outcomeEq := (*outcomeEqualId)(outcome)
+		tOut := accIdxTOut.tOut
+
+		if tOut != nil {
+			if tOut.outcome.Equal(outcomeEq) {
+				// It's completely a duplicate msg. No change to our state so just return
+				return nil, nil, false
+			} else {
+				// The acceptor has changed its mind.
+				tOut.outcomeReceivedCount--
+				tOut.acceptors[accIdxTOut.idx] = common.RMIdEmpty
+				// Paxos guarantees that in this case, tOut != oa.winningOutcome
+			}
+		}
+
+		tOut = oa.getOutcome(outcomeEq)
+		if tOut == nil {
+			tOut = &txnOutcome{
+				outcome:              outcomeEq,
+				acceptors:            make([]common.RMId, len(oa.acceptors)),
+				outcomeReceivedCount: 1,
+			}
+			tOut.acceptors[accIdxTOut.idx] = acceptorId
+			oa.addToOutcomes(tOut)
+
 		} else {
-			// The acceptor has changed its mind.
-			tOut.outcomeReceivedCount--
-			// Paxos guarantees that in this case, tOut != oa.decidingOutcome
+			// We've checked for duplicate msgs above, so we don't need to
+			// worry about that here.
+			tOut.outcomeReceivedCount++
+			tOut.acceptors[accIdxTOut.idx] = acceptorId
+		}
+		accIdxTOut.tOut = tOut
+
+		if oa.winningOutcome == nil && oa.fInc == tOut.outcomeReceivedCount {
+			oa.winningOutcome = tOut
+			return (*msgs.Outcome)(oa.winningOutcome.outcome),
+				tOut.acceptors.NonEmpty(),
+				tOut.outcomeReceivedCount == oa.acceptors.NonEmptyLen()
+		} else if oa.winningOutcome == tOut {
+			return nil, []common.RMId{acceptorId}, tOut.outcomeReceivedCount == oa.acceptors.NonEmptyLen()
 		}
 	}
-
-	tOut := oa.getOutcome(outcomeEq)
-	if tOut == nil {
-		tOut = &txnOutcome{
-			outcome:              outcomeEq,
-			outcomeReceivedCount: 1,
-		}
-		oa.addToOutcomes(tOut)
-
-	} else {
-		// We've checked for duplicate msgs above, so we don't need to
-		// worry about that here.
-		tOut.outcomeReceivedCount++
-	}
-	oa.acceptorIdToTxnOutcome[acceptorId] = tOut
-
-	allAgreed := tOut.outcomeReceivedCount == oa.acceptorCount
-	if oa.decidingOutcome == nil && oa.fInc == tOut.outcomeReceivedCount {
-		oa.decidingOutcome = tOut
-		return (*msgs.Outcome)(oa.decidingOutcome.outcome), allAgreed
-	}
-	return nil, allAgreed
+	return nil, nil, false
 }
 
 func (oa *OutcomeAccumulator) TxnGloballyCompleteReceived(acceptorId common.RMId) bool {
-	server.Log("TGC received from", acceptorId, "; pending:", oa.pendingTGC)
-	delete(oa.pendingTGC, acceptorId)
-	return len(oa.pendingTGC) == 0
+	server.Log("TGC received from", acceptorId)
+	if accIdxTOut, found := oa.acceptorIdToTxnOutcome[acceptorId]; found && !accIdxTOut.tgcReceived {
+		accIdxTOut.tgcReceived = true
+		oa.pendingTGC--
+		return oa.pendingTGC == 0
+	}
+	return false
 }
 
 func (oa *OutcomeAccumulator) addToOutcomes(tOut *txnOutcome) {
-	oa.outcomes = append(oa.outcomes, tOut)
+	oa.allKnownOutcomes = append(oa.allKnownOutcomes, tOut)
 }
 
 func (oa *OutcomeAccumulator) getOutcome(outcome *outcomeEqualId) *txnOutcome {
-	for _, tOut := range oa.outcomes {
-		if tOut.outcome.Equal(outcome) {
+	for _, tOut := range oa.allKnownOutcomes {
+		if outcome.Equal(tOut.outcome) {
 			return tOut
 		}
 	}
@@ -113,44 +143,32 @@ func (oa *OutcomeAccumulator) getOutcome(outcome *outcomeEqualId) *txnOutcome {
 }
 
 func (oa *OutcomeAccumulator) IsAllAborts() []common.RMId {
-	count := len(oa.acceptorIdToTxnOutcome)
-	for _, outcome := range oa.outcomes {
-		if outcome.outcomeReceivedCount == count && (*msgs.Outcome)(outcome.outcome).Which() == msgs.OUTCOME_ABORT {
-			acceptors := make([]common.RMId, 0, count)
-			for rmId := range oa.acceptorIdToTxnOutcome {
-				acceptors = append(acceptors, rmId)
+	var nonEmpty *txnOutcome
+	for _, tOut := range oa.allKnownOutcomes {
+		if tOut.outcomeReceivedCount != 0 {
+			if nonEmpty == nil && (*msgs.Outcome)(tOut.outcome).Which() == msgs.OUTCOME_ABORT {
+				nonEmpty = tOut
+			} else {
+				return nil
 			}
-			return acceptors
 		}
+	}
+
+	if nonEmpty != nil {
+		return nonEmpty.acceptors.NonEmpty()
 	}
 	return nil
 }
 
 func (oa *OutcomeAccumulator) Status(sc *server.StatusConsumer) {
-	outcomeToAcceptors := make(map[*txnOutcome][]common.RMId)
-	acceptors := make([]common.RMId, 0, len(oa.acceptorIdToTxnOutcome))
-	for rmId, outcome := range oa.acceptorIdToTxnOutcome {
-		acceptors = append(acceptors, rmId)
-		if list, found := outcomeToAcceptors[outcome]; found {
-			outcomeToAcceptors[outcome] = append(list, rmId)
-		} else {
-			outcomeToAcceptors[outcome] = []common.RMId{rmId}
-		}
-	}
-	sc.Emit(fmt.Sprintf("- known outcomes from acceptors: %v", acceptors))
-	sc.Emit(fmt.Sprintf("- unique outcomes: %v", outcomeToAcceptors))
-	sc.Emit(fmt.Sprintf("- outcome decided? %v", oa.decidingOutcome != nil))
-	sc.Emit(fmt.Sprintf("- pending TGCs from: %v", oa.pendingTGC))
+	sc.Emit(fmt.Sprintf("- unique outcomes: %v", oa.allKnownOutcomes))
+	sc.Emit(fmt.Sprintf("- outcome decided? %v", oa.winningOutcome != nil))
+	sc.Emit(fmt.Sprintf("- pending TGC count: %v", oa.pendingTGC))
 	sc.Join()
 }
 
-type txnOutcome struct {
-	outcome              *outcomeEqualId
-	outcomeReceivedCount int
-}
-
 func (to *txnOutcome) String() string {
-	return fmt.Sprintf("%v:%v", to.outcome, to.outcomeReceivedCount)
+	return fmt.Sprintf("%v:%v", to.outcome, to.acceptors.NonEmpty())
 }
 
 type outcomeEqualId msgs.Outcome
