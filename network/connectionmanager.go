@@ -580,7 +580,6 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, onIns
 	}
 	// todo - get rid of these settopolgies too.
 	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, onInstalled)
-	cm.Dispatchers.AcceptorDispatcher.SetTopology(topology)
 }
 
 func (cm *ConnectionManager) cloneRMToServer() map[common.RMId]paxos.Connection {
@@ -603,6 +602,7 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 		serverConnections = append(serverConnections, server)
 	}
 	sc.Emit(fmt.Sprintf("ServerConnectionObservers: %v", len(cm.serverConnObservers.observers)))
+	sc.Emit(fmt.Sprintf("TopologyObservers: %v", len(cm.topologyObservers.observers)))
 	rms := make([]common.RMId, 0, len(cm.rmToServer))
 	for rmId := range cm.rmToServer {
 		rms = append(rms, rmId)

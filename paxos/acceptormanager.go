@@ -40,6 +40,10 @@ func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm Connectio
 	}
 }
 
+func (am *AcceptorManager) init() {
+	am.Topology = am.ConnectionManager.AddTopologyObserver(am)
+}
+
 func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceId, vUUId *common.VarUUId) *instance {
 	if inst, found := am.instances[*instId]; found {
 		return inst
@@ -134,13 +138,15 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (am *AcceptorManager) SetTopology(topology *configuration.Topology) {
-	am.Topology = topology
-	for _, ai := range am.acceptors {
-		if ai.acceptor != nil {
-			ai.acceptor.TopologyChange(topology)
+func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology) {
+	am.Exe.Enqueue(func() {
+		am.Topology = topology
+		for _, ai := range am.acceptors {
+			if ai.acceptor != nil {
+				ai.acceptor.TopologyChange(topology)
+			}
 		}
-	}
+	})
 }
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {

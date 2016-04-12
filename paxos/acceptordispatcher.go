@@ -7,7 +7,6 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"log"
@@ -25,7 +24,9 @@ func NewAcceptorDispatcher(rmId common.RMId, cm ConnectionManager, count uint8, 
 	}
 	ad.Dispatcher.Init(count)
 	for idx, exe := range ad.Executors {
-		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db)
+		am := NewAcceptorManager(rmId, exe, cm, db)
+		ad.acceptormanagers[idx] = am
+		exe.Enqueue(am.init)
 	}
 	ad.loadFromDisk(db)
 	return ad
@@ -49,13 +50,6 @@ func (ad *AcceptorDispatcher) TxnLocallyCompleteReceived(sender common.RMId, tlc
 func (ad *AcceptorDispatcher) TxnSubmissionCompleteReceived(sender common.RMId, tsc *msgs.TxnSubmissionComplete) {
 	txnId := common.MakeTxnId(tsc.TxnId())
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TxnSubmissionCompleteReceived(sender, txnId, tsc) })
-}
-
-func (ad *AcceptorDispatcher) SetTopology(topology *configuration.Topology) {
-	for idx, exe := range ad.Executors {
-		mgr := ad.acceptormanagers[idx]
-		exe.Enqueue(func() { mgr.SetTopology(topology) })
-	}
 }
 
 func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {
