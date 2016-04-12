@@ -8,13 +8,13 @@ import (
 )
 
 type ConnectionManager interface {
-	AddSender(sender Sender)
-	RemoveSenderSync(sender Sender)
-	RemoveSenderAsync(sender Sender)
+	AddServerConnectionObserver(sender ServerConnectionObserver)
+	RemoveServerConnectionObserverSync(sender ServerConnectionObserver)
+	RemoveServerConnectionObserverAsync(sender ServerConnectionObserver)
 	GetClient(uint32, uint32) ClientConnection
 }
 
-type Sender interface {
+type ServerConnectionObserver interface {
 	ConnectedRMs(map[common.RMId]Connection)
 	ConnectionLost(common.RMId, map[common.RMId]Connection)
 	ConnectionEstablished(common.RMId, Connection, map[common.RMId]Connection)
@@ -51,7 +51,7 @@ func NewOneShotSender(msg []byte, cm ConnectionManager, recipients ...common.RMI
 		connectionManager: cm,
 	}
 	server.Log(oss, "Adding one shot sender with recipients", recipients)
-	cm.AddSender(oss)
+	cm.AddServerConnectionObserver(oss)
 	return oss
 }
 
@@ -64,7 +64,7 @@ func (s *OneShotSender) ConnectedRMs(conns map[common.RMId]Connection) {
 	}
 	if len(s.remaining) == 0 {
 		server.Log(s, "Removing one shot sender")
-		s.connectionManager.RemoveSenderAsync(s)
+		s.connectionManager.RemoveServerConnectionObserverAsync(s)
 	}
 }
 
@@ -76,7 +76,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 		conn.Send(s.msg)
 		if len(s.remaining) == 0 {
 			server.Log(s, "Removing one shot sender")
-			s.connectionManager.RemoveSenderAsync(s)
+			s.connectionManager.RemoveServerConnectionObserverAsync(s)
 		}
 	}
 }

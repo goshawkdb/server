@@ -48,40 +48,39 @@ type Connection struct {
 }
 
 type connectionMsg interface {
-	connectionMsgWitness()
+	witness() connectionMsg
 }
 
-type connectionMsgShutdown struct{}
+type connectionMsgBasic struct{}
 
-func (cms *connectionMsgShutdown) connectionMsgWitness() {}
+func (cmb connectionMsgBasic) witness() connectionMsg { return cmb }
 
-var connectionMsgShutdownInst = &connectionMsgShutdown{}
+type connectionMsgShutdown struct{ connectionMsgBasic }
 
 type connectionMsgSend []byte
 
-func (cms connectionMsgSend) connectionMsgWitness() {}
+func (cms connectionMsgSend) witness() connectionMsg { return cms }
 
-type connectionMsgOutcomeReceived func(*connectionRun)
-
-func (cor connectionMsgOutcomeReceived) connectionMsgWitness() {}
+type connectionMsgOutcomeReceived struct {
+	connectionMsgBasic
+	sender  common.RMId
+	txnId   *common.TxnId
+	outcome *msgs.Outcome
+}
 
 type connectionMsgTopologyChange struct {
+	connectionMsgBasic
 	topology *configuration.Topology
 	servers  map[common.RMId]paxos.Connection
 }
 
-func (ctc *connectionMsgTopologyChange) connectionMsgWitness() {}
-
-type connectionMsgStatus server.StatusConsumer
-
-func (cms *connectionMsgStatus) connectionMsgWitness() {}
-
-type connectionMsgDisableHashCodes map[common.RMId]paxos.Connection
-
-func (cmdhc connectionMsgDisableHashCodes) connectionMsgWitness() {}
+type connectionMsgStatus struct {
+	connectionMsgBasic
+	*server.StatusConsumer
+}
 
 func (conn *Connection) Shutdown(sync bool) {
-	if conn.enqueueQuery(connectionMsgShutdownInst) && sync {
+	if conn.enqueueQuery(connectionMsgShutdown{}) && sync {
 		conn.cellTail.Wait()
 	}
 }
@@ -91,21 +90,27 @@ func (conn *Connection) Send(msg []byte) {
 }
 
 func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
-	conn.enqueueQuery(connectionMsgOutcomeReceived(func(cr *connectionRun) {
-		cr.submitter.SubmissionOutcomeReceived(sender, txnId, outcome)
-	}))
+	conn.enqueueQuery(connectionMsgOutcomeReceived{
+		sender:  sender,
+		txnId:   txnId,
+		outcome: outcome,
+	})
 }
 
 func (conn *Connection) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(&connectionMsgTopologyChange{
+	conn.enqueueQuery(connectionMsgTopologyChange{
 		topology: topology,
 		servers:  servers,
 	})
 }
 
 func (conn *Connection) Status(sc *server.StatusConsumer) {
-	conn.enqueueQuery((*connectionMsgStatus)(sc))
+	conn.enqueueQuery(connectionMsgStatus{StatusConsumer: sc})
 }
+
+type connectionMsgDisableHashCodes map[common.RMId]paxos.Connection
+
+func (cmdhc connectionMsgDisableHashCodes) witness() connectionMsg { return cmdhc }
 
 func (conn *Connection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
 	conn.enqueueQuery(connectionMsgDisableHashCodes(servers))
@@ -216,16 +221,16 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 
 func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error) {
 	switch msgT := msg.(type) {
-	case *connectionMsgShutdown:
+	case connectionMsgShutdown:
 		terminate = true
 		conn.currentState = nil
 	case *connectionDelay:
 		msgT.received()
 	case *connectionBeater:
 		err = conn.beat()
-	case *connectionReadError:
+	case connectionReadError:
 		conn.reader = nil
-		err = conn.connectionRun.maybeRestartConnection(msgT)
+		err = conn.connectionRun.maybeRestartConnection(msgT.error)
 	case *connectionReadMessage:
 		err = conn.handleMsgFromServer((*msgs.Message)(msgT))
 	case *connectionReadClientMessage:
@@ -234,14 +239,14 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
 		conn.outcomeReceived(msgT)
-	case *connectionMsgTopologyChange:
+	case connectionMsgTopologyChange:
 		err = conn.topologyChange(msgT)
 	case connectionMsgDisableHashCodes:
 		conn.disableHashCodes(msgT)
-	case *connectionMsgStatus:
-		conn.status((*server.StatusConsumer)(msgT))
+	case connectionMsgStatus:
+		conn.status(msgT.StatusConsumer)
 	default:
-		err = fmt.Errorf("Fatal to Connection: Received unexpected message: %v", msgT)
+		err = fmt.Errorf("Fatal to Connection: Received unexpected message: %#v", msgT)
 	}
 	return
 }
@@ -254,7 +259,7 @@ func (conn *Connection) handleShutdown(err error) {
 	conn.maybeStopReaderAndCloseSocket()
 	if conn.isClient {
 		conn.connectionManager.ClientLost(conn.ConnectionNumber)
-		conn.connectionManager.RemoveSenderAsync(conn)
+		conn.connectionManager.RemoveServerConnectionObserverAsync(conn)
 		if conn.submitter != nil {
 			conn.submitter.Shutdown()
 		}
@@ -305,6 +310,7 @@ func (conn *Connection) status(sc *server.StatusConsumer) {
 // Delay
 
 type connectionDelay struct {
+	connectionMsgBasic
 	*Connection
 	delay *time.Timer
 }
@@ -330,8 +336,6 @@ func (cd *connectionDelay) start() (bool, error) {
 	}
 	return false, nil
 }
-
-func (cd *connectionDelay) connectionMsgWitness() {}
 
 func (cd *connectionDelay) received() {
 	if cd.currentState == cd {
@@ -669,11 +673,11 @@ func (cr *connectionRun) init(conn *Connection) {
 	cr.Connection = conn
 }
 
-func (cr *connectionRun) outcomeReceived(f func(*connectionRun)) {
+func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 	if cr.currentState != cr {
 		return
 	}
-	f(cr)
+	cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
 }
 
 func (cr *connectionRun) start() (bool, error) {
@@ -696,7 +700,7 @@ func (cr *connectionRun) start() (bool, error) {
 	}
 	if cr.isClient {
 		topology, servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
-		cr.connectionManager.AddSender(cr.Connection)
+		cr.connectionManager.AddServerConnectionObserver(cr.Connection)
 		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount, cr.connectionManager)
 		cr.submitter.TopologyChange(topology, servers)
 	}
@@ -716,7 +720,7 @@ func (cr *connectionRun) start() (bool, error) {
 	return false, nil
 }
 
-func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) error {
+func (cr *connectionRun) topologyChange(tChange connectionMsgTopologyChange) error {
 	if cr.currentState != cr {
 		return nil
 	}
@@ -909,6 +913,7 @@ func (cr *connectionRun) maybeStopReaderAndCloseSocket() {
 // Beater
 
 type connectionBeater struct {
+	connectionMsgBasic
 	*Connection
 	terminate  chan struct{}
 	terminated *sync.WaitGroup
@@ -943,8 +948,6 @@ func (cb *connectionBeater) beat() {
 		}
 	}
 }
-
-func (cb *connectionBeater) connectionMsgWitness() {}
 
 // Reader
 
@@ -990,7 +993,7 @@ func (cr *connectionReader) read(fun func(*capn.Segment) bool) {
 					return
 				}
 			} else {
-				cr.enqueueQuery(&connectionReadError{err})
+				cr.enqueueQuery(connectionReadError{error: err})
 				return
 			}
 		}
@@ -999,14 +1002,13 @@ func (cr *connectionReader) read(fun func(*capn.Segment) bool) {
 
 type connectionReadMessage msgs.Message
 
-func (crm *connectionReadMessage) connectionMsgWitness() {}
+func (crm *connectionReadMessage) witness() connectionMsg { return crm }
 
 type connectionReadClientMessage cmsgs.ClientMessage
 
-func (crcm *connectionReadClientMessage) connectionMsgWitness() {}
+func (crcm *connectionReadClientMessage) witness() connectionMsg { return crcm }
 
 type connectionReadError struct {
+	connectionMsgBasic
 	error
 }
-
-func (cre *connectionReadError) connectionMsgWitness() {}

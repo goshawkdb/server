@@ -239,7 +239,7 @@ func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Co
 }
 
 func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
-	lc.connectionManager.AddSender(lc)
+	lc.connectionManager.AddServerConnectionObserver(lc)
 	var (
 		err       error
 		queryChan <-chan localConnectionMsg
@@ -274,7 +274,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	if err != nil {
 		log.Println("LocalConnection error:", err)
 	}
-	lc.connectionManager.RemoveSenderAsync(lc)
+	lc.connectionManager.RemoveServerConnectionObserverAsync(lc)
 	lc.submitter.Shutdown()
 	lc.cellTail.Terminate()
 }

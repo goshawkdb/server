@@ -85,15 +85,15 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
 	var removeSenderCh chan server.EmptyStruct
 	if delay == 0 {
-		sts.connectionManager.AddSender(txnSender)
+		sts.connectionManager.AddServerConnectionObserver(txnSender)
 	} else {
 		removeSenderCh = make(chan server.EmptyStruct)
 		go func() {
 			// fmt.Printf("%v ", delay)
 			time.Sleep(delay)
-			sts.connectionManager.AddSender(txnSender)
+			sts.connectionManager.AddServerConnectionObserver(txnSender)
 			<-removeSenderCh
-			sts.connectionManager.RemoveSenderAsync(txnSender)
+			sts.connectionManager.RemoveServerConnectionObserverAsync(txnSender)
 		}()
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
@@ -102,7 +102,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 		if delay == 0 {
-			sts.connectionManager.RemoveSenderAsync(txnSender)
+			sts.connectionManager.RemoveServerConnectionObserverAsync(txnSender)
 		} else {
 			close(removeSenderCh)
 		}
@@ -124,7 +124,8 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 
 	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.FInc()), acceptors)
 	consumer := func(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
-		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
+		// FIXME
+		if outcome, _, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
 			shutdownFun(false)
 			continuation(txnId, outcome)

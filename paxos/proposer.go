@@ -207,7 +207,7 @@ func (pab *proposerAwaitBallots) start() {
 	pab.submitter = common.RMId(pab.txn.TxnCap.Submitter())
 	pab.submitterBootCount = pab.txn.TxnCap.SubmitterBootCount()
 	if pab.txn.Retry {
-		pab.proposerManager.ConnectionManager.AddSender(pab)
+		pab.proposerManager.ConnectionManager.AddServerConnectionObserver(pab)
 	}
 }
 
@@ -281,7 +281,7 @@ func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 
 func (pro *proposerReceiveOutcomes) start() {
 	if pro.txn != nil && pro.txn.Retry {
-		pro.proposerManager.ConnectionManager.RemoveSenderAsync(&pro.proposerAwaitBallots)
+		pro.proposerManager.ConnectionManager.RemoveServerConnectionObserverAsync(&pro.proposerAwaitBallots)
 	}
 	if pro.outcome != nil {
 		// we've received enough outcomes already!
@@ -306,7 +306,8 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 		return
 	}
 
-	outcome, allAgreed := pro.outcomeAccumulator.BallotOutcomeReceived(sender, outcome)
+	// FIXME
+	outcome, _, allAgreed := pro.outcomeAccumulator.BallotOutcomeReceived(sender, outcome)
 	if allAgreed {
 		pro.allAcceptorsAgree()
 	}
@@ -450,7 +451,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		tlcMsg := MakeTxnLocallyCompleteMsg(prgc.txnId)
 		prgc.tlcSender = NewRepeatingSender(tlcMsg, prgc.acceptors...)
 		server.Log(prgc.txnId, "Adding TLC Sender to", prgc.acceptors)
-		prgc.proposerManager.ConnectionManager.AddSender(prgc.tlcSender)
+		prgc.proposerManager.ConnectionManager.AddServerConnectionObserver(prgc.tlcSender)
 	}
 }
 
@@ -511,7 +512,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 				return
 			}
 			paf.proposerManager.Exe.Enqueue(func() {
-				paf.proposerManager.ConnectionManager.RemoveSenderAsync(paf.tlcSender)
+				paf.proposerManager.ConnectionManager.RemoveServerConnectionObserverAsync(paf.tlcSender)
 				paf.tlcSender = nil
 				paf.proposerManager.TxnFinished(paf.txnId)
 			})

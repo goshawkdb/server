@@ -44,27 +44,25 @@ type topologyTransmogrifierMsg interface {
 	witness() topologyTransmogrifierMsg
 }
 
-type topologyTransmogrifierMsgShutdown struct{}
+type topologyTransmogrifierMsgBasic struct{}
 
-func (ttms *topologyTransmogrifierMsgShutdown) witness() topologyTransmogrifierMsg { return ttms }
+func (ttmb topologyTransmogrifierMsgBasic) witness() topologyTransmogrifierMsg { return ttmb }
 
-var topologyTransmogrifierMsgShutdownInst = &topologyTransmogrifierMsgShutdown{}
+type topologyTransmogrifierMsgShutdown struct{ topologyTransmogrifierMsgBasic }
 
 func (tt *TopologyTransmogrifier) Shutdown() {
-	if tt.enqueueQuery(topologyTransmogrifierMsgShutdownInst) {
+	if tt.enqueueQuery(topologyTransmogrifierMsgShutdown{}) {
 		tt.cellTail.Wait()
 	}
 }
 
-type topologyTransmogrifierMsgRequestConfigChange configuration.NextConfiguration
-
-func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
-	tt.enqueueQuery((*topologyTransmogrifierMsgRequestConfigChange)(
-		&configuration.NextConfiguration{Configuration: config}))
+type topologyTransmogrifierMsgRequestConfigChange struct {
+	topologyTransmogrifierMsgBasic
+	config *configuration.Configuration
 }
 
-func (ttmrcc *topologyTransmogrifierMsgRequestConfigChange) witness() topologyTransmogrifierMsg {
-	return ttmrcc
+func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
+	tt.enqueueQuery(topologyTransmogrifierMsgRequestConfigChange{config: config})
 }
 
 type topologyTransmogrifierMsgSetActiveConnections map[common.RMId]paxos.Connection
@@ -73,10 +71,9 @@ func (ttmsac topologyTransmogrifierMsgSetActiveConnections) witness() topologyTr
 	return ttmsac
 }
 
-type topologyTransmogrifierMsgTopologyObserved configuration.Topology
-
-func (ttmvc *topologyTransmogrifierMsgTopologyObserved) witness() topologyTransmogrifierMsg {
-	return ttmvc
+type topologyTransmogrifierMsgTopologyObserved struct {
+	topologyTransmogrifierMsgBasic
+	topology *configuration.Topology
 }
 
 type topologyTransmogrifierMsgExe func() error
@@ -84,30 +81,26 @@ type topologyTransmogrifierMsgExe func() error
 func (ttme topologyTransmogrifierMsgExe) witness() topologyTransmogrifierMsg { return ttme }
 
 type topologyTransmogrifierMsgMigration struct {
+	topologyTransmogrifierMsgBasic
 	migration *msgs.Migration
 	sender    common.RMId
 }
 
-func (ttmm *topologyTransmogrifierMsgMigration) witness() topologyTransmogrifierMsg { return ttmm }
-
 func (tt *TopologyTransmogrifier) MigrationReceived(sender common.RMId, migration *msgs.Migration) {
-	tt.enqueueQuery(&topologyTransmogrifierMsgMigration{
+	tt.enqueueQuery(topologyTransmogrifierMsgMigration{
 		migration: migration,
 		sender:    sender,
 	})
 }
 
 type topologyTransmogrifierMsgMigrationComplete struct {
+	topologyTransmogrifierMsgBasic
 	complete *msgs.MigrationComplete
 	sender   common.RMId
 }
 
-func (ttmmc *topologyTransmogrifierMsgMigrationComplete) witness() topologyTransmogrifierMsg {
-	return ttmmc
-}
-
 func (tt *TopologyTransmogrifier) MigrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) {
-	tt.enqueueQuery(&topologyTransmogrifierMsgMigrationComplete{
+	tt.enqueueQuery(topologyTransmogrifierMsgMigrationComplete{
 		complete: migrationComplete,
 		sender:   sender,
 	})
@@ -173,7 +166,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 					if err != nil {
 						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 					}
-					tt.enqueueQuery((*topologyTransmogrifierMsgTopologyObserved)(topology))
+					tt.enqueueQuery(topologyTransmogrifierMsgTopologyObserved{topology: topology})
 				},
 				Cancel: func(v *eng.Var) {
 					panic("Subscriber on topology var has been cancelled!")
@@ -183,7 +176,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 	}, true, configuration.TopologyVarUUId)
 	<-subscriberInstalled
 
-	cm.AddSender(tt)
+	cm.AddServerConnectionObserver(tt)
 
 	go tt.actorLoop(head, config)
 	return tt, tt.localEstablished
@@ -221,22 +214,24 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 			}
 		} else if msg, ok := <-queryChan; ok {
 			switch msgT := msg.(type) {
-			case *topologyTransmogrifierMsgShutdown:
+			case topologyTransmogrifierMsgShutdown:
 				terminate = true
 			case topologyTransmogrifierMsgSetActiveConnections:
 				err = tt.activeConnectionsChange(msgT)
-			case *topologyTransmogrifierMsgTopologyObserved:
-				server.Log("Topology: New topology observed:", msgT)
-				err = tt.setActive((*configuration.Topology)(msgT))
-			case *topologyTransmogrifierMsgRequestConfigChange:
-				server.Log("Topology: Topology change request:", msgT)
-				tt.selectGoal((*configuration.NextConfiguration)(msgT))
-			case *topologyTransmogrifierMsgMigration:
+			case topologyTransmogrifierMsgTopologyObserved:
+				server.Log("Topology: New topology observed:", msgT.topology)
+				err = tt.setActive(msgT.topology)
+			case topologyTransmogrifierMsgRequestConfigChange:
+				server.Log("Topology: Topology change request:", msgT.config)
+				tt.selectGoal(&configuration.NextConfiguration{Configuration: msgT.config})
+			case topologyTransmogrifierMsgMigration:
 				err = tt.migrationReceived(msgT)
-			case *topologyTransmogrifierMsgMigrationComplete:
+			case topologyTransmogrifierMsgMigrationComplete:
 				err = tt.migrationCompleteReceived(msgT)
 			case topologyTransmogrifierMsgExe:
 				err = msgT()
+			default:
+				err = fmt.Errorf("Fatal to TopologyTransmogrifier: Received unexpected message: %#v", msgT)
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -246,7 +241,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 	if err != nil {
 		log.Println("TopologyTransmogrifier error:", err)
 	}
-	tt.connectionManager.RemoveSenderAsync(tt)
+	tt.connectionManager.RemoveServerConnectionObserverAsync(tt)
 	tt.cellTail.Terminate()
 }
 
@@ -418,7 +413,7 @@ func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask) {
 	}()
 }
 
-func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogrifierMsgMigration) error {
+func (tt *TopologyTransmogrifier) migrationReceived(migration topologyTransmogrifierMsgMigration) error {
 	version := migration.migration.Version()
 	if version <= tt.active.Version {
 		// This topology change has been completed. Ignore this migration.
@@ -465,7 +460,7 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration *topologyTransmogr
 	return nil
 }
 
-func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete *topologyTransmogrifierMsgMigrationComplete) error {
+func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete topologyTransmogrifierMsgMigrationComplete) error {
 	version := migrationComplete.complete.Version()
 	sender := migrationComplete.sender
 	server.Log("Topology: MCR from", sender, "v", version)
@@ -540,7 +535,7 @@ type topologyTask interface {
 type targetConfig struct {
 	*TopologyTransmogrifier
 	config *configuration.NextConfiguration
-	sender paxos.Sender
+	sender paxos.ServerConnectionObserver
 }
 
 func (task *targetConfig) tick() error {
@@ -590,12 +585,12 @@ func (task *targetConfig) shareGoalWithAll() {
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
 	task.sender = paxos.NewRepeatingAllSender(server.SegToBytes(seg))
-	task.connectionManager.AddSender(task.sender)
+	task.connectionManager.AddServerConnectionObserver(task.sender)
 }
 
 func (task *targetConfig) ensureRemoveTaskSender() {
 	if task.sender != nil {
-		task.connectionManager.RemoveSenderAsync(task.sender)
+		task.connectionManager.RemoveServerConnectionObserverAsync(task.sender)
 		task.sender = nil
 	}
 }
@@ -1862,13 +1857,13 @@ func newEmigrator(task *migrate) *emigrator {
 		connectionManager: task.connectionManager,
 		topology:          task.active,
 	}
-	e.connectionManager.AddSender(e)
+	e.connectionManager.AddServerConnectionObserver(e)
 	return e
 }
 
 func (e *emigrator) stopAsync() {
 	atomic.StoreInt32(&e.stop, 1)
-	e.connectionManager.RemoveSenderAsync(e)
+	e.connectionManager.RemoveServerConnectionObserverAsync(e)
 }
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -1978,7 +1973,7 @@ func (it *dbIterator) iterate() {
 	for _, sb := range it.batch {
 		sb.flush()
 	}
-	it.connectionManager.AddSender(it)
+	it.connectionManager.AddServerConnectionObserver(it)
 }
 
 func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) ([]*msgs.Var, error) {
@@ -2036,7 +2031,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 }
 
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	defer it.connectionManager.RemoveSenderAsync(it)
+	defer it.connectionManager.RemoveServerConnectionObserverAsync(it)
 
 	if atomic.LoadInt32(&it.stop) == 1 {
 		return
