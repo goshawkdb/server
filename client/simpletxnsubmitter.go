@@ -137,7 +137,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 
 func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, bufferOnTopologyChange bool) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() || (bufferOnTopologyChange && sts.topology.Next() != nil) {
+	if sts.topology.IsBlank() || (sts.topology.Next() != nil && bufferOnTopologyChange) {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, bufferOnTopologyChange) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
@@ -147,7 +147,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		return nil
 	}
 	version := sts.topology.Version
-	if next := sts.topology.Next(); !bufferOnTopologyChange && next != nil {
+	if next := sts.topology.Next(); next != nil {
 		version = next.Version
 	}
 	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version)
@@ -158,28 +158,39 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	return nil
 }
 
-func (sts *SimpleTxnSubmitter) TopologyChange(topology *configuration.Topology, servers map[common.RMId]paxos.Connection) {
-	if topology != nil {
-		server.Log("TM setting topology to", topology)
-		sts.topology = topology
-		if topology.RMs().NonEmptyLen() >= int(topology.TwoFInc) {
-			sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
-			sts.hashCache.SetResolver(sts.resolver)
-		}
-		if topology.Root.VarUUId != nil {
-			sts.hashCache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
+func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {
+	if topology == nil || topology.RMs().NonEmptyLen() < int(topology.TwoFInc) {
+		// topology is needed for client txns. As we're booting up, we
+		// just don't care.
+		return
+	}
+	sts.topology = topology
+	sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
+	sts.hashCache.SetResolver(sts.resolver)
+	if topology.Root.VarUUId != nil {
+		sts.hashCache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
+	}
+	sts.calculateDisabledHashcodes()
+}
+
+func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) {
+	sts.connections = servers
+	sts.calculateDisabledHashcodes()
+}
+
+func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() {
+	if sts.topology == nil || sts.connections == nil {
+		return
+	}
+	sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
+	for _, rmId := range sts.topology.RMs() {
+		if rmId == common.RMIdEmpty {
+			continue
+		} else if _, found := sts.connections[rmId]; !found {
+			sts.disabledHashCodes[rmId] = server.EmptyStructVal
 		}
 	}
-	if servers != nil && sts.topology != nil {
-		sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
-		for _, rmId := range sts.topology.RMs() {
-			if _, found := servers[rmId]; !found && rmId != common.RMIdEmpty {
-				sts.disabledHashCodes[rmId] = server.EmptyStructVal
-			}
-		}
-		sts.connections = servers
-		server.Log("TM disabled hash codes", sts.disabledHashCodes)
-	}
+	server.Log("TM disabled hash codes", sts.disabledHashCodes)
 	// need to wait until we've updated disabledHashCodes before
 	// starting up any buffered txns.
 	if sts.topology != nil && !sts.topology.IsBlank() && sts.bufferedSubmissions != nil {
@@ -299,7 +310,7 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 			}
 
 			if clientAction.Which() == cmsgs.CLIENTACTION_ROLL && hashCodes[0] != sts.rmId {
-				if _, found := sts.disabledHashCodes[hashCodes[0]]; !found {
+				if _, found := sts.connections[hashCodes[0]]; found {
 					return nil, eng.AbortRollError
 				}
 			}

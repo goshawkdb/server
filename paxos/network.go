@@ -8,16 +8,23 @@ import (
 )
 
 type ConnectionManager interface {
-	AddServerConnectionObserver(sender ServerConnectionObserver)
-	RemoveServerConnectionObserverSync(sender ServerConnectionObserver)
-	RemoveServerConnectionObserverAsync(sender ServerConnectionObserver)
-	GetClient(uint32, uint32) ClientConnection
+	AddTopologyObserver(obs TopologyObserver) *configuration.Topology
+	AddServerConnectionObserver(obs ServerConnectionObserver)
+	RemoveServerConnectionObserverSync(obs ServerConnectionObserver)
+	RemoveServerConnectionObserverAsync(obs ServerConnectionObserver)
+	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
+	ClientLost(connNumber uint32, conn ClientConnection)
+	GetClient(bootNumber, connNumber uint32) ClientConnection
 }
 
 type ServerConnectionObserver interface {
 	ConnectedRMs(map[common.RMId]Connection)
 	ConnectionLost(common.RMId, map[common.RMId]Connection)
 	ConnectionEstablished(common.RMId, Connection, map[common.RMId]Connection)
+}
+
+type TopologyObserver interface {
+	TopologyChanged(*configuration.Topology)
 }
 
 type Connection interface {
@@ -30,7 +37,7 @@ type Connection interface {
 }
 
 type ClientConnection interface {
-	TopologyChange(*configuration.Topology, map[common.RMId]Connection)
+	ServerConnectionObserver
 	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *msgs.Outcome)
 }
 
