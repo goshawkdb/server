@@ -281,7 +281,7 @@ func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 
 func (pro *proposerReceiveOutcomes) start() {
 	if pro.txn != nil && pro.txn.Retry {
-		pro.proposerManager.ConnectionManager.RemoveServerConnectionSubscriberAsync(&pro.proposerAwaitBallots)
+		pro.proposerManager.ConnectionManager.RemoveServerConnectionSubscriber(&pro.proposerAwaitBallots, Async)
 	}
 	if pro.outcome != nil {
 		// we've received enough outcomes already!
@@ -512,7 +512,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 				return
 			}
 			paf.proposerManager.Exe.Enqueue(func() {
-				paf.proposerManager.ConnectionManager.RemoveServerConnectionSubscriberAsync(paf.tlcSender)
+				paf.proposerManager.ConnectionManager.RemoveServerConnectionSubscriber(paf.tlcSender, Async)
 				paf.tlcSender = nil
 				paf.proposerManager.TxnFinished(paf.txnId)
 			})

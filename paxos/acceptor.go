@@ -211,7 +211,7 @@ func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *msgs.Txn) {
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
 	if aalc.twoBSender != nil {
-		aalc.acceptorManager.ConnectionManager.RemoveServerConnectionSubscriberSync(aalc.twoBSender)
+		aalc.acceptorManager.RemoveServerConnectionSubscriber(aalc.twoBSender, Sync)
 		aalc.twoBSender = nil
 	}
 
@@ -265,7 +265,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 		server.Log(aalc.txnId, "Adding sender for 2B")
 		submitter := common.RMId(aalc.ballotAccumulator.Txn.Submitter())
 		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, aalc.tgcRecipients...)
-		aalc.acceptorManager.ConnectionManager.AddServerConnectionSubscriber(aalc.twoBSender)
+		aalc.acceptorManager.AddServerConnectionSubscriber(aalc.twoBSender)
 	}
 }
 
@@ -327,7 +327,7 @@ func (adfd *acceptorDeleteFromDisk) init(a *Acceptor, txn *msgs.Txn) {
 
 func (adfd *acceptorDeleteFromDisk) start() {
 	if adfd.twoBSender != nil {
-		adfd.acceptorManager.ConnectionManager.RemoveServerConnectionSubscriberSync(adfd.twoBSender)
+		adfd.acceptorManager.RemoveServerConnectionSubscriber(adfd.twoBSender, Sync)
 		adfd.twoBSender = nil
 	}
 	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
@@ -362,7 +362,7 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() {
 		server.Log(adfd.txnId, "Sending TGC to", adfd.tgcRecipients)
 		// If this gets lost it doesn't matter - the TLC will eventually
 		// get resent and we'll then send out another TGC.
-		NewOneShotSender(server.SegToBytes(seg), adfd.acceptorManager.ConnectionManager, adfd.tgcRecipients...)
+		NewOneShotSender(server.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
 	}
 }
 

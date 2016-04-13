@@ -181,10 +181,12 @@ type connectionManagerMsgStatus struct {
 	*server.StatusConsumer
 }
 
-func (cm *ConnectionManager) Shutdown() {
+func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
 	c := make(chan struct{})
 	cm.enqueueSyncQuery(connectionManagerMsgShutdown(c), c)
-	<-c
+	if sync == paxos.Sync {
+		<-c
+	}
 }
 
 func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string) {
@@ -234,7 +236,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConn
 	cm.Lock()
 	delete(cm.connCountToClient, connNumber)
 	cm.Unlock()
-	cm.RemoveServerConnectionSubscriberAsync(conn)
+	cm.RemoveServerConnectionSubscriber(conn, paxos.Async)
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
@@ -256,13 +258,13 @@ func (cm *ConnectionManager) AddServerConnectionSubscriber(obs paxos.ServerConne
 	cm.enqueueQuery(connectionManagerMsgServerConnAddSubscriber{ServerConnectionSubscriber: obs})
 }
 
-func (cm *ConnectionManager) RemoveServerConnectionSubscriberAsync(obs paxos.ServerConnectionSubscriber) {
-	cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
-}
-
-func (cm *ConnectionManager) RemoveServerConnectionSubscriberSync(obs paxos.ServerConnectionSubscriber) {
-	resultChan := make(chan struct{})
-	cm.enqueueSyncQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs, resultChan: resultChan}, resultChan)
+func (cm *ConnectionManager) RemoveServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber, sync paxos.Blocking) {
+	if sync == paxos.Async {
+		cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
+	} else {
+		resultChan := make(chan struct{})
+		cm.enqueueSyncQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs, resultChan: resultChan}, resultChan)
+	}
 }
 
 func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, onInstalled func()) {
@@ -414,10 +416,10 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	}
 	cm.cellTail.Terminate()
 	for _, cd := range cm.servers {
-		cd.Shutdown(true)
+		cd.Shutdown(paxos.Sync)
 	}
 	for _, cc := range cm.connCountToClient {
-		cc.Shutdown(true)
+		cc.Shutdown(paxos.Sync)
 	}
 	if shutdownChan != nil {
 		close(shutdownChan)
@@ -455,7 +457,7 @@ func (cm *ConnectionManager) setDesiredServers(hosts connectionManagerMsgSetDesi
 	}
 	for host, sconn := range cm.servers {
 		if _, found := desiredMap[host]; !found && !sconn.established {
-			sconn.Shutdown(false)
+			sconn.Shutdown(paxos.Async)
 			delete(cm.servers, host)
 		}
 	}
@@ -484,14 +486,14 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 		}
 
 		if killOld {
-			cd.Shutdown(false)
+			cd.Shutdown(paxos.Async)
 			if cd.established {
 				delete(cm.rmToServer, cd.rmId)
 				cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 			}
 		}
 		if killNew {
-			connEst.Shutdown(false)
+			connEst.Shutdown(paxos.Async)
 			if killOld {
 				cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
 					Connection: NewConnectionToDial(cd.host, cm),
@@ -505,7 +507,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 	if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.rmId == cm.RMId {
 		log.Printf("%v is claiming to have the same RMId as ourself! (%v)",
 			connEst.host, cm.RMId)
-		connEst.Shutdown(false)
+		connEst.Shutdown(paxos.Async)
 		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
 			Connection: NewConnectionToDial(connEst.host, cm),
 			host:       connEst.host,
@@ -514,8 +516,8 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 	} else if found && connEst.host != cd.host {
 		log.Printf("%v claimed by multiple servers: %v and %v. Recreating both connections.",
 			connEst.rmId, cd.host, connEst.host)
-		cd.Shutdown(false)
-		connEst.Shutdown(false)
+		cd.Shutdown(paxos.Async)
+		connEst.Shutdown(paxos.Async)
 		delete(cm.rmToServer, cd.rmId)
 		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
@@ -715,7 +717,7 @@ func (cd *connectionManagerMsgServerEstablished) Send(msg []byte) {
 	cd.send(msg)
 }
 
-func (cd *connectionManagerMsgServerEstablished) Shutdown(sync bool) {
+func (cd *connectionManagerMsgServerEstablished) Shutdown(sync paxos.Blocking) {
 	if cd.Connection != nil {
 		cd.Connection.Shutdown(sync)
 	}

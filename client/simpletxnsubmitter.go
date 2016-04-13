@@ -93,7 +93,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 			time.Sleep(delay)
 			sts.connectionManager.AddServerConnectionSubscriber(txnSender)
 			<-removeSenderCh
-			sts.connectionManager.RemoveServerConnectionSubscriberAsync(txnSender)
+			sts.connectionManager.RemoveServerConnectionSubscriber(txnSender, paxos.Async)
 		}()
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
@@ -102,7 +102,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 		if delay == 0 {
-			sts.connectionManager.RemoveServerConnectionSubscriberAsync(txnSender)
+			sts.connectionManager.RemoveServerConnectionSubscriber(txnSender, paxos.Async)
 		} else {
 			close(removeSenderCh)
 		}

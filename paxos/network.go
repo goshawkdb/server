@@ -5,17 +5,29 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/dispatcher"
+)
+
+type Blocking bool
+
+const (
+	Async Blocking = false
+	Sync  Blocking = true
 )
 
 type ConnectionManager interface {
+	ServerConnectionPublisher
 	AddTopologySubscriber(obs TopologySubscriber) *configuration.Topology
 	RemoveTopologySubscriberAsync(obs TopologySubscriber)
-	AddServerConnectionSubscriber(obs ServerConnectionSubscriber)
-	RemoveServerConnectionSubscriberSync(obs ServerConnectionSubscriber)
-	RemoveServerConnectionSubscriberAsync(obs ServerConnectionSubscriber)
 	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
+}
+
+type ServerConnectionPublisher interface {
+	Shutdownable
+	AddServerConnectionSubscriber(obs ServerConnectionSubscriber)
+	RemoveServerConnectionSubscriber(obs ServerConnectionSubscriber, sync Blocking)
 }
 
 type ServerConnectionSubscriber interface {
@@ -44,27 +56,88 @@ type ClientConnection interface {
 }
 
 type Shutdownable interface {
-	Shutdown(sync bool)
+	Shutdown(sync Blocking)
+}
+
+type serverConnectionPublisherProxy struct {
+	exe      *dispatcher.Executor
+	upstream ServerConnectionPublisher
+	servers  map[common.RMId]Connection
+	subs     map[ServerConnectionSubscriber]server.EmptyStruct
+}
+
+func NewServerConnectionPublisherProxy(exe *dispatcher.Executor, upstream ServerConnectionPublisher) ServerConnectionPublisher {
+	pub := &serverConnectionPublisherProxy{
+		exe:      exe,
+		upstream: upstream,
+		subs:     make(map[ServerConnectionSubscriber]server.EmptyStruct),
+	}
+	upstream.AddServerConnectionSubscriber(pub)
+	return pub
+}
+
+func (pub *serverConnectionPublisherProxy) Shutdown(sync Blocking) {
+	pub.upstream.RemoveServerConnectionSubscriber(pub, sync)
+}
+
+func (pub *serverConnectionPublisherProxy) AddServerConnectionSubscriber(obs ServerConnectionSubscriber) {
+	pub.subs[obs] = server.EmptyStructVal
+	if pub.servers != nil {
+		obs.ConnectedRMs(pub.servers)
+	}
+}
+
+func (pub *serverConnectionPublisherProxy) RemoveServerConnectionSubscriber(obs ServerConnectionSubscriber, sync Blocking) {
+	// Ignore sync in here as ServerConnectionPublisherProxy is only
+	// suitable for single-threaded client access
+	delete(pub.subs, obs)
+}
+
+func (pub *serverConnectionPublisherProxy) ConnectedRMs(servers map[common.RMId]Connection) {
+	pub.exe.Enqueue(func() {
+		pub.servers = servers
+		for sub := range pub.subs {
+			sub.ConnectedRMs(servers)
+		}
+	})
+}
+
+func (pub *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, servers map[common.RMId]Connection) {
+	pub.exe.Enqueue(func() {
+		pub.servers = servers
+		for sub := range pub.subs {
+			sub.ConnectionLost(lost, servers)
+		}
+	})
+}
+
+func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn Connection, servers map[common.RMId]Connection) {
+	pub.exe.Enqueue(func() {
+		pub.servers = servers
+		for sub := range pub.subs {
+			sub.ConnectionEstablished(gained, conn, servers)
+		}
+	})
 }
 
 type OneShotSender struct {
-	remaining         map[common.RMId]server.EmptyStruct
-	msg               []byte
-	connectionManager ConnectionManager
+	remaining map[common.RMId]server.EmptyStruct
+	msg       []byte
+	connPub   ServerConnectionPublisher
 }
 
-func NewOneShotSender(msg []byte, cm ConnectionManager, recipients ...common.RMId) *OneShotSender {
+func NewOneShotSender(msg []byte, connPub ServerConnectionPublisher, recipients ...common.RMId) *OneShotSender {
 	remaining := make(map[common.RMId]server.EmptyStruct, len(recipients))
 	for _, rmId := range recipients {
 		remaining[rmId] = server.EmptyStructVal
 	}
 	oss := &OneShotSender{
-		remaining:         remaining,
-		msg:               msg,
-		connectionManager: cm,
+		remaining: remaining,
+		msg:       msg,
+		connPub:   connPub,
 	}
 	server.Log(oss, "Adding one shot sender with recipients", recipients)
-	cm.AddServerConnectionSubscriber(oss)
+	connPub.AddServerConnectionSubscriber(oss)
 	return oss
 }
 
@@ -77,7 +150,7 @@ func (s *OneShotSender) ConnectedRMs(conns map[common.RMId]Connection) {
 	}
 	if len(s.remaining) == 0 {
 		server.Log(s, "Removing one shot sender")
-		s.connectionManager.RemoveServerConnectionSubscriberAsync(s)
+		s.connPub.RemoveServerConnectionSubscriber(s, Async)
 	}
 }
 
@@ -89,7 +162,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 		conn.Send(s.msg)
 		if len(s.remaining) == 0 {
 			server.Log(s, "Removing one shot sender")
-			s.connectionManager.RemoveServerConnectionSubscriberAsync(s)
+			s.connPub.RemoveServerConnectionSubscriber(s, Async)
 		}
 	}
 }

@@ -241,7 +241,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 	if err != nil {
 		log.Println("TopologyTransmogrifier error:", err)
 	}
-	tt.connectionManager.RemoveServerConnectionSubscriberAsync(tt)
+	tt.connectionManager.RemoveServerConnectionSubscriber(tt, paxos.Async)
 	tt.cellTail.Terminate()
 }
 
@@ -290,7 +290,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 
 	if tt.task == nil {
 		if next := topology.Next(); next == nil {
-			tt.installTopology(topology)
+			tt.installTopology(topology, false)
 			localHost, remoteHosts, err := tt.active.LocalRemoteHosts(tt.listenPort)
 			if err != nil {
 				return err
@@ -319,8 +319,12 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	return nil
 }
 
-func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology) {
-	server.Log("Topology: Installing topology to connection manager, et al:", topology)
+func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, tickOnInstalled bool) {
+	server.Log("Topology: Installing topology to connection manager, et al:", topology, tickOnInstalled)
+	if !tickOnInstalled {
+		tt.connectionManager.SetTopology(topology, nil)
+		return
+	}
 	installed := func() error {
 		if tt.localEstablished != nil {
 			close(tt.localEstablished)
@@ -590,7 +594,7 @@ func (task *targetConfig) shareGoalWithAll() {
 
 func (task *targetConfig) ensureRemoveTaskSender() {
 	if task.sender != nil {
-		task.connectionManager.RemoveServerConnectionSubscriberAsync(task.sender)
+		task.connectionManager.RemoveServerConnectionSubscriber(task.sender, paxos.Async)
 		task.sender = nil
 	}
 }
@@ -707,6 +711,7 @@ func (task *ensureLocalTopology) tick() error {
 		// However, just because we have a local config doesn't mean it
 		// actually satisfies the goal. Essentially, we're pretending
 		// that the goal is in Next().
+		task.installTopology(task.active, true)
 		task.selectGoal(task.config)
 		return nil
 	}
@@ -755,7 +760,7 @@ func (task *joinCluster) tick() error {
 	}
 
 	// must install to connectionManager before launching any connections
-	task.installTopology(task.active)
+	task.installTopology(task.active, false)
 	// we may not have the youngest topology and there could be other
 	// hosts who have connected to us who are trying to send us a more
 	// up to date topology. So we shouldn't kill off those connections.
@@ -820,7 +825,7 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 
 	// We're about to create and run a txn, so we must make sure that
 	// txn's topology version is acceptable to our proposers.
-	task.installTopology(activeWithNext)
+	task.installTopology(activeWithNext, false)
 
 	switch resubmit, err := task.attemptCreateRoot(targetTopology); {
 	case err != nil:
@@ -847,7 +852,7 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// targetTopology to include the updated root. We should install
 	// this to the connectionManager.
 	activeWithNext.Root = targetTopology.Root
-	task.installTopology(activeWithNext)
+	task.installTopology(activeWithNext, false)
 
 	result, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
 	if err != nil {
@@ -959,7 +964,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	}
 	if !task.installing {
 		task.installing = true
-		task.installTopology(task.active)
+		task.installTopology(task.active, false)
 		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
 	}
 	// the -1 is because allRemoteHosts will not include localHost
@@ -1179,7 +1184,7 @@ func (task *awaitBarrierInstall) tick() error {
 	}
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
-	task.installTopology(task.active)
+	task.installTopology(task.active, true)
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 
@@ -1285,7 +1290,7 @@ func (task *installTargetNew) tick() error {
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	if !task.installing {
 		task.installing = true
-		task.installTopology(task.active)
+		task.installTopology(task.active, false)
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1367,7 +1372,7 @@ func (task *migrate) tick() error {
 	if !task.installing {
 		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installing = true
-		task.installTopology(task.active)
+		task.installTopology(task.active, false)
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1519,7 +1524,7 @@ func (task *installCompletion) tick() error {
 	if !task.installing {
 		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installing = true
-		task.installTopology(task.active)
+		task.installTopology(task.active, false)
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1863,7 +1868,7 @@ func newEmigrator(task *migrate) *emigrator {
 
 func (e *emigrator) stopAsync() {
 	atomic.StoreInt32(&e.stop, 1)
-	e.connectionManager.RemoveServerConnectionSubscriberAsync(e)
+	e.connectionManager.RemoveServerConnectionSubscriber(e, paxos.Async)
 }
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -2031,7 +2036,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 }
 
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	defer it.connectionManager.RemoveServerConnectionSubscriberAsync(it)
+	defer it.connectionManager.RemoveServerConnectionSubscriber(it, paxos.Async)
 
 	if atomic.LoadInt32(&it.stop) == 1 {
 		return

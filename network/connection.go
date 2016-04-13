@@ -78,8 +78,8 @@ type connectionMsgStatus struct {
 	*server.StatusConsumer
 }
 
-func (conn *Connection) Shutdown(sync bool) {
-	if conn.enqueueQuery(connectionMsgShutdown{}) && sync {
+func (conn *Connection) Shutdown(sync paxos.Blocking) {
+	if conn.enqueueQuery(connectionMsgShutdown{}) && sync == paxos.Sync {
 		conn.cellTail.Wait()
 	}
 }

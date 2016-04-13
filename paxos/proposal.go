@@ -463,7 +463,7 @@ func (s *proposalSender) finished() {
 	if !s.done {
 		s.done = true
 		server.Log("Removing proposal sender")
-		s.proposerManager.ConnectionManager.RemoveServerConnectionSubscriberSync(s)
+		s.proposerManager.ConnectionManager.RemoveServerConnectionSubscriber(s, Sync)
 	}
 }
 

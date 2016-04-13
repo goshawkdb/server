@@ -13,6 +13,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
+	"goshawkdb.io/server/paxos"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -166,7 +167,7 @@ func (s *server) start() {
 	}
 
 	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, commandLineConfig)
-	s.addOnShutdown(cm.Shutdown)
+	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
 	s.addOnShutdown(transmogrifier.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier

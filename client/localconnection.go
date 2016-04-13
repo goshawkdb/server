@@ -139,8 +139,8 @@ func (lc *LocalConnection) enqueueSyncQuery(msg localConnectionMsg, resultChan c
 	}
 }
 
-func (lc *LocalConnection) Shutdown(sync bool) {
-	if lc.enqueueQuery(localConnectionMsgShutdown{}) && sync {
+func (lc *LocalConnection) Shutdown(sync paxos.Blocking) {
+	if lc.enqueueQuery(localConnectionMsgShutdown{}) && sync == paxos.Sync {
 		lc.cellTail.Wait()
 	}
 }
