@@ -211,7 +211,7 @@ func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *msgs.Txn) {
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
 	if aalc.twoBSender != nil {
-		aalc.acceptorManager.ConnectionManager.RemoveServerConnectionObserverSync(aalc.twoBSender)
+		aalc.acceptorManager.ConnectionManager.RemoveServerConnectionSubscriberSync(aalc.twoBSender)
 		aalc.twoBSender = nil
 	}
 
@@ -265,7 +265,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 		server.Log(aalc.txnId, "Adding sender for 2B")
 		submitter := common.RMId(aalc.ballotAccumulator.Txn.Submitter())
 		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, aalc.tgcRecipients...)
-		aalc.acceptorManager.ConnectionManager.AddServerConnectionObserver(aalc.twoBSender)
+		aalc.acceptorManager.ConnectionManager.AddServerConnectionSubscriber(aalc.twoBSender)
 	}
 }
 
@@ -327,7 +327,7 @@ func (adfd *acceptorDeleteFromDisk) init(a *Acceptor, txn *msgs.Txn) {
 
 func (adfd *acceptorDeleteFromDisk) start() {
 	if adfd.twoBSender != nil {
-		adfd.acceptorManager.ConnectionManager.RemoveServerConnectionObserverSync(adfd.twoBSender)
+		adfd.acceptorManager.ConnectionManager.RemoveServerConnectionSubscriberSync(adfd.twoBSender)
 		adfd.twoBSender = nil
 	}
 	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {

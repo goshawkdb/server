@@ -176,7 +176,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 	}, true, configuration.TopologyVarUUId)
 	<-subscriberInstalled
 
-	cm.AddServerConnectionObserver(tt)
+	cm.AddServerConnectionSubscriber(tt)
 
 	go tt.actorLoop(head, config)
 	return tt, tt.localEstablished
@@ -241,7 +241,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 	if err != nil {
 		log.Println("TopologyTransmogrifier error:", err)
 	}
-	tt.connectionManager.RemoveServerConnectionObserverAsync(tt)
+	tt.connectionManager.RemoveServerConnectionSubscriberAsync(tt)
 	tt.cellTail.Terminate()
 }
 
@@ -535,7 +535,7 @@ type topologyTask interface {
 type targetConfig struct {
 	*TopologyTransmogrifier
 	config *configuration.NextConfiguration
-	sender paxos.ServerConnectionObserver
+	sender paxos.ServerConnectionSubscriber
 }
 
 func (task *targetConfig) tick() error {
@@ -585,12 +585,12 @@ func (task *targetConfig) shareGoalWithAll() {
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
 	task.sender = paxos.NewRepeatingAllSender(server.SegToBytes(seg))
-	task.connectionManager.AddServerConnectionObserver(task.sender)
+	task.connectionManager.AddServerConnectionSubscriber(task.sender)
 }
 
 func (task *targetConfig) ensureRemoveTaskSender() {
 	if task.sender != nil {
-		task.connectionManager.RemoveServerConnectionObserverAsync(task.sender)
+		task.connectionManager.RemoveServerConnectionSubscriberAsync(task.sender)
 		task.sender = nil
 	}
 }
@@ -731,7 +731,7 @@ func (task *ensureLocalTopology) tick() error {
 		// if err == nil, the create succeeded, so wait for observation
 		return nil
 	} else {
-		// It's already on disk, we're not going to see it through the observer.
+		// It's already on disk, we're not going to see it through the subscriber.
 		return task.activeChange(topology)
 	}
 }
@@ -861,7 +861,7 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// !resubmit, so MUST be a BadRead, or success. By definition,
 	// if allJoining, everyone is active. So even if we weren't
 	// successful rewriting ourself, we're guaranteed to be sent
-	// someone else's write through the observer.
+	// someone else's write through the subscriber.
 	return nil
 }
 
@@ -916,7 +916,7 @@ func (task *installTargetOld) tick() error {
 		return nil
 	}
 	// Must be badread, which means again we should receive the
-	// updated topology through the observer.
+	// updated topology through the subscriber.
 	return nil
 }
 
@@ -1476,7 +1476,7 @@ func (task *migrateAwaitImmigrations) tick() error {
 		return nil
 	}
 	// Must be badread, which means again we should receive the
-	// updated topology through the observer.
+	// updated topology through the subscriber.
 	return nil
 }
 
@@ -1547,7 +1547,7 @@ func (task *installCompletion) tick() error {
 		return nil
 	}
 	// Must be badread, which means again we should receive the
-	// updated topology through the observer.
+	// updated topology through the subscriber.
 	return nil
 }
 
@@ -1857,13 +1857,13 @@ func newEmigrator(task *migrate) *emigrator {
 		connectionManager: task.connectionManager,
 		topology:          task.active,
 	}
-	e.connectionManager.AddServerConnectionObserver(e)
+	e.connectionManager.AddServerConnectionSubscriber(e)
 	return e
 }
 
 func (e *emigrator) stopAsync() {
 	atomic.StoreInt32(&e.stop, 1)
-	e.connectionManager.RemoveServerConnectionObserverAsync(e)
+	e.connectionManager.RemoveServerConnectionSubscriberAsync(e)
 }
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -1973,7 +1973,7 @@ func (it *dbIterator) iterate() {
 	for _, sb := range it.batch {
 		sb.flush()
 	}
-	it.connectionManager.AddServerConnectionObserver(it)
+	it.connectionManager.AddServerConnectionSubscriber(it)
 }
 
 func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) ([]*msgs.Var, error) {
@@ -2031,7 +2031,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 }
 
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	defer it.connectionManager.RemoveServerConnectionObserverAsync(it)
+	defer it.connectionManager.RemoveServerConnectionSubscriberAsync(it)
 
 	if atomic.LoadInt32(&it.stop) == 1 {
 		return

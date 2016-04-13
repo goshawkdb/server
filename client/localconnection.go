@@ -241,7 +241,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 }
 
 func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
-	topology := lc.connectionManager.AddTopologyObserver(lc)
+	topology := lc.connectionManager.AddTopologySubscriber(lc)
 	lc.submitter.TopologyChanged(topology)
 	servers := lc.connectionManager.ClientEstablished(0, lc)
 	lc.submitter.ServerConnectionsChanged(servers)

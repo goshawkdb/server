@@ -8,22 +8,22 @@ import (
 )
 
 type ConnectionManager interface {
-	AddTopologyObserver(obs TopologyObserver) *configuration.Topology
-	AddServerConnectionObserver(obs ServerConnectionObserver)
-	RemoveServerConnectionObserverSync(obs ServerConnectionObserver)
-	RemoveServerConnectionObserverAsync(obs ServerConnectionObserver)
+	AddTopologySubscriber(obs TopologySubscriber) *configuration.Topology
+	AddServerConnectionSubscriber(obs ServerConnectionSubscriber)
+	RemoveServerConnectionSubscriberSync(obs ServerConnectionSubscriber)
+	RemoveServerConnectionSubscriberAsync(obs ServerConnectionSubscriber)
 	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
 }
 
-type ServerConnectionObserver interface {
+type ServerConnectionSubscriber interface {
 	ConnectedRMs(map[common.RMId]Connection)
 	ConnectionLost(common.RMId, map[common.RMId]Connection)
 	ConnectionEstablished(common.RMId, Connection, map[common.RMId]Connection)
 }
 
-type TopologyObserver interface {
+type TopologySubscriber interface {
 	TopologyChanged(*configuration.Topology)
 }
 
@@ -37,7 +37,7 @@ type Connection interface {
 }
 
 type ClientConnection interface {
-	ServerConnectionObserver
+	ServerConnectionSubscriber
 	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *msgs.Outcome)
 }
 
@@ -58,7 +58,7 @@ func NewOneShotSender(msg []byte, cm ConnectionManager, recipients ...common.RMI
 		connectionManager: cm,
 	}
 	server.Log(oss, "Adding one shot sender with recipients", recipients)
-	cm.AddServerConnectionObserver(oss)
+	cm.AddServerConnectionSubscriber(oss)
 	return oss
 }
 
@@ -71,7 +71,7 @@ func (s *OneShotSender) ConnectedRMs(conns map[common.RMId]Connection) {
 	}
 	if len(s.remaining) == 0 {
 		server.Log(s, "Removing one shot sender")
-		s.connectionManager.RemoveServerConnectionObserverAsync(s)
+		s.connectionManager.RemoveServerConnectionSubscriberAsync(s)
 	}
 }
 
@@ -83,7 +83,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 		conn.Send(s.msg)
 		if len(s.remaining) == 0 {
 			server.Log(s, "Removing one shot sender")
-			s.connectionManager.RemoveServerConnectionObserverAsync(s)
+			s.connectionManager.RemoveServerConnectionSubscriberAsync(s)
 		}
 	}
 }

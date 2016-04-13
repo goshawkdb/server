@@ -41,7 +41,7 @@ func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm Connectio
 }
 
 func (am *AcceptorManager) init() {
-	am.Topology = am.ConnectionManager.AddTopologyObserver(am)
+	am.Topology = am.ConnectionManager.AddTopologySubscriber(am)
 }
 
 func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceId, vUUId *common.VarUUId) *instance {

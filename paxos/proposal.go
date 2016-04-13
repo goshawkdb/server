@@ -110,7 +110,7 @@ func (p *proposal) maybeSendOneA() {
 	}
 	sender.msg = server.SegToBytes(seg)
 	server.Log(p.txnId, "Adding sender for 1A")
-	p.proposerManager.ConnectionManager.AddServerConnectionObserver(sender)
+	p.proposerManager.ConnectionManager.AddServerConnectionSubscriber(sender)
 }
 
 func (p *proposal) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
@@ -156,7 +156,7 @@ func (p *proposal) maybeSendTwoA() {
 	}
 	sender.msg = server.SegToBytes(seg)
 	server.Log(p.txnId, "Adding sender for 2A")
-	p.proposerManager.ConnectionManager.AddServerConnectionObserver(sender)
+	p.proposerManager.ConnectionManager.AddServerConnectionSubscriber(sender)
 }
 
 func (p *proposal) TwoBFailuresReceived(sender common.RMId, failures *msgs.TwoBTxnVotesFailures) {
@@ -463,7 +463,7 @@ func (s *proposalSender) finished() {
 	if !s.done {
 		s.done = true
 		server.Log("Removing proposal sender")
-		s.proposerManager.ConnectionManager.RemoveServerConnectionObserverSync(s)
+		s.proposerManager.ConnectionManager.RemoveServerConnectionSubscriberSync(s)
 	}
 }
 

@@ -32,19 +32,19 @@ type ConnectionManager struct {
 	rmToServer                    map[common.RMId]*connectionManagerMsgServerEstablished
 	connCountToClient             map[uint32]paxos.ClientConnection
 	desired                       []string
-	serverConnObservers           serverConnObservers
-	topologyObservers             topologyObservers
+	serverConnSubscribers         serverConnSubscribers
+	topologySubscribers           topologySubscribers
 	Dispatchers                   *paxos.Dispatchers
 }
 
-type serverConnObservers struct {
+type serverConnSubscribers struct {
 	*ConnectionManager
-	observers map[paxos.ServerConnectionObserver]server.EmptyStruct
+	subscribers map[paxos.ServerConnectionSubscriber]server.EmptyStruct
 }
 
-type topologyObservers struct {
+type topologySubscribers struct {
 	*ConnectionManager
-	observers map[paxos.TopologyObserver]server.EmptyStruct
+	subscribers map[paxos.TopologySubscriber]server.EmptyStruct
 }
 
 func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg *msgs.Message) {
@@ -147,14 +147,14 @@ type connectionManagerMsgClientEstablished struct {
 	resultChan chan struct{}
 }
 
-type connectionManagerMsgServerConnObserverStart struct {
+type connectionManagerMsgServerConnAddSubscriber struct {
 	connectionManagerMsgBasic
-	paxos.ServerConnectionObserver
+	paxos.ServerConnectionSubscriber
 }
 
-type connectionManagerMsgServerConnObserverFinished struct {
+type connectionManagerMsgServerConnRemoveSubscriber struct {
 	connectionManagerMsgBasic
-	paxos.ServerConnectionObserver
+	paxos.ServerConnectionSubscriber
 	resultChan chan struct{}
 }
 
@@ -164,16 +164,16 @@ type connectionManagerMsgSetTopology struct {
 	onInstalled func()
 }
 
-type connectionManagerMsgTopologyObserverStart struct {
+type connectionManagerMsgTopologyAddSubscriber struct {
 	connectionManagerMsgBasic
-	paxos.TopologyObserver
+	paxos.TopologySubscriber
 	topology   *configuration.Topology
 	resultChan chan struct{}
 }
 
-type connectionManagerMsgTopologyObserverFinished struct {
+type connectionManagerMsgTopologyRemoveSubscriber struct {
 	connectionManagerMsgBasic
-	paxos.TopologyObserver
+	paxos.TopologySubscriber
 }
 
 type connectionManagerMsgStatus struct {
@@ -215,8 +215,8 @@ func (cm *ConnectionManager) ServerLost(conn *Connection, rmId common.RMId, rest
 	})
 }
 
-// NB client established gets you server connection observer too. It
-// does not get you a topology observer.
+// NB client established gets you server connection subscriber too. It
+// does not get you a topology subscriber.
 func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) map[common.RMId]paxos.Connection {
 	query := &connectionManagerMsgClientEstablished{
 		connNumber: connNumber,
@@ -234,7 +234,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConn
 	cm.Lock()
 	delete(cm.connCountToClient, connNumber)
 	cm.Unlock()
-	cm.RemoveServerConnectionObserverAsync(conn)
+	cm.RemoveServerConnectionSubscriberAsync(conn)
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
@@ -252,17 +252,17 @@ func (cm *ConnectionManager) LocalHost() string {
 	return cm.localHost
 }
 
-func (cm *ConnectionManager) AddServerConnectionObserver(obs paxos.ServerConnectionObserver) {
-	cm.enqueueQuery(connectionManagerMsgServerConnObserverStart{ServerConnectionObserver: obs})
+func (cm *ConnectionManager) AddServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber) {
+	cm.enqueueQuery(connectionManagerMsgServerConnAddSubscriber{ServerConnectionSubscriber: obs})
 }
 
-func (cm *ConnectionManager) RemoveServerConnectionObserverAsync(obs paxos.ServerConnectionObserver) {
-	cm.enqueueQuery(connectionManagerMsgServerConnObserverFinished{ServerConnectionObserver: obs})
+func (cm *ConnectionManager) RemoveServerConnectionSubscriberAsync(obs paxos.ServerConnectionSubscriber) {
+	cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
 }
 
-func (cm *ConnectionManager) RemoveServerConnectionObserverSync(obs paxos.ServerConnectionObserver) {
+func (cm *ConnectionManager) RemoveServerConnectionSubscriberSync(obs paxos.ServerConnectionSubscriber) {
 	resultChan := make(chan struct{})
-	cm.enqueueSyncQuery(connectionManagerMsgServerConnObserverFinished{ServerConnectionObserver: obs, resultChan: resultChan}, resultChan)
+	cm.enqueueSyncQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs, resultChan: resultChan}, resultChan)
 }
 
 func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, onInstalled func()) {
@@ -272,10 +272,10 @@ func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, onIns
 	})
 }
 
-func (cm *ConnectionManager) AddTopologyObserver(obs paxos.TopologyObserver) *configuration.Topology {
-	query := &connectionManagerMsgTopologyObserverStart{
-		TopologyObserver: obs,
-		resultChan:       make(chan struct{}),
+func (cm *ConnectionManager) AddTopologySubscriber(obs paxos.TopologySubscriber) *configuration.Topology {
+	query := &connectionManagerMsgTopologyAddSubscriber{
+		TopologySubscriber: obs,
+		resultChan:         make(chan struct{}),
 	}
 	if cm.enqueueSyncQuery(query, query.resultChan) {
 		return query.topology
@@ -283,8 +283,8 @@ func (cm *ConnectionManager) AddTopologyObserver(obs paxos.TopologyObserver) *co
 	return nil
 }
 
-func (cm *ConnectionManager) RemoveTopologyObserverAsync(obs paxos.TopologyObserver) {
-	cm.enqueueQuery(connectionManagerMsgTopologyObserverFinished{TopologyObserver: obs})
+func (cm *ConnectionManager) RemoveTopologySubscriberAsync(obs paxos.TopologySubscriber) {
+	cm.enqueueQuery(connectionManagerMsgTopologyRemoveSubscriber{TopologySubscriber: obs})
 }
 
 func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
@@ -322,10 +322,10 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 		connCountToClient: make(map[uint32]paxos.ClientConnection),
 		desired:           nil,
 	}
-	cm.serverConnObservers.observers = make(map[paxos.ServerConnectionObserver]server.EmptyStruct)
-	cm.serverConnObservers.ConnectionManager = cm
-	cm.topologyObservers.observers = make(map[paxos.TopologyObserver]server.EmptyStruct)
-	cm.topologyObservers.ConnectionManager = cm
+	cm.serverConnSubscribers.subscribers = make(map[paxos.ServerConnectionSubscriber]server.EmptyStruct)
+	cm.serverConnSubscribers.ConnectionManager = cm
+	cm.topologySubscribers.subscribers = make(map[paxos.TopologySubscriber]server.EmptyStruct)
+	cm.topologySubscribers.ConnectionManager = cm
 
 	var head *cc.ChanCellHead
 	head, cm.cellTail = cc.NewChanCellTail(
@@ -389,16 +389,16 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 				cm.clientEstablished(msgT)
 			case connectionManagerMsgSetTopology:
 				cm.setTopology(msgT.topology, msgT.onInstalled)
-			case connectionManagerMsgServerConnObserverStart:
-				cm.serverConnObservers.AddObserver(msgT.ServerConnectionObserver)
-			case connectionManagerMsgServerConnObserverFinished:
-				cm.serverConnObservers.RemoveObserver(msgT.ServerConnectionObserver, msgT.resultChan)
-			case *connectionManagerMsgTopologyObserverStart:
+			case connectionManagerMsgServerConnAddSubscriber:
+				cm.serverConnSubscribers.AddSubscriber(msgT.ServerConnectionSubscriber)
+			case connectionManagerMsgServerConnRemoveSubscriber:
+				cm.serverConnSubscribers.RemoveSubscriber(msgT.ServerConnectionSubscriber, msgT.resultChan)
+			case *connectionManagerMsgTopologyAddSubscriber:
 				msgT.topology = cm.topology
 				close(msgT.resultChan)
-				cm.topologyObservers.AddObserver(msgT.TopologyObserver)
-			case connectionManagerMsgTopologyObserverFinished:
-				cm.topologyObservers.RemoveObserver(msgT.TopologyObserver)
+				cm.topologySubscribers.AddSubscriber(msgT.TopologySubscriber)
+			case connectionManagerMsgTopologyRemoveSubscriber:
+				cm.topologySubscribers.RemoveSubscriber(msgT.TopologySubscriber)
 			case connectionManagerMsgStatus:
 				cm.status(msgT.StatusConsumer)
 			default:
@@ -432,12 +432,12 @@ func (cm *ConnectionManager) setDesiredServers(hosts connectionManagerMsgSetDesi
 	if localHostChanged {
 		cd := cm.rmToServer[cm.RMId]
 		delete(cm.rmToServer, cd.rmId)
-		cm.serverConnObservers.ServerConnLost(cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cd = cd.clone()
 		cd.host = hosts.local
 		cm.rmToServer[cd.rmId] = cd
 		cm.servers[cd.host] = cd
-		cm.serverConnObservers.ServerConnEstablished(cd)
+		cm.serverConnSubscribers.ServerConnEstablished(cd)
 	}
 
 	desiredMap := make(map[string]server.EmptyStruct, len(hosts.remote))
@@ -484,7 +484,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 			cd.Shutdown(false)
 			if cd.established {
 				delete(cm.rmToServer, cd.rmId)
-				cm.serverConnObservers.ServerConnLost(cd.rmId)
+				cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 			}
 		}
 		if killNew {
@@ -514,7 +514,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 		cd.Shutdown(false)
 		connEst.Shutdown(false)
 		delete(cm.rmToServer, cd.rmId)
-		cm.serverConnObservers.ServerConnLost(cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
 			Connection: NewConnectionToDial(cd.host, cm),
 			host:       cd.host,
@@ -527,7 +527,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 	} else {
 		cm.servers[connEst.host] = connEst
 		cm.rmToServer[connEst.rmId] = connEst
-		cm.serverConnObservers.ServerConnEstablished(connEst)
+		cm.serverConnSubscribers.ServerConnEstablished(connEst)
 	}
 }
 
@@ -551,7 +551,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 				}
 			}
 		}
-		cm.serverConnObservers.ServerConnLost(rmId)
+		cm.serverConnSubscribers.ServerConnLost(rmId)
 	}
 }
 
@@ -561,22 +561,22 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 	cm.Unlock()
 	msg.servers = cm.cloneRMToServer()
 	close(msg.resultChan)
-	cm.serverConnObservers.AddObserver(msg.conn)
+	cm.serverConnSubscribers.AddSubscriber(msg.conn)
 }
 
 func (cm *ConnectionManager) setTopology(topology *configuration.Topology, onInstalled func()) {
 	server.Log("Topology change:", topology)
 	cm.topology = topology
-	cm.topologyObservers.TopologyChanged()
+	cm.topologySubscribers.TopologyChanged()
 	cd := cm.rmToServer[cm.RMId]
 	if topology.Root.VarUUId.Compare(cd.rootId) != common.EQ {
 		delete(cm.rmToServer, cd.rmId)
-		cm.serverConnObservers.ServerConnLost(cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cd = cd.clone()
 		cd.rootId = topology.Root.VarUUId
 		cm.rmToServer[cm.RMId] = cd
 		cm.servers[cd.host] = cd
-		cm.serverConnObservers.ServerConnEstablished(cd)
+		cm.serverConnSubscribers.ServerConnEstablished(cd)
 	}
 	// todo - get rid of these settopolgies too.
 	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, onInstalled)
@@ -601,8 +601,8 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	for server := range cm.servers {
 		serverConnections = append(serverConnections, server)
 	}
-	sc.Emit(fmt.Sprintf("ServerConnectionObservers: %v", len(cm.serverConnObservers.observers)))
-	sc.Emit(fmt.Sprintf("TopologyObservers: %v", len(cm.topologyObservers.observers)))
+	sc.Emit(fmt.Sprintf("ServerConnectionSubscribers: %v", len(cm.serverConnSubscribers.subscribers)))
+	sc.Emit(fmt.Sprintf("TopologySubscribers: %v", len(cm.topologySubscribers.subscribers)))
 	rms := make([]common.RMId, 0, len(cm.rmToServer))
 	for rmId := range cm.rmToServer {
 		rms = append(rms, rmId)
@@ -636,56 +636,56 @@ func (cm *ConnectionManager) Send(b []byte) {
 	cm.DispatchMessage(cm.RMId, msg.Which(), &msg)
 }
 
-// serverConnObservers
-func (subs serverConnObservers) ServerConnEstablished(cd *connectionManagerMsgServerEstablished) {
+// serverConnSubscribers
+func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsgServerEstablished) {
 	rmToServerCopy := subs.cloneRMToServer()
-	for ob := range subs.observers {
+	for ob := range subs.subscribers {
 		ob.ConnectionEstablished(cd.rmId, cd, rmToServerCopy)
 	}
 }
 
-func (subs serverConnObservers) ServerConnLost(rmId common.RMId) {
+func (subs serverConnSubscribers) ServerConnLost(rmId common.RMId) {
 	rmToServerCopy := subs.cloneRMToServer()
-	for ob := range subs.observers {
+	for ob := range subs.subscribers {
 		ob.ConnectionLost(rmId, rmToServerCopy)
 	}
 }
 
-func (subs serverConnObservers) AddObserver(ob paxos.ServerConnectionObserver) {
-	if _, found := subs.observers[ob]; found {
-		server.Log(ob, "CM found duplicate add serverConn observer")
+func (subs serverConnSubscribers) AddSubscriber(ob paxos.ServerConnectionSubscriber) {
+	if _, found := subs.subscribers[ob]; found {
+		server.Log(ob, "CM found duplicate add serverConn subscriber")
 	} else {
-		subs.observers[ob] = server.EmptyStructVal
+		subs.subscribers[ob] = server.EmptyStructVal
 		ob.ConnectedRMs(subs.cloneRMToServer())
 	}
 }
 
-func (subs serverConnObservers) RemoveObserver(ob paxos.ServerConnectionObserver, resultChan chan struct{}) {
-	delete(subs.observers, ob)
+func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubscriber, resultChan chan struct{}) {
+	delete(subs.subscribers, ob)
 	if resultChan != nil {
 		close(resultChan)
 	}
 }
 
-// topologyObservers
-func (subs topologyObservers) TopologyChanged() {
+// topologySubscribers
+func (subs topologySubscribers) TopologyChanged() {
 	t := subs.topology
-	for ob := range subs.observers {
+	for ob := range subs.subscribers {
 		ob.TopologyChanged(t)
 	}
 }
 
-func (subs topologyObservers) AddObserver(ob paxos.TopologyObserver) {
-	if _, found := subs.observers[ob]; found {
-		server.Log(ob, "CM found duplicate add topology observer")
+func (subs topologySubscribers) AddSubscriber(ob paxos.TopologySubscriber) {
+	if _, found := subs.subscribers[ob]; found {
+		server.Log(ob, "CM found duplicate add topology subscriber")
 	} else {
-		subs.observers[ob] = server.EmptyStructVal
+		subs.subscribers[ob] = server.EmptyStructVal
 		ob.TopologyChanged(subs.topology)
 	}
 }
 
-func (subs topologyObservers) RemoveObserver(ob paxos.TopologyObserver) {
-	delete(subs.observers, ob)
+func (subs topologySubscribers) RemoveSubscriber(ob paxos.TopologySubscriber) {
+	delete(subs.subscribers, ob)
 }
 
 func (cd *connectionManagerMsgServerEstablished) Host() string {

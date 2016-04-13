@@ -190,7 +190,8 @@ func (conn *Connection) start() {
 }
 
 func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
-	conn.topology = conn.connectionManager.AddTopologyObserver(conn)
+	conn.topology = conn.connectionManager.AddTopologySubscriber(conn)
+	defer conn.connectionManager.RemoveTopologySubscriberAsync(conn)
 
 	var (
 		err       error
