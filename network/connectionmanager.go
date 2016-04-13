@@ -416,6 +416,9 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	for _, cd := range cm.servers {
 		cd.Shutdown(true)
 	}
+	for _, cc := range cm.connCountToClient {
+		cc.Shutdown(true)
+	}
 	if shutdownChan != nil {
 		close(shutdownChan)
 	}

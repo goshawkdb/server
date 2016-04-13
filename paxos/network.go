@@ -9,6 +9,7 @@ import (
 
 type ConnectionManager interface {
 	AddTopologySubscriber(obs TopologySubscriber) *configuration.Topology
+	RemoveTopologySubscriberAsync(obs TopologySubscriber)
 	AddServerConnectionSubscriber(obs ServerConnectionSubscriber)
 	RemoveServerConnectionSubscriberSync(obs ServerConnectionSubscriber)
 	RemoveServerConnectionSubscriberAsync(obs ServerConnectionSubscriber)
@@ -37,8 +38,13 @@ type Connection interface {
 }
 
 type ClientConnection interface {
+	Shutdownable
 	ServerConnectionSubscriber
 	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *msgs.Outcome)
+}
+
+type Shutdownable interface {
+	Shutdown(sync bool)
 }
 
 type OneShotSender struct {

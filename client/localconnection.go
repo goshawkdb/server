@@ -139,8 +139,8 @@ func (lc *LocalConnection) enqueueSyncQuery(msg localConnectionMsg, resultChan c
 	}
 }
 
-func (lc *LocalConnection) Shutdown() {
-	if lc.enqueueQuery(localConnectionMsgShutdown{}) {
+func (lc *LocalConnection) Shutdown(sync bool) {
+	if lc.enqueueQuery(localConnectionMsgShutdown{}) && sync {
 		lc.cellTail.Wait()
 	}
 }
@@ -242,8 +242,10 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 
 func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	topology := lc.connectionManager.AddTopologySubscriber(lc)
-	lc.submitter.TopologyChanged(topology)
+	defer lc.connectionManager.RemoveTopologySubscriberAsync(lc)
 	servers := lc.connectionManager.ClientEstablished(0, lc)
+	defer lc.connectionManager.ClientLost(0, lc)
+	lc.submitter.TopologyChanged(topology)
 	lc.submitter.ServerConnectionsChanged(servers)
 	var (
 		err       error
@@ -281,7 +283,6 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	if err != nil {
 		log.Println("LocalConnection error:", err)
 	}
-	lc.connectionManager.ClientLost(0, lc)
 	lc.submitter.Shutdown()
 	lc.cellTail.Terminate()
 }
