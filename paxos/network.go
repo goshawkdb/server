@@ -25,9 +25,8 @@ type ConnectionManager interface {
 }
 
 type ServerConnectionPublisher interface {
-	Shutdownable
 	AddServerConnectionSubscriber(obs ServerConnectionSubscriber)
-	RemoveServerConnectionSubscriber(obs ServerConnectionSubscriber, sync Blocking)
+	RemoveServerConnectionSubscriber(obs ServerConnectionSubscriber)
 }
 
 type ServerConnectionSubscriber interface {
@@ -76,10 +75,6 @@ func NewServerConnectionPublisherProxy(exe *dispatcher.Executor, upstream Server
 	return pub
 }
 
-func (pub *serverConnectionPublisherProxy) Shutdown(sync Blocking) {
-	pub.upstream.RemoveServerConnectionSubscriber(pub, sync)
-}
-
 func (pub *serverConnectionPublisherProxy) AddServerConnectionSubscriber(obs ServerConnectionSubscriber) {
 	pub.subs[obs] = server.EmptyStructVal
 	if pub.servers != nil {
@@ -87,9 +82,7 @@ func (pub *serverConnectionPublisherProxy) AddServerConnectionSubscriber(obs Ser
 	}
 }
 
-func (pub *serverConnectionPublisherProxy) RemoveServerConnectionSubscriber(obs ServerConnectionSubscriber, sync Blocking) {
-	// Ignore sync in here as ServerConnectionPublisherProxy is only
-	// suitable for single-threaded client access
+func (pub *serverConnectionPublisherProxy) RemoveServerConnectionSubscriber(obs ServerConnectionSubscriber) {
 	delete(pub.subs, obs)
 }
 
@@ -150,7 +143,7 @@ func (s *OneShotSender) ConnectedRMs(conns map[common.RMId]Connection) {
 	}
 	if len(s.remaining) == 0 {
 		server.Log(s, "Removing one shot sender")
-		s.connPub.RemoveServerConnectionSubscriber(s, Async)
+		s.connPub.RemoveServerConnectionSubscriber(s)
 	}
 }
 
@@ -162,7 +155,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 		conn.Send(s.msg)
 		if len(s.remaining) == 0 {
 			server.Log(s, "Removing one shot sender")
-			s.connPub.RemoveServerConnectionSubscriber(s, Async)
+			s.connPub.RemoveServerConnectionSubscriber(s)
 		}
 	}
 }

@@ -21,7 +21,7 @@ type SimpleTxnSubmitter struct {
 	bootCount           uint32
 	disabledHashCodes   map[common.RMId]server.EmptyStruct
 	connections         map[common.RMId]paxos.Connection
-	connectionManager   paxos.ConnectionManager
+	connPub             paxos.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
 	onShutdown          map[*func(bool)]server.EmptyStruct
 	resolver            *ch.Resolver
@@ -34,19 +34,19 @@ type SimpleTxnSubmitter struct {
 type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
 type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
 
-func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *SimpleTxnSubmitter {
+func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	cache := ch.NewCache(nil, rng)
 
 	sts := &SimpleTxnSubmitter{
-		rmId:              rmId,
-		bootCount:         bootCount,
-		connections:       nil,
-		connectionManager: cm,
-		outcomeConsumers:  make(map[common.TxnId]txnOutcomeConsumer),
-		onShutdown:        make(map[*func(bool)]server.EmptyStruct),
-		hashCache:         cache,
-		rng:               rng,
+		rmId:             rmId,
+		bootCount:        bootCount,
+		connections:      nil,
+		connPub:          connPub,
+		outcomeConsumers: make(map[common.TxnId]txnOutcomeConsumer),
+		onShutdown:       make(map[*func(bool)]server.EmptyStruct),
+		hashCache:        cache,
+		rng:              rng,
 	}
 	return sts
 }
@@ -71,7 +71,7 @@ func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn
 		consumer(sender, txnId, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
-		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connectionManager, sender)
+		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
 	}
 }
 
@@ -85,15 +85,15 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
 	var removeSenderCh chan server.EmptyStruct
 	if delay == 0 {
-		sts.connectionManager.AddServerConnectionSubscriber(txnSender)
+		sts.connPub.AddServerConnectionSubscriber(txnSender)
 	} else {
 		removeSenderCh = make(chan server.EmptyStruct)
 		go func() {
 			// fmt.Printf("%v ", delay)
 			time.Sleep(delay)
-			sts.connectionManager.AddServerConnectionSubscriber(txnSender)
+			sts.connPub.AddServerConnectionSubscriber(txnSender)
 			<-removeSenderCh
-			sts.connectionManager.RemoveServerConnectionSubscriber(txnSender, paxos.Async)
+			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		}()
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
@@ -102,19 +102,19 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 		if delay == 0 {
-			sts.connectionManager.RemoveServerConnectionSubscriber(txnSender, paxos.Async)
+			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		} else {
 			close(removeSenderCh)
 		}
 		// OSS is safe here - see above.
-		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connectionManager, acceptors...)
+		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
 		if shutdown {
 			if txnCap.Retry() {
 				// If this msg doesn't make it then proposers should
 				// observe our death and tidy up anyway. If it's just this
 				// connection shutting down then there should be no
 				// problem with these msgs getting to the propposers.
-				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connectionManager, activeRMs...)
+				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 			}
 			continuation(txnId, nil)
 		}

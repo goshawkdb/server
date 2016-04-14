@@ -742,10 +742,9 @@ func (cr *connectionRun) topologyChanged(tChange connectionMsgTopologyChanged) e
 }
 
 func (cr *connectionRun) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) {
-	if cr.currentState != cr || !cr.isClient {
-		return
+	if cr.submitter != nil {
+		cr.submitter.ServerConnectionsChanged(servers)
 	}
-	cr.submitter.ServerConnectionsChanged(servers)
 }
 
 func (cr *connectionRun) handleMsgFromClient(msg *cmsgs.ClientMessage) error {

@@ -241,7 +241,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 	if err != nil {
 		log.Println("TopologyTransmogrifier error:", err)
 	}
-	tt.connectionManager.RemoveServerConnectionSubscriber(tt, paxos.Async)
+	tt.connectionManager.RemoveServerConnectionSubscriber(tt)
 	tt.cellTail.Terminate()
 }
 
@@ -594,7 +594,7 @@ func (task *targetConfig) shareGoalWithAll() {
 
 func (task *targetConfig) ensureRemoveTaskSender() {
 	if task.sender != nil {
-		task.connectionManager.RemoveServerConnectionSubscriber(task.sender, paxos.Async)
+		task.connectionManager.RemoveServerConnectionSubscriber(task.sender)
 		task.sender = nil
 	}
 }
@@ -1868,7 +1868,7 @@ func newEmigrator(task *migrate) *emigrator {
 
 func (e *emigrator) stopAsync() {
 	atomic.StoreInt32(&e.stop, 1)
-	e.connectionManager.RemoveServerConnectionSubscriber(e, paxos.Async)
+	e.connectionManager.RemoveServerConnectionSubscriber(e)
 }
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
@@ -2036,7 +2036,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 }
 
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	defer it.connectionManager.RemoveServerConnectionSubscriber(it, paxos.Async)
+	defer it.connectionManager.RemoveServerConnectionSubscriber(it)
 
 	if atomic.LoadInt32(&it.stop) == 1 {
 		return

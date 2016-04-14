@@ -155,7 +155,6 @@ type connectionManagerMsgServerConnAddSubscriber struct {
 type connectionManagerMsgServerConnRemoveSubscriber struct {
 	connectionManagerMsgBasic
 	paxos.ServerConnectionSubscriber
-	resultChan chan struct{}
 }
 
 type connectionManagerMsgSetTopology struct {
@@ -236,7 +235,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConn
 	cm.Lock()
 	delete(cm.connCountToClient, connNumber)
 	cm.Unlock()
-	cm.RemoveServerConnectionSubscriber(conn, paxos.Async)
+	cm.RemoveServerConnectionSubscriber(conn)
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
@@ -258,13 +257,8 @@ func (cm *ConnectionManager) AddServerConnectionSubscriber(obs paxos.ServerConne
 	cm.enqueueQuery(connectionManagerMsgServerConnAddSubscriber{ServerConnectionSubscriber: obs})
 }
 
-func (cm *ConnectionManager) RemoveServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber, sync paxos.Blocking) {
-	if sync == paxos.Async {
-		cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
-	} else {
-		resultChan := make(chan struct{})
-		cm.enqueueSyncQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs, resultChan: resultChan}, resultChan)
-	}
+func (cm *ConnectionManager) RemoveServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber) {
+	cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
 }
 
 func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, onInstalled func()) {
@@ -394,7 +388,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgServerConnAddSubscriber:
 				cm.serverConnSubscribers.AddSubscriber(msgT.ServerConnectionSubscriber)
 			case connectionManagerMsgServerConnRemoveSubscriber:
-				cm.serverConnSubscribers.RemoveSubscriber(msgT.ServerConnectionSubscriber, msgT.resultChan)
+				cm.serverConnSubscribers.RemoveSubscriber(msgT.ServerConnectionSubscriber)
 			case *connectionManagerMsgTopologyAddSubscriber:
 				msgT.topology = cm.topology
 				close(msgT.resultChan)
@@ -669,11 +663,8 @@ func (subs serverConnSubscribers) AddSubscriber(ob paxos.ServerConnectionSubscri
 	}
 }
 
-func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubscriber, resultChan chan struct{}) {
+func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubscriber) {
 	delete(subs.subscribers, ob)
-	if resultChan != nil {
-		close(resultChan)
-	}
 }
 
 // topologySubscribers

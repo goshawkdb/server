@@ -211,7 +211,7 @@ func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *msgs.Txn) {
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
 	if aalc.twoBSender != nil {
-		aalc.acceptorManager.RemoveServerConnectionSubscriber(aalc.twoBSender, Sync)
+		aalc.acceptorManager.RemoveServerConnectionSubscriber(aalc.twoBSender)
 		aalc.twoBSender = nil
 	}
 
@@ -327,7 +327,7 @@ func (adfd *acceptorDeleteFromDisk) init(a *Acceptor, txn *msgs.Txn) {
 
 func (adfd *acceptorDeleteFromDisk) start() {
 	if adfd.twoBSender != nil {
-		adfd.acceptorManager.RemoveServerConnectionSubscriber(adfd.twoBSender, Sync)
+		adfd.acceptorManager.RemoveServerConnectionSubscriber(adfd.twoBSender)
 		adfd.twoBSender = nil
 	}
 	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
