@@ -306,8 +306,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 		return
 	}
 
-	// FIXME
-	outcome, _, allAgreed := pro.outcomeAccumulator.BallotOutcomeReceived(sender, outcome)
+	outcome, allAgreed := pro.outcomeAccumulator.BallotOutcomeReceived(sender, outcome)
 	if allAgreed {
 		pro.allAcceptorsAgree()
 	}

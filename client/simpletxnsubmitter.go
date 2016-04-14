@@ -124,8 +124,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 
 	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.FInc()), acceptors)
 	consumer := func(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
-		// FIXME
-		if outcome, _, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
+		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
 			shutdownFun(false)
 			continuation(txnId, outcome)
