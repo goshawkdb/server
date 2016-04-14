@@ -207,7 +207,7 @@ func (pab *proposerAwaitBallots) start() {
 	pab.submitter = common.RMId(pab.txn.TxnCap.Submitter())
 	pab.submitterBootCount = pab.txn.TxnCap.SubmitterBootCount()
 	if pab.txn.Retry {
-		pab.proposerManager.ConnectionManager.AddServerConnectionSubscriber(pab)
+		pab.proposerManager.AddServerConnectionSubscriber(pab)
 	}
 }
 
@@ -281,7 +281,7 @@ func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 
 func (pro *proposerReceiveOutcomes) start() {
 	if pro.txn != nil && pro.txn.Retry {
-		pro.proposerManager.ConnectionManager.RemoveServerConnectionSubscriber(&pro.proposerAwaitBallots, Async)
+		pro.proposerManager.RemoveServerConnectionSubscriber(&pro.proposerAwaitBallots, Async)
 	}
 	if pro.outcome != nil {
 		// we've received enough outcomes already!
@@ -327,7 +327,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// goes missing, if the acceptor sends us further 2Bs then
 			// we'll send back further TLCs from proposer manager. So the
 			// use of OSS here is correct.
-			NewOneShotSender(tlcMsg, pro.proposerManager.ConnectionManager, knownAcceptors...)
+			NewOneShotSender(tlcMsg, pro.proposerManager, knownAcceptors...)
 			return
 		}
 	}
@@ -451,7 +451,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		tlcMsg := MakeTxnLocallyCompleteMsg(prgc.txnId)
 		prgc.tlcSender = NewRepeatingSender(tlcMsg, prgc.acceptors...)
 		server.Log(prgc.txnId, "Adding TLC Sender to", prgc.acceptors)
-		prgc.proposerManager.ConnectionManager.AddServerConnectionSubscriber(prgc.tlcSender)
+		prgc.proposerManager.AddServerConnectionSubscriber(prgc.tlcSender)
 	}
 }
 
@@ -512,7 +512,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 				return
 			}
 			paf.proposerManager.Exe.Enqueue(func() {
-				paf.proposerManager.ConnectionManager.RemoveServerConnectionSubscriber(paf.tlcSender, Async)
+				paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender, Async)
 				paf.tlcSender = nil
 				paf.proposerManager.TxnFinished(paf.txnId)
 			})

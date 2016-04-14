@@ -21,29 +21,25 @@ func init() {
 
 type AcceptorManager struct {
 	ServerConnectionPublisher
-	RMId              common.RMId
-	DB                *db.Databases
-	ConnectionManager ConnectionManager
-	Exe               *dispatcher.Executor
-	instances         map[instanceId]*instance
-	acceptors         map[common.TxnId]*acceptorInstances
-	Topology          *configuration.Topology
+	RMId      common.RMId
+	DB        *db.Databases
+	Exe       *dispatcher.Executor
+	instances map[instanceId]*instance
+	acceptors map[common.TxnId]*acceptorInstances
+	Topology  *configuration.Topology
 }
 
 func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
-	return &AcceptorManager{
-		RMId:              rmId,
-		DB:                db,
-		ConnectionManager: cm,
-		Exe:               exe,
-		instances:         make(map[instanceId]*instance),
-		acceptors:         make(map[common.TxnId]*acceptorInstances),
+	am := &AcceptorManager{
+		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		RMId:      rmId,
+		DB:        db,
+		Exe:       exe,
+		instances: make(map[instanceId]*instance),
+		acceptors: make(map[common.TxnId]*acceptorInstances),
 	}
-}
-
-func (am *AcceptorManager) init() {
-	am.ServerConnectionPublisher = NewServerConnectionPublisherProxy(am.Exe, am.ConnectionManager)
-	am.Topology = am.ConnectionManager.AddTopologySubscriber(am)
+	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(am) })
+	return am
 }
 
 func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceId, vUUId *common.VarUUId) *instance {

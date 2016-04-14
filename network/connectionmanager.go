@@ -418,9 +418,11 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	for _, cd := range cm.servers {
 		cd.Shutdown(paxos.Sync)
 	}
+	cm.RLock()
 	for _, cc := range cm.connCountToClient {
 		cc.Shutdown(paxos.Sync)
 	}
+	cm.RUnlock()
 	if shutdownChan != nil {
 		close(shutdownChan)
 	}
@@ -620,6 +622,7 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 			conn.Connection.Status(sc.Fork())
 		}
 	}
+	cm.RLock()
 	sc.Emit(fmt.Sprintf("Client Connection Count: %v", len(cm.connCountToClient)))
 	cm.connCountToClient[0].(*client.LocalConnection).Status(sc.Fork())
 	for _, conn := range cm.connCountToClient {
@@ -627,6 +630,7 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 			c.Status(sc.Fork())
 		}
 	}
+	cm.RUnlock()
 	cm.Dispatchers.VarDispatcher.Status(sc.Fork())
 	cm.Dispatchers.ProposerDispatcher.Status(sc.Fork())
 	cm.Dispatchers.AcceptorDispatcher.Status(sc.Fork())

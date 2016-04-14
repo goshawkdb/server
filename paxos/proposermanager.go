@@ -27,28 +27,27 @@ const ( //                  txnId  rmId
 type instanceIdPrefix [instanceIdPrefixLen]byte
 
 type ProposerManager struct {
-	RMId              common.RMId
-	VarDispatcher     *eng.VarDispatcher
-	Exe               *dispatcher.Executor
-	ConnectionManager ConnectionManager
-	DB                *db.Databases
-	proposals         map[instanceIdPrefix]*proposal
-	proposers         map[common.TxnId]*Proposer
-	topology          *configuration.Topology
+	ServerConnectionPublisher
+	RMId          common.RMId
+	VarDispatcher *eng.VarDispatcher
+	Exe           *dispatcher.Executor
+	DB            *db.Databases
+	proposals     map[instanceIdPrefix]*proposal
+	proposers     map[common.TxnId]*Proposer
+	topology      *configuration.Topology
 }
 
 func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, db *db.Databases) *ProposerManager {
-	pm := &ProposerManager{
-		RMId:              rmId,
-		proposals:         make(map[instanceIdPrefix]*proposal),
-		proposers:         make(map[common.TxnId]*Proposer),
-		VarDispatcher:     varDispatcher,
-		Exe:               exe,
-		ConnectionManager: cm,
-		DB:                db,
-		topology:          nil,
+	return &ProposerManager{
+		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		RMId:          rmId,
+		proposals:     make(map[instanceIdPrefix]*proposal),
+		proposers:     make(map[common.TxnId]*Proposer),
+		VarDispatcher: varDispatcher,
+		Exe:           exe,
+		DB:            db,
+		topology:      nil,
 	}
-	return pm
 }
 
 func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error {
@@ -233,7 +232,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// We have no state here, and if we receive further 2Bs
 				// from the repeating sender at the acceptor then we will
 				// send further TLCs. So the use of OSS here is correct.
-				NewOneShotSender(MakeTxnLocallyCompleteMsg(txnId), pm.ConnectionManager, sender)
+				NewOneShotSender(MakeTxnLocallyCompleteMsg(txnId), pm, sender)
 			}
 		}
 

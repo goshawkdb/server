@@ -24,9 +24,7 @@ func NewAcceptorDispatcher(rmId common.RMId, cm ConnectionManager, count uint8, 
 	}
 	ad.Dispatcher.Init(count)
 	for idx, exe := range ad.Executors {
-		am := NewAcceptorManager(rmId, exe, cm, db)
-		ad.acceptormanagers[idx] = am
-		exe.Enqueue(am.init)
+		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db)
 	}
 	ad.loadFromDisk(db)
 	return ad
