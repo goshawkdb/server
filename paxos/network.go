@@ -4,8 +4,8 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/dispatcher"
+	eng "goshawkdb.io/server/txnengine"
 )
 
 type Blocking bool
@@ -17,8 +17,7 @@ const (
 
 type ConnectionManager interface {
 	ServerConnectionPublisher
-	AddTopologySubscriber(obs TopologySubscriber) *configuration.Topology
-	RemoveTopologySubscriberAsync(obs TopologySubscriber)
+	eng.TopologyPublisher
 	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
@@ -33,10 +32,6 @@ type ServerConnectionSubscriber interface {
 	ConnectedRMs(map[common.RMId]Connection)
 	ConnectionLost(common.RMId, map[common.RMId]Connection)
 	ConnectionEstablished(common.RMId, Connection, map[common.RMId]Connection)
-}
-
-type TopologySubscriber interface {
-	TopologyChanged(*configuration.Topology)
 }
 
 type Connection interface {

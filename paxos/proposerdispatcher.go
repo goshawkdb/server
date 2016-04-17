@@ -20,13 +20,13 @@ type ProposerDispatcher struct {
 	proposermanagers []*ProposerManager
 }
 
-func NewProposerDispatcher(count uint8, rmId common.RMId, varDispatcher *eng.VarDispatcher, cm ConnectionManager, db *db.Databases) *ProposerDispatcher {
+func NewProposerDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
 		proposermanagers: make([]*ProposerManager, count),
 	}
 	pd.Dispatcher.Init(count)
 	for idx, exe := range pd.Executors {
-		pd.proposermanagers[idx] = NewProposerManager(rmId, exe, varDispatcher, cm, db)
+		pd.proposermanagers[idx] = NewProposerManager(exe, rmId, cm, db, varDispatcher)
 	}
 	pd.loadFromDisk(db)
 	return pd

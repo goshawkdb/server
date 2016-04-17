@@ -297,7 +297,7 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
-	err := lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, false)
+	err := lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, true)
 	if err != nil {
 		txnQuery.errored(err)
 	}

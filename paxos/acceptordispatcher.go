@@ -18,7 +18,7 @@ type AcceptorDispatcher struct {
 	acceptormanagers  []*AcceptorManager
 }
 
-func NewAcceptorDispatcher(rmId common.RMId, cm ConnectionManager, count uint8, db *db.Databases) *AcceptorDispatcher {
+func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
 		acceptormanagers: make([]*AcceptorManager, count),
 	}

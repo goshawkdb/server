@@ -141,7 +141,7 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology) {
 		am.Topology = topology
 		for _, ai := range am.acceptors {
 			if ai.acceptor != nil {
-				ai.acceptor.TopologyChange(topology)
+				ai.acceptor.TopologyChanged(topology)
 			}
 		}
 	})

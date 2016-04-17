@@ -149,8 +149,27 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 			}
 		})
 
+	cm.AddServerConnectionSubscriber(tt)
+
+	go tt.actorLoop(head, config)
+	return tt, tt.localEstablished
+}
+
+func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+}
+
+func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+}
+
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+}
+
+func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *configuration.Configuration) {
 	subscriberInstalled := make(chan struct{})
-	cm.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
+	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
 		if err != nil {
 			panic(fmt.Errorf("Error trying to subscribe to topology: %v", err))
 		}
@@ -176,25 +195,6 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 	}, true, configuration.TopologyVarUUId)
 	<-subscriberInstalled
 
-	cm.AddServerConnectionSubscriber(tt)
-
-	go tt.actorLoop(head, config)
-	return tt, tt.localEstablished
-}
-
-func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
-}
-
-func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
-}
-
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
-}
-
-func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *configuration.Configuration) {
 	var (
 		err       error
 		queryChan <-chan topologyTransmogrifierMsg

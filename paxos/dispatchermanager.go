@@ -27,11 +27,11 @@ func NewDispatchers(cm ConnectionManager, rmId common.RMId, count uint8, db *db.
 
 	d := &Dispatchers{
 		db:                 db,
-		AcceptorDispatcher: NewAcceptorDispatcher(rmId, cm, count, db),
-		VarDispatcher:      eng.NewVarDispatcher(count, db, lc),
+		AcceptorDispatcher: NewAcceptorDispatcher(count, rmId, cm, db),
+		VarDispatcher:      eng.NewVarDispatcher(count, rmId, cm, db, lc),
 		connectionManager:  cm,
 	}
-	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, d.VarDispatcher, cm, db)
+	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, cm, db, d.VarDispatcher)
 
 	return d
 }

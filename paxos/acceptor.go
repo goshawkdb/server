@@ -290,7 +290,10 @@ func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(sender c
 	}
 }
 
-func (aalc *acceptorAwaitLocallyComplete) TopologyChange(topology *configuration.Topology) {
+func (aalc *acceptorAwaitLocallyComplete) TopologyChanged(topology *configuration.Topology) {
+	if topology == nil {
+		return
+	}
 	rmsRemoved := topology.RMsRemoved()
 	if _, found := rmsRemoved[aalc.acceptorManager.RMId]; found {
 		return

@@ -13,6 +13,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"sync"
 )
@@ -44,7 +45,7 @@ type serverConnSubscribers struct {
 
 type topologySubscribers struct {
 	*ConnectionManager
-	subscribers map[paxos.TopologySubscriber]server.EmptyStruct
+	subscribers map[eng.TopologySubscriber]server.EmptyStruct
 }
 
 func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg *msgs.Message) {
@@ -165,14 +166,14 @@ type connectionManagerMsgSetTopology struct {
 
 type connectionManagerMsgTopologyAddSubscriber struct {
 	connectionManagerMsgBasic
-	paxos.TopologySubscriber
+	eng.TopologySubscriber
 	topology   *configuration.Topology
 	resultChan chan struct{}
 }
 
 type connectionManagerMsgTopologyRemoveSubscriber struct {
 	connectionManagerMsgBasic
-	paxos.TopologySubscriber
+	eng.TopologySubscriber
 }
 
 type connectionManagerMsgStatus struct {
@@ -268,7 +269,7 @@ func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, onIns
 	})
 }
 
-func (cm *ConnectionManager) AddTopologySubscriber(obs paxos.TopologySubscriber) *configuration.Topology {
+func (cm *ConnectionManager) AddTopologySubscriber(obs eng.TopologySubscriber) *configuration.Topology {
 	query := &connectionManagerMsgTopologyAddSubscriber{
 		TopologySubscriber: obs,
 		resultChan:         make(chan struct{}),
@@ -279,7 +280,7 @@ func (cm *ConnectionManager) AddTopologySubscriber(obs paxos.TopologySubscriber)
 	return nil
 }
 
-func (cm *ConnectionManager) RemoveTopologySubscriberAsync(obs paxos.TopologySubscriber) {
+func (cm *ConnectionManager) RemoveTopologySubscriberAsync(obs eng.TopologySubscriber) {
 	cm.enqueueQuery(connectionManagerMsgTopologyRemoveSubscriber{TopologySubscriber: obs})
 }
 
@@ -320,7 +321,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 	}
 	cm.serverConnSubscribers.subscribers = make(map[paxos.ServerConnectionSubscriber]server.EmptyStruct)
 	cm.serverConnSubscribers.ConnectionManager = cm
-	cm.topologySubscribers.subscribers = make(map[paxos.TopologySubscriber]server.EmptyStruct)
+	cm.topologySubscribers.subscribers = make(map[eng.TopologySubscriber]server.EmptyStruct)
 	cm.topologySubscribers.ConnectionManager = cm
 
 	var head *cc.ChanCellHead
@@ -579,7 +580,6 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, onIns
 		cm.servers[cd.host] = cd
 		cm.serverConnSubscribers.ServerConnEstablished(cd)
 	}
-	// todo - get rid of these settopolgies too.
 	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, onInstalled)
 }
 
@@ -675,7 +675,7 @@ func (subs topologySubscribers) TopologyChanged() {
 	}
 }
 
-func (subs topologySubscribers) AddSubscriber(ob paxos.TopologySubscriber) {
+func (subs topologySubscribers) AddSubscriber(ob eng.TopologySubscriber) {
 	if _, found := subs.subscribers[ob]; found {
 		server.Log(ob, "CM found duplicate add topology subscriber")
 	} else {
@@ -684,7 +684,7 @@ func (subs topologySubscribers) AddSubscriber(ob paxos.TopologySubscriber) {
 	}
 }
 
-func (subs topologySubscribers) RemoveSubscriber(ob paxos.TopologySubscriber) {
+func (subs topologySubscribers) RemoveSubscriber(ob eng.TopologySubscriber) {
 	delete(subs.subscribers, ob)
 }
 

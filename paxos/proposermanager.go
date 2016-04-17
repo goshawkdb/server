@@ -37,7 +37,7 @@ type ProposerManager struct {
 	topology      *configuration.Topology
 }
 
-func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, db *db.Databases) *ProposerManager {
+func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerManager {
 	return &ProposerManager{
 		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
 		RMId:          rmId,

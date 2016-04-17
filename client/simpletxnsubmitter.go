@@ -134,10 +134,10 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, bufferOnTopologyChange bool) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() || (sts.topology.Next() != nil && bufferOnTopologyChange) {
-		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, bufferOnTopologyChange) }
+	if sts.topology.IsBlank() {
+		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
 		} else {
@@ -146,7 +146,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		return nil
 	}
 	version := sts.topology.Version
-	if next := sts.topology.Next(); next != nil {
+	if next := sts.topology.Next(); next != nil && useNextVersion {
 		version = next.Version
 	}
 	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version)
@@ -307,14 +307,29 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 			if err != nil {
 				return nil, err
 			}
+		}
+		hashCodes = hashCodes[:sts.topology.TwoFInc]
+		if clientAction.Which() == cmsgs.CLIENTACTION_ROLL {
+			// We cannot roll for anyone else. This could try to happen
+			// during immigration.
+			found := false
+			for _, rmId := range hashCodes {
+				if found = rmId == sts.rmId; found {
+					break
+				}
+			}
+			if !found {
+				return nil, eng.AbortRollError
+			}
 
-			if clientAction.Which() == cmsgs.CLIENTACTION_ROLL && hashCodes[0] != sts.rmId {
+			// If we're not first then first must not be active
+			if hashCodes[0] != sts.rmId {
 				if _, found := sts.connections[hashCodes[0]]; found {
 					return nil, eng.AbortRollError
 				}
 			}
 		}
-		hashCodes = hashCodes[:sts.topology.TwoFInc]
+
 		picker.AddPermutation(hashCodes)
 		for _, rmId := range hashCodes {
 			if listPtr, found := rmIdToActionIndices[rmId]; found {

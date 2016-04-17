@@ -6,6 +6,7 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -14,6 +15,8 @@ import (
 
 type VarManager struct {
 	LocalConnection
+	Topology   *configuration.Topology
+	RMId       common.RMId
 	db         *db.Databases
 	active     map[common.VarUUId]*Var
 	onDisk     func()
@@ -27,13 +30,35 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, db *db.Databases, lc LocalConnection) *VarManager {
-	return &VarManager{
+func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection) *VarManager {
+	vm := &VarManager{
 		LocalConnection: lc,
+		RMId:            rmId,
 		db:              db,
 		active:          make(map[common.VarUUId]*Var),
 		callbacks:       []func(){},
 		exe:             exe,
+	}
+	exe.Enqueue(func() { vm.Topology = cm.AddTopologySubscriber(vm) })
+	return vm
+}
+
+func (vm *VarManager) TopologyChanged(topology *configuration.Topology) {
+	vm.Topology = topology
+}
+
+func (vm *VarManager) RollAllowed() bool {
+	if vm.Topology == nil {
+		return true
+	} else if next := vm.Topology.Next(); next == nil {
+		return true
+	} else {
+		for _, rmId := range next.BarrierReached {
+			if rmId == vm.RMId {
+				return false
+			}
+		}
+		return true
 	}
 }
 

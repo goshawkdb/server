@@ -6,23 +6,33 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"sync/atomic"
 )
+
+type TopologyPublisher interface {
+	AddTopologySubscriber(obs TopologySubscriber) *configuration.Topology
+	RemoveTopologySubscriberAsync(obs TopologySubscriber)
+}
+
+type TopologySubscriber interface {
+	TopologyChanged(*configuration.Topology)
+}
 
 type VarDispatcher struct {
 	dispatcher.Dispatcher
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, db *db.Databases, lc LocalConnection) *VarDispatcher {
+func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
 	vd.Dispatcher.Init(count)
 	for idx, exe := range vd.Executors {
-		vd.varmanagers[idx] = NewVarManager(exe, db, lc)
+		vd.varmanagers[idx] = NewVarManager(exe, rmId, cm, db, lc)
 	}
 	return vd
 }
