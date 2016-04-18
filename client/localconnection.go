@@ -10,6 +10,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"sync"
 )
@@ -158,8 +159,8 @@ func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *
 	})
 }
 
-func (lc *LocalConnection) TopologyChanged(topology *configuration.Topology) {
-	lc.enqueueQuery(localConnectionMsgTopologyChanged{topology: topology})
+func (lc *LocalConnection) TopologyChanged(tc eng.TopologyChange) {
+	lc.enqueueQuery(localConnectionMsgTopologyChanged{topology: tc.Topology()})
 }
 
 func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error) {

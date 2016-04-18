@@ -38,7 +38,7 @@ type ProposerManager struct {
 }
 
 func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerManager {
-	return &ProposerManager{
+	pm := &ProposerManager{
 		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
 		RMId:          rmId,
 		proposals:     make(map[instanceIdPrefix]*proposal),
@@ -48,6 +48,8 @@ func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm Connectio
 		DB:            db,
 		topology:      nil,
 	}
+	exe.Enqueue(func() { pm.topology = cm.AddTopologySubscriber(pm) })
+	return pm
 }
 
 func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error {
@@ -62,14 +64,15 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (pm *ProposerManager) SetTopology(topology *configuration.Topology, installed func()) {
-	pm.topology = topology
-	if installed != nil {
-		installed()
-	}
-	for _, proposer := range pm.proposers {
-		proposer.TopologyChange(topology)
-	}
+func (pm *ProposerManager) TopologyChanged(tc eng.TopologyChange) {
+	tc.AddOne(eng.ProposerSubscriber)
+	pm.Exe.Enqueue(func() {
+		pm.topology = tc.Topology()
+		for _, proposer := range pm.proposers {
+			proposer.TopologyChange(pm.topology)
+		}
+		tc.Done(eng.ProposerSubscriber)
+	})
 }
 
 func (pm *ProposerManager) ImmigrationReceived(txnId *common.TxnId, txnCap *msgs.Txn, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {

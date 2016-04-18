@@ -9,7 +9,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"sync/atomic"
 )
 
 type TopologyPublisher interface {
@@ -18,7 +17,24 @@ type TopologyPublisher interface {
 }
 
 type TopologySubscriber interface {
-	TopologyChanged(*configuration.Topology)
+	TopologyChanged(TopologyChange)
+}
+
+type TopologyChangeSubscriberType uint8
+
+const (
+	VarSubscriber                     TopologyChangeSubscriberType = iota
+	ProposerSubscriber                TopologyChangeSubscriberType = iota
+	AcceptorSubscriber                TopologyChangeSubscriberType = iota
+	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
+	TopologyChangeSubscriberTypeLimit int                          = iota
+)
+
+type TopologyChange interface {
+	Topology() *configuration.Topology
+	Done(TopologyChangeSubscriberType)
+	AddOne(TopologyChangeSubscriberType)
+	HasCallbackFor(TopologyChangeSubscriberType) bool
 }
 
 type VarDispatcher struct {
@@ -39,19 +55,6 @@ func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *d
 
 func (vd *VarDispatcher) ApplyToVar(fun func(*Var, error), createIfMissing bool, vUUId *common.VarUUId) {
 	vd.withVarManager(vUUId, func(vm *VarManager) { vm.ApplyToVar(fun, createIfMissing, vUUId) })
-}
-
-func (vd *VarDispatcher) OnDisk(onDiskOrig func()) {
-	count := int32(vd.ExecutorCount)
-	onDisk := func() {
-		if atomic.AddInt32(&count, -1) == 0 {
-			onDiskOrig()
-		}
-	}
-	for idx, exe := range vd.Executors {
-		mgr := vd.varmanagers[idx]
-		exe.Enqueue(func() { mgr.OnDisk(onDisk) })
-	}
 }
 
 func (vd *VarDispatcher) Status(sc *server.StatusConsumer) {

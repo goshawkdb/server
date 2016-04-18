@@ -7,12 +7,10 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
-	"sync/atomic"
 )
 
 type ProposerDispatcher struct {
@@ -74,22 +72,6 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, sta
 		txnId := common.MakeTxnId(txnCap.Id())
 		varCaps := elem.Vars()
 		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txnId, &txnCap, &varCaps, stateChange) })
-	}
-}
-
-func (pd *ProposerDispatcher) SetTopology(topology *configuration.Topology, installed func()) {
-	if installed != nil {
-		orig := installed
-		count := int32(len(pd.Executors))
-		installed = func() {
-			if atomic.AddInt32(&count, -1) == 0 {
-				orig()
-			}
-		}
-	}
-	for idx, exe := range pd.Executors {
-		mgr := pd.proposermanagers[idx]
-		exe.Enqueue(func() { mgr.SetTopology(topology, installed) })
 	}
 }
 

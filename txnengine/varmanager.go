@@ -19,7 +19,7 @@ type VarManager struct {
 	RMId       common.RMId
 	db         *db.Databases
 	active     map[common.VarUUId]*Var
-	onDisk     func()
+	onDisk     TopologyChange
 	lc         LocalConnection
 	callbacks  []func()
 	beaterLive bool
@@ -30,7 +30,7 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection) *VarManager {
+func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublisher, db *db.Databases, lc LocalConnection) *VarManager {
 	vm := &VarManager{
 		LocalConnection: lc,
 		RMId:            rmId,
@@ -39,12 +39,19 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, cm TopologyPublis
 		callbacks:       []func(){},
 		exe:             exe,
 	}
-	exe.Enqueue(func() { vm.Topology = cm.AddTopologySubscriber(vm) })
+	exe.Enqueue(func() { vm.Topology = tp.AddTopologySubscriber(vm) })
 	return vm
 }
 
-func (vm *VarManager) TopologyChanged(topology *configuration.Topology) {
-	vm.Topology = topology
+func (vm *VarManager) TopologyChanged(tc TopologyChange) {
+	tc.AddOne(VarSubscriber)
+	vm.exe.Enqueue(func() {
+		vm.Topology = tc.Topology()
+		if tc.HasCallbackFor(VarSubscriber) {
+			vm.onDisk = tc
+			vm.checkAllDisk()
+		}
+	})
 }
 
 func (vm *VarManager) RollAllowed() bool {
@@ -80,24 +87,18 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	}
 }
 
-func (vm *VarManager) OnDisk(onDisk func()) {
-	vm.onDisk = onDisk
-	vm.checkAllDisk()
-}
-
-func (vm *VarManager) checkAllDisk() bool {
+func (vm *VarManager) checkAllDisk() {
 	onDisk := vm.onDisk
 	if onDisk == nil {
-		return true
+		return
 	}
 	for _, v := range vm.active {
 		if !v.isOnDisk() {
-			return false
+			return
 		}
 	}
 	vm.onDisk = nil
-	onDisk()
-	return true
+	onDisk.Done(VarSubscriber)
 }
 
 // var.VarLifecycle interface

@@ -17,6 +17,7 @@ import (
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"math/rand"
 	"net"
@@ -96,8 +97,8 @@ func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *com
 	})
 }
 
-func (conn *Connection) TopologyChanged(topology *configuration.Topology) {
-	conn.enqueueQuery(connectionMsgTopologyChanged{topology: topology})
+func (conn *Connection) TopologyChanged(tc eng.TopologyChange) {
+	conn.enqueueQuery(connectionMsgTopologyChanged{topology: tc.Topology()})
 }
 
 func (conn *Connection) Status(sc *server.StatusConsumer) {

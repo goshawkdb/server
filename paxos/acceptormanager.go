@@ -13,6 +13,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	eng "goshawkdb.io/server/txnengine"
 )
 
 func init() {
@@ -136,14 +137,17 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology) {
+func (am *AcceptorManager) TopologyChanged(tc eng.TopologyChange) {
+	tc.AddOne(eng.AcceptorSubscriber)
 	am.Exe.Enqueue(func() {
+		topology := tc.Topology()
 		am.Topology = topology
 		for _, ai := range am.acceptors {
 			if ai.acceptor != nil {
 				ai.acceptor.TopologyChanged(topology)
 			}
 		}
+		tc.Done(eng.AcceptorSubscriber)
 	})
 }
 

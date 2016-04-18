@@ -160,8 +160,7 @@ type connectionManagerMsgServerConnRemoveSubscriber struct {
 
 type connectionManagerMsgSetTopology struct {
 	connectionManagerMsgBasic
-	topology    *configuration.Topology
-	onInstalled func()
+	topologyChange eng.TopologyChange
 }
 
 type connectionManagerMsgTopologyAddSubscriber struct {
@@ -262,11 +261,9 @@ func (cm *ConnectionManager) RemoveServerConnectionSubscriber(obs paxos.ServerCo
 	cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
 }
 
-func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, onInstalled func()) {
-	cm.enqueueQuery(connectionManagerMsgSetTopology{
-		topology:    topology,
-		onInstalled: onInstalled,
-	})
+func (cm *ConnectionManager) SetTopology(tc eng.TopologyChange) {
+	tc.AddOne(eng.ConnectionManagerSubscriber)
+	cm.enqueueQuery(connectionManagerMsgSetTopology{topologyChange: tc})
 }
 
 func (cm *ConnectionManager) AddTopologySubscriber(obs eng.TopologySubscriber) *configuration.Topology {
@@ -385,7 +382,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case *connectionManagerMsgClientEstablished:
 				cm.clientEstablished(msgT)
 			case connectionManagerMsgSetTopology:
-				cm.setTopology(msgT.topology, msgT.onInstalled)
+				cm.setTopology(msgT.topologyChange)
 			case connectionManagerMsgServerConnAddSubscriber:
 				cm.serverConnSubscribers.AddSubscriber(msgT.ServerConnectionSubscriber)
 			case connectionManagerMsgServerConnRemoveSubscriber:
@@ -566,10 +563,11 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 	cm.serverConnSubscribers.AddSubscriber(msg.conn)
 }
 
-func (cm *ConnectionManager) setTopology(topology *configuration.Topology, onInstalled func()) {
+func (cm *ConnectionManager) setTopology(tc eng.TopologyChange) {
+	topology := tc.Topology()
 	server.Log("Topology change:", topology)
 	cm.topology = topology
-	cm.topologySubscribers.TopologyChanged()
+	cm.topologySubscribers.TopologyChanged(tc)
 	cd := cm.rmToServer[cm.RMId]
 	if topology.Root.VarUUId.Compare(cd.rootId) != common.EQ {
 		delete(cm.rmToServer, cd.rmId)
@@ -580,7 +578,7 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, onIns
 		cm.servers[cd.host] = cd
 		cm.serverConnSubscribers.ServerConnEstablished(cd)
 	}
-	cm.Dispatchers.ProposerDispatcher.SetTopology(topology, onInstalled)
+	tc.Done(eng.ConnectionManagerSubscriber)
 }
 
 func (cm *ConnectionManager) cloneRMToServer() map[common.RMId]paxos.Connection {
@@ -668,10 +666,9 @@ func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubs
 }
 
 // topologySubscribers
-func (subs topologySubscribers) TopologyChanged() {
-	t := subs.topology
+func (subs topologySubscribers) TopologyChanged(tc eng.TopologyChange) {
 	for ob := range subs.subscribers {
-		ob.TopologyChanged(t)
+		ob.TopologyChanged(tc)
 	}
 }
 
@@ -680,7 +677,6 @@ func (subs topologySubscribers) AddSubscriber(ob eng.TopologySubscriber) {
 		server.Log(ob, "CM found duplicate add topology subscriber")
 	} else {
 		subs.subscribers[ob] = server.EmptyStructVal
-		ob.TopologyChanged(subs.topology)
 	}
 }
 

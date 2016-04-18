@@ -290,7 +290,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 
 	if tt.task == nil {
 		if next := topology.Next(); next == nil {
-			tt.installTopology(topology, false)
+			tt.installTopology(tt.newTopologyChanger(topology, nil))
 			localHost, remoteHosts, err := tt.active.LocalRemoteHosts(tt.listenPort)
 			if err != nil {
 				return err
@@ -319,30 +319,18 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	return nil
 }
 
-func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, tickOnInstalled bool) {
-	server.Log("Topology: Installing topology to connection manager, et al:", topology, tickOnInstalled)
-	if !tickOnInstalled {
-		tt.connectionManager.SetTopology(topology, nil)
-		return
+func (tt *TopologyTransmogrifier) installTopology(tc *TopologyChanger) {
+	server.Log("Topology: Installing topology to connection manager, et al:", tc)
+	if tt.localEstablished != nil {
+		tc.chainFunc(eng.ConnectionManagerSubscriber, func() error {
+			if tt.localEstablished != nil {
+				close(tt.localEstablished)
+				tt.localEstablished = nil
+			}
+			return nil
+		})
 	}
-	installed := func() error {
-		if tt.localEstablished != nil {
-			close(tt.localEstablished)
-			tt.localEstablished = nil
-		}
-		if tt.task != nil {
-			return tt.task.tick()
-		}
-		return nil
-	}
-	if topology.Next() != nil {
-		orig := installed
-		installed = func() error {
-			tt.installedOnProposers = topology
-			return orig()
-		}
-	}
-	tt.connectionManager.SetTopology(topology, func() { tt.enqueueQuery(topologyTransmogrifierMsgExe(installed)) })
+	tt.connectionManager.SetTopology(tc)
 }
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
@@ -711,7 +699,13 @@ func (task *ensureLocalTopology) tick() error {
 		// However, just because we have a local config doesn't mean it
 		// actually satisfies the goal. Essentially, we're pretending
 		// that the goal is in Next().
-		task.installTopology(task.active, true)
+		task.installTopology(task.newTopologyChanger(task.active, map[eng.TopologyChangeSubscriberType]func() error{
+			eng.ConnectionManagerSubscriber: func() error {
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			}}))
 		task.selectGoal(task.config)
 		return nil
 	}
@@ -760,7 +754,7 @@ func (task *joinCluster) tick() error {
 	}
 
 	// must install to connectionManager before launching any connections
-	task.installTopology(task.active, false)
+	task.installTopology(task.newTopologyChanger(task.active, nil))
 	// we may not have the youngest topology and there could be other
 	// hosts who have connected to us who are trying to send us a more
 	// up to date topology. So we shouldn't kill off those connections.
@@ -825,7 +819,7 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 
 	// We're about to create and run a txn, so we must make sure that
 	// txn's topology version is acceptable to our proposers.
-	task.installTopology(activeWithNext, false)
+	task.installTopology(task.newTopologyChanger(activeWithNext, nil))
 
 	switch resubmit, err := task.attemptCreateRoot(targetTopology); {
 	case err != nil:
@@ -852,7 +846,7 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// targetTopology to include the updated root. We should install
 	// this to the connectionManager.
 	activeWithNext.Root = targetTopology.Root
-	task.installTopology(activeWithNext, false)
+	task.installTopology(task.newTopologyChanger(activeWithNext, nil))
 
 	result, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
 	if err != nil {
@@ -964,7 +958,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	}
 	if !task.installing {
 		task.installing = true
-		task.installTopology(task.active, false)
+		task.installTopology(task.newTopologyChanger(task.active, nil))
 		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
 	}
 	// the -1 is because allRemoteHosts will not include localHost
@@ -1184,7 +1178,7 @@ func (task *awaitBarrierInstall) tick() error {
 	}
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
-	task.installTopology(task.active, false)
+	task.installTopology(task.newTopologyChanger(task.active, nil))
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 
@@ -1203,7 +1197,16 @@ func (task *awaitBarrierInstall) tick() error {
 		}
 	}
 
-	task.installTopology(task.active, true)
+	topology := task.active
+	task.installTopology(task.newTopologyChanger(topology, map[eng.TopologyChangeSubscriberType]func() error{
+		eng.ProposerSubscriber: func() error {
+			task.installedOnProposers = topology
+			if task.task != nil {
+				return task.task.tick()
+			}
+			return nil
+		},
+	}))
 
 	return task.nextState()
 }
@@ -1215,17 +1218,22 @@ func (task *awaitBarrierProposer) init(awaitBarrier *awaitBarrier) { task.awaitB
 func (task *awaitBarrierProposer) tick() error {
 	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
 		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
+
 		log.Println("Topology: Topology installed in proposer managers. Waiting for vars to go quiet.")
-		nextConfig := task.active.Next().Configuration
-		task.connectionManager.Dispatchers.VarDispatcher.OnDisk(func() {
-			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+
+		topology := task.active
+		nextConfig := topology.Next().Configuration
+
+		task.installTopology(task.newTopologyChanger(topology, map[eng.TopologyChangeSubscriberType]func() error{
+			eng.VarSubscriber: func() error {
 				task.varBarrierReached = nextConfig
 				if task.task == task.awaitBarrier {
 					return task.task.tick()
 				}
 				return nil
-			}))
-		})
+			},
+		}))
+
 		return task.nextState()
 	}
 	return nil
@@ -1292,7 +1300,7 @@ func (task *installTargetNew) tick() error {
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	if !task.installing {
 		task.installing = true
-		task.installTopology(task.active, false)
+		task.installTopology(task.newTopologyChanger(task.active, nil))
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1374,7 +1382,7 @@ func (task *migrate) tick() error {
 	if !task.installing {
 		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installing = true
-		task.installTopology(task.active, false)
+		task.installTopology(task.newTopologyChanger(task.active, nil))
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1526,7 +1534,7 @@ func (task *installCompletion) tick() error {
 	if !task.installing {
 		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installing = true
-		task.installTopology(task.active, false)
+		task.installTopology(task.newTopologyChanger(task.active, nil))
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -2123,4 +2131,71 @@ func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
 	if len(sb.elems) == server.MigrationBatchElemCount {
 		sb.flush()
 	}
+}
+
+// topologychanger
+type TopologyChanger struct {
+	*TopologyTransmogrifier
+	topology  *configuration.Topology
+	callbacks []guardedFunc
+}
+
+func (tt *TopologyTransmogrifier) newTopologyChanger(topology *configuration.Topology, cbsMap map[eng.TopologyChangeSubscriberType]func() error) *TopologyChanger {
+	callbacks := make([]guardedFunc, eng.TopologyChangeSubscriberTypeLimit)
+	for idx, fun := range cbsMap {
+		callbacks[idx].fun = fun
+	}
+	return &TopologyChanger{
+		TopologyTransmogrifier: tt,
+		topology:               topology,
+		callbacks:              callbacks,
+	}
+}
+
+func (tc *TopologyChanger) Topology() *configuration.Topology {
+	return tc.topology
+}
+
+func (tc *TopologyChanger) Done(idx eng.TopologyChangeSubscriberType) {
+	if gf := &tc.callbacks[idx]; gf.fun != nil {
+		if atomic.AddInt32(&gf.sem, -1) == 0 {
+			tc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				return gf.fun()
+			}))
+		}
+	}
+}
+
+func (tc *TopologyChanger) AddOne(idx eng.TopologyChangeSubscriberType) {
+	if gf := &tc.callbacks[idx]; gf.fun != nil {
+		atomic.AddInt32(&gf.sem, 1)
+	}
+}
+
+func (tc *TopologyChanger) HasCallbackFor(idx eng.TopologyChangeSubscriberType) bool {
+	gf := &tc.callbacks[idx]
+	return gf.fun != nil
+}
+
+func (tc *TopologyChanger) chainFunc(idx eng.TopologyChangeSubscriberType, fun func() error) {
+	if gf := &tc.callbacks[idx]; gf.fun == nil {
+		gf.fun = fun
+	} else {
+		orig := gf.fun
+		gf.fun = func() error {
+			if err := orig(); err != nil {
+				return err
+			}
+			return fun()
+		}
+	}
+}
+
+func (tc *TopologyChanger) String() string {
+	return fmt.Sprintf("TopologyChanger to %v", tc.topology)
+}
+
+type guardedFunc struct {
+	sem int32
+	fun func() error
 }
