@@ -1184,7 +1184,7 @@ func (task *awaitBarrierInstall) tick() error {
 	}
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
-	task.installTopology(task.active, true)
+	task.installTopology(task.active, false)
 	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 
@@ -1202,6 +1202,8 @@ func (task *awaitBarrierInstall) tick() error {
 			return nil
 		}
 	}
+
+	task.installTopology(task.active, true)
 
 	return task.nextState()
 }
