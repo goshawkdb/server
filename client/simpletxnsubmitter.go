@@ -136,7 +136,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 
 func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() {
+	if sts.topology.IsBlank() || (!useNextVersion && sts.topology.Next() != nil) {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
