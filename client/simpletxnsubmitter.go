@@ -60,6 +60,10 @@ func (sts *SimpleTxnSubmitter) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
+func (sts *SimpleTxnSubmitter) IsIdle() bool {
+	return len(sts.outcomeConsumers) == 0
+}
+
 func (sts *SimpleTxnSubmitter) EnsurePositions(varPosMap map[common.VarUUId]*common.Positions) {
 	for vUUId, pos := range varPosMap {
 		sts.hashCache.AddPosition(&vUUId, pos)

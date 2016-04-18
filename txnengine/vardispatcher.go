@@ -27,6 +27,7 @@ const (
 	ProposerSubscriber                TopologyChangeSubscriberType = iota
 	AcceptorSubscriber                TopologyChangeSubscriberType = iota
 	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
+	ConnectionSubscriber              TopologyChangeSubscriberType = iota
 	TopologyChangeSubscriberTypeLimit int                          = iota
 )
 

@@ -71,7 +71,7 @@ type connectionMsgOutcomeReceived struct {
 
 type connectionMsgTopologyChanged struct {
 	connectionMsgBasic
-	topology *configuration.Topology
+	topologyChange eng.TopologyChange
 }
 
 type connectionMsgStatus struct {
@@ -98,7 +98,8 @@ func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *com
 }
 
 func (conn *Connection) TopologyChanged(tc eng.TopologyChange) {
-	conn.enqueueQuery(connectionMsgTopologyChanged{topology: tc.Topology()})
+	tc.AddOne(eng.ConnectionSubscriber)
+	conn.enqueueQuery(connectionMsgTopologyChanged{topologyChange: tc})
 }
 
 func (conn *Connection) Status(sc *server.StatusConsumer) {
@@ -240,7 +241,7 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 	case connectionMsgOutcomeReceived:
 		conn.outcomeReceived(msgT)
 	case connectionMsgTopologyChanged:
-		err = conn.topologyChanged(msgT)
+		err = conn.topologyChanged(msgT.topologyChange)
 	case connectionMsgServerConnectionsChanged:
 		conn.serverConnectionsChanged(msgT)
 	case connectionMsgStatus:
@@ -662,6 +663,7 @@ type connectionRun struct {
 	missingBeats int
 	beatBytes    []byte
 	restart      bool
+	onIdle       eng.TopologyChange
 }
 
 func (cr *connectionRun) connectionStateMachineComponentWitness() {}
@@ -676,6 +678,11 @@ func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 		return
 	}
 	cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
+	if cr.onIdle != nil && cr.submitter.IsIdle() {
+		onIdle := cr.onIdle
+		cr.onIdle = nil
+		onIdle.Done(eng.ConnectionSubscriber)
+	}
 }
 
 func (cr *connectionRun) start() (bool, error) {
@@ -718,8 +725,8 @@ func (cr *connectionRun) start() (bool, error) {
 	return false, nil
 }
 
-func (cr *connectionRun) topologyChanged(tChange connectionMsgTopologyChanged) error {
-	topology := tChange.topology
+func (cr *connectionRun) topologyChanged(tc eng.TopologyChange) error {
+	topology := tc.Topology()
 	cr.topology = topology
 	if cr.currentState != cr {
 		return nil
@@ -731,8 +738,15 @@ func (cr *connectionRun) topologyChanged(tChange connectionMsgTopologyChanged) e
 			}
 		}
 		cr.submitter.TopologyChanged(topology)
+		if cr.submitter.IsIdle() || !tc.HasCallbackFor(eng.ConnectionSubscriber) {
+			tc.Done(eng.ConnectionSubscriber)
+			cr.onIdle = nil
+		} else {
+			cr.onIdle = tc
+		}
 	}
 	if cr.isServer {
+		tc.Done(eng.ConnectionSubscriber)
 		if topology != nil {
 			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
 				cr.restart = false

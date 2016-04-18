@@ -8,7 +8,6 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
@@ -53,7 +52,7 @@ type localConnectionMsgOutcomeReceived struct {
 
 type localConnectionMsgTopologyChanged struct {
 	localConnectionMsgBasic
-	topology *configuration.Topology
+	topologyChange eng.TopologyChange
 }
 
 type localConnectionTxnQuery interface {
@@ -160,7 +159,7 @@ func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *
 }
 
 func (lc *LocalConnection) TopologyChanged(tc eng.TopologyChange) {
-	lc.enqueueQuery(localConnectionMsgTopologyChanged{topology: tc.Topology()})
+	lc.enqueueQuery(localConnectionMsgTopologyChanged{topologyChange: tc})
 }
 
 func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error) {
@@ -262,7 +261,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 			case localConnectionMsgShutdown:
 				terminate = true
 			case localConnectionMsgTopologyChanged:
-				lc.submitter.TopologyChanged(msgT.topology)
+				lc.submitter.TopologyChanged(msgT.topologyChange.Topology())
 			case *localConnectionMsgRunTxn:
 				lc.runTransaction(msgT)
 			case *localConnectionMsgRunClientTxn:
