@@ -159,6 +159,7 @@ func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *
 }
 
 func (lc *LocalConnection) TopologyChanged(tc eng.TopologyChange) {
+	tc.AddOne(eng.ConnectionSubscriber)
 	lc.enqueueQuery(localConnectionMsgTopologyChanged{topologyChange: tc})
 }
 
@@ -262,6 +263,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 				terminate = true
 			case localConnectionMsgTopologyChanged:
 				lc.submitter.TopologyChanged(msgT.topologyChange.Topology())
+				msgT.topologyChange.Done(eng.ConnectionSubscriber)
 			case *localConnectionMsgRunTxn:
 				lc.runTransaction(msgT)
 			case *localConnectionMsgRunClientTxn:
