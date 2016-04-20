@@ -1124,7 +1124,8 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 
 type awaitBarrier struct {
 	*targetConfig
-	varBarrierReached *configuration.Configuration
+	varBarrierReached        *configuration.Configuration
+	connectionBarrierReached *configuration.Configuration
 	awaitBarrierInstall
 	awaitBarrierProposer
 	awaitBarrierVar
@@ -1232,6 +1233,13 @@ func (task *awaitBarrierProposer) tick() error {
 				}
 				return nil
 			},
+			eng.ConnectionSubscriber: func() error {
+				task.connectionBarrierReached = nextConfig
+				if task.task == task.awaitBarrier {
+					return task.task.tick()
+				}
+				return nil
+			},
 		}))
 
 		return task.nextState()
@@ -1246,8 +1254,9 @@ type awaitBarrierVar struct {
 func (task *awaitBarrierVar) witness() awaitBarrierInnerState { return task }
 func (task *awaitBarrierVar) init(awaitBarrier *awaitBarrier) { task.awaitBarrier = awaitBarrier }
 func (task *awaitBarrierVar) tick() error {
-	if task.varBarrierReached != nil && task.varBarrierReached.Equal(task.active.Next().Configuration) {
-		log.Println("Topology: Var barrier achieved.")
+	if task.varBarrierReached != nil && task.varBarrierReached.Equal(task.active.Next().Configuration) &&
+		task.connectionBarrierReached != nil && task.connectionBarrierReached.Equal(task.active.Next().Configuration) {
+		log.Println("Topology: Var and Connection barrier achieved.")
 		// Here, we just want to use the RMs in the old topology only.
 		topology := task.active.Clone()
 		active, passive := task.partitionByActiveConnection(topology.RMs())

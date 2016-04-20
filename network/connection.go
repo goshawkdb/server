@@ -729,6 +729,7 @@ func (cr *connectionRun) topologyChanged(tc eng.TopologyChange) error {
 	topology := tc.Topology()
 	cr.topology = topology
 	if cr.currentState != cr {
+		tc.Done(eng.ConnectionSubscriber)
 		return nil
 	}
 	if cr.isClient {
