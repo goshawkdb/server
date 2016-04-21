@@ -7,6 +7,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -310,7 +311,15 @@ func (v *Var) isIdle() bool {
 }
 
 func (v *Var) isOnDisk() bool {
-	return v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty()
+	if v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty() {
+		if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ {
+			for _, sub := range v.subscribers {
+				sub.Cancel(v)
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (v *Var) applyToVar(fun func()) {
