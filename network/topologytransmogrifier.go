@@ -545,9 +545,13 @@ func (task *targetConfig) tick() error {
 		task.task = &installTargetOld{targetConfig: task}
 
 	case task.active.Next() != nil && task.active.Next().Version == task.config.Version:
-		if !task.active.NextBarrierReached() {
-			log.Printf("Topology: Awaiting sufficient quiet RMs for config change: %v", task.config)
-			task.task = &awaitBarrier{targetConfig: task}
+		if !task.active.NextBarrierReachedVar() {
+			log.Printf("Topology: Awaiting sufficient quiet RMs (Var) for config change: %v", task.config)
+			task.task = &awaitBarrierVar{targetConfig: task}
+
+		} else if !task.active.NextBarrierReachedProp() {
+			log.Printf("Topology: Awaiting sufficient quiet RMs (Prop) for config change: %v", task.config)
+			task.task = &awaitBarrierProp{targetConfig: task}
 
 		} else if !task.active.Next().InstalledOnNew {
 			log.Printf("Topology: Attempting to install topology change to new cluster: %v", task.config)
@@ -1120,9 +1124,9 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 	return conditions
 }
 
-// awaitBarrier
+// awaitBarrierVar
 
-type awaitBarrier struct {
+type awaitBarrierVar struct {
 	*targetConfig
 	varBarrierReached        *configuration.Configuration
 	connectionBarrierReached *configuration.Configuration

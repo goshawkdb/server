@@ -259,6 +259,10 @@ func (conn *Connection) handleShutdown(err error) {
 	conn.maybeStopBeater()
 	conn.maybeStopReaderAndCloseSocket()
 	if conn.isClient {
+		if onIdle := conn.onIdle; onIdle != nil {
+			conn.onIdle = nil
+			onIdle.Done(eng.ConnectionSubscriber)
+		}
 		conn.connectionManager.ClientLost(conn.ConnectionNumber, conn)
 		if conn.submitter != nil {
 			conn.submitter.Shutdown()
@@ -726,6 +730,10 @@ func (cr *connectionRun) start() (bool, error) {
 }
 
 func (cr *connectionRun) topologyChanged(tc eng.TopologyChange) error {
+	if cr.onIdle != nil {
+		cr.onIdle.Done(eng.ConnectionSubscriber)
+		cr.onIdle = nil
+	}
 	topology := tc.Topology()
 	cr.topology = topology
 	if cr.currentState != cr {
@@ -735,13 +743,13 @@ func (cr *connectionRun) topologyChanged(tc eng.TopologyChange) error {
 	if cr.isClient {
 		if topology != nil {
 			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+				tc.Done(eng.ConnectionSubscriber)
 				return errors.New("Client connection closed: No client certificate known")
 			}
 		}
 		cr.submitter.TopologyChanged(topology)
 		if cr.submitter.IsIdle() || !tc.HasCallbackFor(eng.ConnectionSubscriber) {
 			tc.Done(eng.ConnectionSubscriber)
-			cr.onIdle = nil
 		} else {
 			cr.onIdle = tc
 		}
@@ -854,6 +862,10 @@ func (cr *connectionRun) maybeRestartConnection(err error) error {
 		}
 
 	case cr.isClient:
+		if onIdle := cr.onIdle; onIdle != nil {
+			cr.onIdle = nil
+			onIdle.Done(eng.ConnectionSubscriber)
+		}
 		log.Printf("Error on client connection to %v: %v", cr.remoteHost, err)
 		cr.connectionManager.ClientLost(cr.ConnectionNumber, cr.Connection)
 		return err

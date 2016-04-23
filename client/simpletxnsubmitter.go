@@ -312,7 +312,6 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 				return nil, err
 			}
 		}
-		hashCodes = hashCodes[:sts.topology.TwoFInc]
 		if clientAction.Which() == cmsgs.CLIENTACTION_ROLL {
 			// We cannot roll for anyone else. This could try to happen
 			// during immigration.
@@ -323,12 +322,14 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 				}
 			}
 			if !found {
+				fmt.Println("A")
 				return nil, eng.AbortRollError
 			}
 
 			// If we're not first then first must not be active
 			if hashCodes[0] != sts.rmId {
 				if _, found := sts.connections[hashCodes[0]]; found {
+					fmt.Println("B", hashCodes)
 					return nil, eng.AbortRollError
 				}
 			}

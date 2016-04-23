@@ -2,11 +2,13 @@ package txnengine
 
 import (
 	"fmt"
+	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
+	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -15,15 +17,16 @@ import (
 
 type VarManager struct {
 	LocalConnection
-	Topology   *configuration.Topology
-	RMId       common.RMId
-	db         *db.Databases
-	active     map[common.VarUUId]*Var
-	onDisk     TopologyChange
-	lc         LocalConnection
-	callbacks  []func()
-	beaterLive bool
-	exe        *dispatcher.Executor
+	Topology    *configuration.Topology
+	RMId        common.RMId
+	db          *db.Databases
+	active      map[common.VarUUId]*Var
+	RollAllowed bool
+	onDisk      TopologyChange
+	lc          LocalConnection
+	callbacks   []func()
+	beaterLive  bool
+	exe         *dispatcher.Executor
 }
 
 func init() {
@@ -36,37 +39,58 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 		RMId:            rmId,
 		db:              db,
 		active:          make(map[common.VarUUId]*Var),
+		RollAllowed:     false,
 		callbacks:       []func(){},
 		exe:             exe,
 	}
-	exe.Enqueue(func() { vm.Topology = tp.AddTopologySubscriber(vm) })
+	exe.Enqueue(func() {
+		vm.Topology = tp.AddTopologySubscriber(vm)
+		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReachedVar()
+	})
 	return vm
 }
 
 func (vm *VarManager) TopologyChanged(tc TopologyChange) {
 	tc.AddOne(VarSubscriber)
 	vm.exe.Enqueue(func() {
-		vm.Topology = tc.Topology()
+		topology := tc.Topology()
+		vm.Topology = topology
+		vm.RollAllowed = topology == nil || !topology.NextBarrierReachedVar()
+
 		if tc.HasCallbackFor(VarSubscriber) {
 			vm.onDisk = tc
 			vm.checkAllDisk()
+		} else if onDisk := vm.onDisk; onDisk != nil {
+			vm.onDisk = nil
+			onDisk.Done(VarSubscriber)
 		}
-	})
-}
-
-func (vm *VarManager) RollAllowed() bool {
-	if vm.Topology == nil {
-		return true
-	} else if next := vm.Topology.Next(); next == nil {
-		return true
-	} else {
-		for _, rmId := range next.BarrierReached {
-			if rmId == vm.RMId {
-				return false
+		if vm.RollAllowed {
+			resolver := ch.NewResolver(topology.RMs(), topology.TwoFInc)
+			for _, v := range vm.active {
+				deactivated := false
+				if v.isOnDisk() && v.positions != nil {
+					positionsSlice := (*capn.UInt8List)(v.positions).ToArray()
+					hashCodes, err := resolver.ResolveHashCodes(positionsSlice)
+					if err == nil {
+						deactivated = true
+						for _, hc := range hashCodes {
+							if hc == vm.RMId {
+								deactivated = false
+								break
+							}
+						}
+						if deactivated {
+							server.Log("Forcing var inactive", v.UUId)
+							vm.SetInactive(v)
+						}
+					}
+				}
+				if !deactivated {
+					v.maybeRoll()
+				}
 			}
 		}
-		return true
-	}
+	})
 }
 
 func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uuid *common.VarUUId) {
@@ -82,7 +106,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	fun(v, nil)
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
-	} else if vm.onDisk != nil {
+	} else {
 		vm.checkAllDisk()
 	}
 }
@@ -98,6 +122,7 @@ func (vm *VarManager) checkAllDisk() {
 		}
 	}
 	vm.onDisk = nil
+	vm.RollAllowed = false
 	onDisk.Done(VarSubscriber)
 }
 
@@ -148,6 +173,7 @@ func (vm *VarManager) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Active Vars: %v", len(vm.active)))
 	sc.Emit(fmt.Sprintf("- Callbacks: %v", len(vm.callbacks)))
 	sc.Emit(fmt.Sprintf("- Beater live? %v", vm.beaterLive))
+	sc.Emit(fmt.Sprintf("- Roll allowed? %v", vm.RollAllowed))
 	for _, v := range vm.active {
 		v.Status(sc.Fork())
 	}

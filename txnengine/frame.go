@@ -2,6 +2,7 @@ package txnengine
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	sl "github.com/msackman/skiplist"
@@ -12,7 +13,7 @@ import (
 	"sort"
 )
 
-var AbortRollError = fmt.Errorf("Not leading hashcode")
+var AbortRollError = errors.New("AbortRollError")
 
 type frame struct {
 	parent           *frame
@@ -76,7 +77,7 @@ func (f *frame) nextState() {
 }
 
 func (f *frame) String() string {
-	return fmt.Sprintf("%v Frame %v r%v w%v", f.v.UUId, f.frameTxnId, f.readVoteClock, f.writeVoteClock)
+	return fmt.Sprintf("%v Frame %v (%v) r%v w%v", f.v.UUId, f.frameTxnId, len(f.frameTxnClock.Clock), f.readVoteClock, f.writeVoteClock)
 }
 
 func (f *frame) Status(sc *server.StatusConsumer) {
@@ -667,7 +668,7 @@ func (fo *frameOpen) maybeCreateChild() {
 }
 
 func (fo *frameOpen) maybeScheduleRoll() {
-	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.vm.RollAllowed() &&
+	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && // fo.v.vm.RollAllowed &&
 		(fo.reads.Len() > fo.uncommittedReads || (len(fo.frameTxnClock.Clock) > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollScheduled = true
 		fo.v.vm.ScheduleCallback(func() {
@@ -680,7 +681,7 @@ func (fo *frameOpen) maybeScheduleRoll() {
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	if !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.vm.RollAllowed() &&
+	if !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.vm.RollAllowed &&
 		(fo.reads.Len() > fo.uncommittedReads || (len(fo.frameTxnClock.Clock) > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollActive = true
 		ctxn, varPosMap := fo.createRollClientTxn()

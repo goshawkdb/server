@@ -322,6 +322,10 @@ func (v *Var) isOnDisk() bool {
 	return false
 }
 
+func (v *Var) maybeRoll() {
+	v.curFrame.maybeScheduleRoll()
+}
+
 func (v *Var) applyToVar(fun func()) {
 	v.exe.Enqueue(func() {
 		v.vm.ApplyToVar(func(v1 *Var, err error) {
