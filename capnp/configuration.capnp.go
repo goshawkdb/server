@@ -25,7 +25,7 @@ func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
 func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(8)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
-func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToData() }
+func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
 func (s Configuration) SetClusterId(v string)          { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
 func (s Configuration) Version() uint32                { return C.Struct(s).Get32(0) }
 func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(0, v) }
@@ -77,16 +77,16 @@ func (s ConfigurationTransitioningTo) SetLostRMIds(v C.UInt32List) {
 }
 func (s ConfigurationTransitioningTo) InstalledOnNew() bool     { return C.Struct(s).Get1(41) }
 func (s ConfigurationTransitioningTo) SetInstalledOnNew(v bool) { C.Struct(s).Set1(41, v) }
-func (s ConfigurationTransitioningTo) BarrierReachedVar() C.UInt32List {
+func (s ConfigurationTransitioningTo) BarrierReached1() C.UInt32List {
 	return C.UInt32List(C.Struct(s).GetObject(10))
 }
-func (s ConfigurationTransitioningTo) SetBarrierReachedVar(v C.UInt32List) {
+func (s ConfigurationTransitioningTo) SetBarrierReached1(v C.UInt32List) {
 	C.Struct(s).SetObject(10, C.Object(v))
 }
-func (s ConfigurationTransitioningTo) BarrierReachedProp() C.UInt32List {
+func (s ConfigurationTransitioningTo) BarrierReached2() C.UInt32List {
 	return C.UInt32List(C.Struct(s).GetObject(11))
 }
-func (s ConfigurationTransitioningTo) SetBarrierReachedProp(v C.UInt32List) {
+func (s ConfigurationTransitioningTo) SetBarrierReached2(v C.UInt32List) {
 	C.Struct(s).SetObject(11, C.Object(v))
 }
 func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
@@ -537,12 +537,12 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("\"barrierReachedVar\":")
+			_, err = b.WriteString("\"barrierReached1\":")
 			if err != nil {
 				return err
 			}
 			{
-				s := s.BarrierReachedVar()
+				s := s.BarrierReached1()
 				{
 					err = b.WriteByte('[')
 					if err != nil {
@@ -574,12 +574,12 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("\"barrierReachedProp\":")
+			_, err = b.WriteString("\"barrierReached2\":")
 			if err != nil {
 				return err
 			}
 			{
-				s := s.BarrierReachedProp()
+				s := s.BarrierReached2()
 				{
 					err = b.WriteByte('[')
 					if err != nil {
@@ -1110,12 +1110,12 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("barrierReachedVar = ")
+			_, err = b.WriteString("barrierReached1 = ")
 			if err != nil {
 				return err
 			}
 			{
-				s := s.BarrierReachedVar()
+				s := s.BarrierReached1()
 				{
 					err = b.WriteByte('[')
 					if err != nil {
@@ -1147,12 +1147,12 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("barrierReachedProp = ")
+			_, err = b.WriteString("barrierReached2 = ")
 			if err != nil {
 				return err
 			}
 			{
-				s := s.BarrierReachedProp()
+				s := s.BarrierReached2()
 				{
 					err = b.WriteByte('[')
 					if err != nil {

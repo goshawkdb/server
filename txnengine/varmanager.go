@@ -2,13 +2,11 @@ package txnengine
 
 import (
 	"fmt"
-	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -45,7 +43,7 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 	}
 	exe.Enqueue(func() {
 		vm.Topology = tp.AddTopologySubscriber(vm)
-		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReachedVar()
+		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReached2(rmId)
 	})
 	return vm
 }
@@ -53,42 +51,21 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 func (vm *VarManager) TopologyChanged(tc TopologyChange) {
 	tc.AddOne(VarSubscriber)
 	vm.exe.Enqueue(func() {
-		topology := tc.Topology()
-		vm.Topology = topology
-		vm.RollAllowed = topology == nil || !topology.NextBarrierReachedVar()
-
-		if tc.HasCallbackFor(VarSubscriber) {
-			vm.onDisk = tc
-			vm.checkAllDisk()
-		} else if onDisk := vm.onDisk; onDisk != nil {
+		if onDisk := vm.onDisk; onDisk != nil {
 			vm.onDisk = nil
 			onDisk.Done(VarSubscriber)
 		}
-		if vm.RollAllowed {
-			resolver := ch.NewResolver(topology.RMs(), topology.TwoFInc)
-			for _, v := range vm.active {
-				deactivated := false
-				if v.isOnDisk() && v.positions != nil {
-					positionsSlice := (*capn.UInt8List)(v.positions).ToArray()
-					hashCodes, err := resolver.ResolveHashCodes(positionsSlice)
-					if err == nil {
-						deactivated = true
-						for _, hc := range hashCodes {
-							if hc == vm.RMId {
-								deactivated = false
-								break
-							}
-						}
-						if deactivated {
-							server.Log("Forcing var inactive", v.UUId)
-							vm.SetInactive(v)
-						}
-					}
-				}
-				if !deactivated {
-					v.maybeRoll()
-				}
-			}
+
+		topology := tc.Topology()
+		vm.Topology = topology
+		vm.RollAllowed = topology == nil || !topology.NextBarrierReached2(vm.RMId)
+		goingToDisk := topology != nil && topology.NextBarrierReached1(vm.RMId) && !topology.NextBarrierReached2(vm.RMId)
+
+		if goingToDisk && tc.HasCallbackFor(VarSubscriber) {
+			vm.onDisk = tc
+			vm.checkAllDisk()
+		} else {
+			tc.Done(VarSubscriber)
 		}
 	})
 }
@@ -112,18 +89,16 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 }
 
 func (vm *VarManager) checkAllDisk() {
-	onDisk := vm.onDisk
-	if onDisk == nil {
-		return
-	}
-	for _, v := range vm.active {
-		if !v.isOnDisk() {
-			return
+	if onDisk := vm.onDisk; onDisk != nil {
+		for _, v := range vm.active {
+			if !v.isOnDisk() {
+				return
+			}
 		}
+		vm.onDisk = nil
+		vm.RollAllowed = false
+		onDisk.Done(VarSubscriber)
 	}
-	vm.onDisk = nil
-	vm.RollAllowed = false
-	onDisk.Done(VarSubscriber)
 }
 
 // var.VarLifecycle interface

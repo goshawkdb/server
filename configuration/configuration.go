@@ -32,19 +32,19 @@ type Configuration struct {
 
 type NextConfiguration struct {
 	*Configuration
-	AllHosts           []string
-	NewRMIds           common.RMIds
-	SurvivingRMIds     common.RMIds
-	LostRMIds          common.RMIds
-	InstalledOnNew     bool
-	BarrierReachedVar  common.RMIds
-	BarrierReachedProp common.RMIds
-	Pending            Conds
+	AllHosts        []string
+	NewRMIds        common.RMIds
+	SurvivingRMIds  common.RMIds
+	LostRMIds       common.RMIds
+	InstalledOnNew  bool
+	BarrierReached1 common.RMIds
+	BarrierReached2 common.RMIds
+	Pending         Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n BarrierReachedVar: %v;\n BarrierReachedProp: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.BarrierReachedVar, next.BarrierReachedProp, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n BarrierReached1: %v;\n BarrierReached2: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.BarrierReached1, next.BarrierReached2, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -64,8 +64,8 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
 		a.LostRMIds.Equal(b.LostRMIds) &&
 		a.InstalledOnNew == b.InstalledOnNew &&
-		a.BarrierReachedVar.Equal(b.BarrierReachedVar) &&
-		a.BarrierReachedProp.Equal(b.BarrierReachedProp) &&
+		a.BarrierReached1.Equal(b.BarrierReached1) &&
+		a.BarrierReached2.Equal(b.BarrierReached2) &&
 		a.Pending.Equal(b.Pending) &&
 		a.Configuration.Equal(b.Configuration)
 }
@@ -87,11 +87,11 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	lostRMIds := make([]common.RMId, len(next.LostRMIds))
 	copy(lostRMIds, next.LostRMIds)
 
-	barrierReachedVar := make([]common.RMId, len(next.BarrierReachedVar))
-	copy(barrierReachedVar, next.BarrierReachedVar)
+	barrierReached1 := make([]common.RMId, len(next.BarrierReached1))
+	copy(barrierReached1, next.BarrierReached1)
 
-	barrierReachedProp := make([]common.RMId, len(next.BarrierReachedProp))
-	copy(barrierReachedProp, next.BarrierReachedProp)
+	barrierReached2 := make([]common.RMId, len(next.BarrierReached2))
+	copy(barrierReached2, next.BarrierReached2)
 
 	// Assumption is that conditions are immutable. So the only thing
 	// we'll want to do is shrink the map, so we do a copy of the map,
@@ -107,15 +107,15 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	}
 
 	return &NextConfiguration{
-		Configuration:      next.Configuration.Clone(),
-		AllHosts:           allHosts,
-		NewRMIds:           newRMIds,
-		SurvivingRMIds:     survivingRMIds,
-		LostRMIds:          lostRMIds,
-		InstalledOnNew:     next.InstalledOnNew,
-		BarrierReachedVar:  barrierReachedVar,
-		BarrierReachedProp: barrierReachedProp,
-		Pending:            pending,
+		Configuration:   next.Configuration.Clone(),
+		AllHosts:        allHosts,
+		NewRMIds:        newRMIds,
+		SurvivingRMIds:  survivingRMIds,
+		LostRMIds:       lostRMIds,
+		InstalledOnNew:  next.InstalledOnNew,
+		BarrierReached1: barrierReached1,
+		BarrierReached2: barrierReached2,
+		Pending:         pending,
 	}
 }
 
@@ -249,30 +249,30 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			lostRMIds[idx] = common.RMId(lostRMIdsCap.At(idx))
 		}
 
-		barrierReachedVarCap := next.BarrierReachedVar()
-		barrierReachedVar := make([]common.RMId, barrierReachedVarCap.Len())
-		for idx := range barrierReachedVar {
-			barrierReachedVar[idx] = common.RMId(barrierReachedVarCap.At(idx))
+		barrierReached1Cap := next.BarrierReached1()
+		barrierReached1 := make([]common.RMId, barrierReached1Cap.Len())
+		for idx := range barrierReached1 {
+			barrierReached1[idx] = common.RMId(barrierReached1Cap.At(idx))
 		}
 
-		barrierReachedPropCap := next.BarrierReachedProp()
-		barrierReachedProp := make([]common.RMId, barrierReachedPropCap.Len())
-		for idx := range barrierReachedProp {
-			barrierReachedProp[idx] = common.RMId(barrierReachedPropCap.At(idx))
+		barrierReached2Cap := next.BarrierReached2()
+		barrierReached2 := make([]common.RMId, barrierReached2Cap.Len())
+		for idx := range barrierReached2 {
+			barrierReached2[idx] = common.RMId(barrierReached2Cap.At(idx))
 		}
 
 		pending := next.Pending()
 
 		c.nextConfiguration = &NextConfiguration{
-			Configuration:      ConfigurationFromCap(&nextConfig),
-			AllHosts:           next.AllHosts().ToArray(),
-			NewRMIds:           newRMIds,
-			SurvivingRMIds:     survivingRMIds,
-			LostRMIds:          lostRMIds,
-			InstalledOnNew:     next.InstalledOnNew(),
-			BarrierReachedVar:  barrierReachedVar,
-			BarrierReachedProp: barrierReachedProp,
-			Pending:            ConditionsFromCap(&pending),
+			Configuration:   ConfigurationFromCap(&nextConfig),
+			AllHosts:        next.AllHosts().ToArray(),
+			NewRMIds:        newRMIds,
+			SurvivingRMIds:  survivingRMIds,
+			LostRMIds:       lostRMIds,
+			InstalledOnNew:  next.InstalledOnNew(),
+			BarrierReached1: barrierReached1,
+			BarrierReached2: barrierReached2,
+			Pending:         ConditionsFromCap(&pending),
 		}
 	}
 
@@ -318,12 +318,26 @@ func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptySt
 	return config.fingerprints
 }
 
-func (config *Configuration) NextBarrierReachedVar() bool {
-	return config.nextConfiguration != nil && len(config.nextConfiguration.BarrierReachedVar) >= config.rms.NonEmptyLen()-int(config.F)
+func (config *Configuration) NextBarrierReached1(rmId common.RMId) bool {
+	if config.nextConfiguration != nil {
+		for _, r := range config.nextConfiguration.BarrierReached1 {
+			if r == rmId {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-func (config *Configuration) NextBarrierReachedProp() bool {
-	return config.nextConfiguration != nil && len(config.nextConfiguration.BarrierReachedProp) >= config.rms.NonEmptyLen()-int(config.F)
+func (config *Configuration) NextBarrierReached2(rmId common.RMId) bool {
+	if config.nextConfiguration != nil {
+		for _, r := range config.nextConfiguration.BarrierReached2 {
+			if r == rmId {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (config *Configuration) Next() *NextConfiguration {
@@ -447,17 +461,17 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		}
 		next.SetLostRMIds(lostRMIdsCap)
 
-		barrierReachedVarCap := seg.NewUInt32List(len(nextConfig.BarrierReachedVar))
-		for idx, rmId := range nextConfig.BarrierReachedVar {
-			barrierReachedVarCap.Set(idx, uint32(rmId))
+		barrierReached1Cap := seg.NewUInt32List(len(nextConfig.BarrierReached1))
+		for idx, rmId := range nextConfig.BarrierReached1 {
+			barrierReached1Cap.Set(idx, uint32(rmId))
 		}
-		next.SetBarrierReachedVar(barrierReachedVarCap)
+		next.SetBarrierReached1(barrierReached1Cap)
 
-		barrierReachedPropCap := seg.NewUInt32List(len(nextConfig.BarrierReachedProp))
-		for idx, rmId := range nextConfig.BarrierReachedProp {
-			barrierReachedPropCap.Set(idx, uint32(rmId))
+		barrierReached2Cap := seg.NewUInt32List(len(nextConfig.BarrierReached2))
+		for idx, rmId := range nextConfig.BarrierReached2 {
+			barrierReached2Cap.Set(idx, uint32(rmId))
 		}
-		next.SetBarrierReachedProp(barrierReachedPropCap)
+		next.SetBarrierReached2(barrierReached2Cap)
 
 		next.SetInstalledOnNew(nextConfig.InstalledOnNew)
 

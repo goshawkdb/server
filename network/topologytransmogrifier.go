@@ -545,17 +545,17 @@ func (task *targetConfig) tick() error {
 		task.task = &installTargetOld{targetConfig: task}
 
 	case task.active.Next() != nil && task.active.Next().Version == task.config.Version:
-		if !task.active.NextBarrierReachedVar() {
-			log.Printf("Topology: Awaiting sufficient quiet RMs (Var) for config change: %v", task.config)
-			task.task = &awaitBarrierVar{targetConfig: task}
-
-		} else if !task.active.NextBarrierReachedProp() {
-			log.Printf("Topology: Awaiting sufficient quiet RMs (Prop) for config change: %v", task.config)
-			task.task = &awaitBarrierProp{targetConfig: task}
-
-		} else if !task.active.Next().InstalledOnNew {
+		if !task.active.Next().InstalledOnNew {
 			log.Printf("Topology: Attempting to install topology change to new cluster: %v", task.config)
 			task.task = &installTargetNew{targetConfig: task}
+
+		} else if !task.active.NextBarrierReached1(task.connectionManager.RMId) {
+			log.Printf("Topology: Requesting vars go quiet (barrier 1): %v", task.config)
+			task.task = &awaitBarrier1{targetConfig: task}
+
+		} else if !task.active.NextBarrierReached2(task.connectionManager.RMId) {
+			log.Printf("Topology: Awaiting quiet vars (barrier 2): %v", task.config)
+			task.task = &awaitBarrier2{targetConfig: task}
 
 		} else if len(task.active.Next().Pending) > 0 {
 			log.Printf("Topology: Attempting to perform object migration for topology target: %v", task.config)
@@ -1124,171 +1124,6 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 	return conditions
 }
 
-// awaitBarrierVar
-
-type awaitBarrierVar struct {
-	*targetConfig
-	varBarrierReached        *configuration.Configuration
-	connectionBarrierReached *configuration.Configuration
-	awaitBarrierInstall
-	awaitBarrierProposer
-	awaitBarrierVar
-	currentState awaitBarrierInnerState
-}
-
-func (task *awaitBarrier) witness() topologyTask { return task }
-
-type awaitBarrierInnerState interface {
-	init(*awaitBarrier)
-	tick() error
-	witness() awaitBarrierInnerState
-}
-
-func (task *awaitBarrier) tick() error {
-	if next := task.active.Next(); !(next != nil && next.Version == task.config.Version && !task.active.NextBarrierReached()) {
-		return task.completed()
-	}
-
-	if task.currentState == nil {
-		task.awaitBarrierInstall.init(task)
-		task.awaitBarrierProposer.init(task)
-		task.awaitBarrierVar.init(task)
-
-		task.currentState = &task.awaitBarrierInstall
-	}
-
-	return task.currentState.tick()
-}
-
-func (task *awaitBarrier) nextState() error {
-	switch task.currentState {
-	case &task.awaitBarrierInstall:
-		task.currentState = &task.awaitBarrierProposer
-	case &task.awaitBarrierProposer:
-		task.currentState = &task.awaitBarrierVar
-	case &task.awaitBarrierVar:
-		task.currentState = nil
-	}
-	return task.currentState.tick()
-}
-
-type awaitBarrierInstall struct{ *awaitBarrier }
-
-func (task *awaitBarrierInstall) witness() awaitBarrierInnerState { return task }
-func (task *awaitBarrierInstall) init(awaitBarrier *awaitBarrier) { task.awaitBarrier = awaitBarrier }
-func (task *awaitBarrierInstall) tick() error {
-	localHost, err := task.firstLocalHost(task.active.Configuration)
-	if err != nil {
-		return task.fatal(err)
-	}
-
-	remoteHosts := task.allHostsBarLocalHost(localHost, task.active.Next())
-	task.installTopology(task.newTopologyChanger(task.active, nil))
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	task.shareGoalWithAll()
-
-	next := task.active.Next()
-	for _, rmId := range next.NewRMIds {
-		if rmId == task.connectionManager.RMId {
-			log.Printf("Topology: Awaiting existing cluster members to reach barrier.")
-			return nil
-		}
-	}
-
-	for _, rmId := range next.BarrierReached {
-		if rmId == task.connectionManager.RMId {
-			log.Printf("Topology: Awaiting other cluster members to reach barrier.")
-			return nil
-		}
-	}
-
-	topology := task.active
-	task.installTopology(task.newTopologyChanger(topology, map[eng.TopologyChangeSubscriberType]func() error{
-		eng.ProposerSubscriber: func() error {
-			task.installedOnProposers = topology
-			if task.task != nil {
-				return task.task.tick()
-			}
-			return nil
-		},
-	}))
-
-	return task.nextState()
-}
-
-type awaitBarrierProposer struct{ *awaitBarrier }
-
-func (task *awaitBarrierProposer) witness() awaitBarrierInnerState { return task }
-func (task *awaitBarrierProposer) init(awaitBarrier *awaitBarrier) { task.awaitBarrier = awaitBarrier }
-func (task *awaitBarrierProposer) tick() error {
-	if task.installedOnProposers != nil && task.installedOnProposers.Next() != nil &&
-		task.installedOnProposers.Next().Configuration.Equal(task.active.Configuration.Next().Configuration) {
-
-		log.Println("Topology: Topology installed in proposer managers. Waiting for vars to go quiet.")
-
-		topology := task.active
-		nextConfig := topology.Next().Configuration
-
-		task.installTopology(task.newTopologyChanger(topology, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.VarSubscriber: func() error {
-				task.varBarrierReached = nextConfig
-				if task.task == task.awaitBarrier {
-					return task.task.tick()
-				}
-				return nil
-			},
-			eng.ConnectionSubscriber: func() error {
-				task.connectionBarrierReached = nextConfig
-				if task.task == task.awaitBarrier {
-					return task.task.tick()
-				}
-				return nil
-			},
-		}))
-
-		return task.nextState()
-	}
-	return nil
-}
-
-type awaitBarrierVar struct {
-	*awaitBarrier
-}
-
-func (task *awaitBarrierVar) witness() awaitBarrierInnerState { return task }
-func (task *awaitBarrierVar) init(awaitBarrier *awaitBarrier) { task.awaitBarrier = awaitBarrier }
-func (task *awaitBarrierVar) tick() error {
-	if task.varBarrierReached != nil && task.varBarrierReached.Equal(task.active.Next().Configuration) &&
-		task.connectionBarrierReached != nil && task.connectionBarrierReached.Equal(task.active.Next().Configuration) {
-		log.Println("Topology: Var and Connection barrier achieved.")
-		// Here, we just want to use the RMs in the old topology only.
-		topology := task.active.Clone()
-		active, passive := task.partitionByActiveConnection(topology.RMs())
-		if len(active) <= len(passive) {
-			log.Printf("Topology: Can not make progress at this time due to too many failures (failures: %v)",
-				passive)
-			return nil
-		}
-		fInc := ((len(active) + len(passive)) >> 1) + 1
-		active, passive = active[:fInc], append(active[fInc:], passive...)
-		// add on all new (if there are any) as passives
-		passive = append(passive, topology.Next().NewRMIds...)
-
-		next := topology.Next()
-		next.BarrierReached = append(next.BarrierReached, task.connectionManager.RMId)
-
-		_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
-		if err != nil {
-			return task.fatal(err)
-		}
-		if resubmit {
-			task.enqueueTick(task.awaitBarrier)
-			return nil
-		}
-	}
-	return nil
-}
-
 // installTargetNew
 // Now that everyone in the old/current topology knows about the Next
 // topology, we need to do a further txn to ensure everyone new who's
@@ -1310,10 +1145,10 @@ func (task *installTargetNew) tick() error {
 		return task.fatal(err)
 	}
 
-	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	if !task.installing {
 		task.installing = true
 		task.installTopology(task.newTopologyChanger(task.active, nil))
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1327,7 +1162,7 @@ func (task *installTargetNew) tick() error {
 	// Similar to allJoining, we use all of the new nodes as active,
 	// but we must also have F+1 of the old nodes as actives too to
 	// make sure the old nodes don't diverge and then get confused by
-	// learning from the new nodes.  If any of the new nodes are down,
+	// learning from the new nodes. If any of the new nodes are down,
 	// we can't make progress, but that seems sane because we're going
 	// to have to do migrations to the new nodes anyway.
 
@@ -1365,26 +1200,201 @@ func (task *installTargetNew) tick() error {
 	return nil
 }
 
+// awaitBarrier1
+
+type awaitBarrier1 struct {
+	*targetConfig
+	varBarrierReached               *configuration.Configuration
+	proposerBarrierReached          *configuration.Configuration
+	connectionBarrierReached        *configuration.Configuration
+	connectionManagerBarrierReached *configuration.Configuration
+	installing                      bool
+}
+
+func (task *awaitBarrier1) witness() topologyTask { return task }
+
+func (task *awaitBarrier1) tick() error {
+	next := task.active.Next()
+	if !(next != nil && next.Version == task.config.Version && !task.active.NextBarrierReached1(task.connectionManager.RMId)) {
+		return task.completed()
+	}
+
+	localHost, err := task.firstLocalHost(task.active.Configuration)
+	if err != nil {
+		return task.fatal(err)
+	}
+
+	activeNextConfig := next.Configuration
+	if !task.installing {
+		task.installing = true
+		task.installTopology(task.newTopologyChanger(task.active, map[eng.TopologyChangeSubscriberType]func() error{
+			eng.VarSubscriber: func() error {
+				task.varBarrierReached = activeNextConfig
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+			eng.ProposerSubscriber: func() error {
+				task.proposerBarrierReached = activeNextConfig
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+			eng.ConnectionSubscriber: func() error {
+				task.connectionBarrierReached = activeNextConfig
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+			eng.ConnectionManagerSubscriber: func() error {
+				task.connectionManagerBarrierReached = activeNextConfig
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+		}))
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	}
+	task.shareGoalWithAll()
+
+	if task.varBarrierReached != nil && task.proposerBarrierReached != nil &&
+		task.connectionBarrierReached != nil && task.connectionManagerBarrierReached != nil &&
+		activeNextConfig.Equal(task.varBarrierReached) &&
+		activeNextConfig.Equal(task.proposerBarrierReached) &&
+		activeNextConfig.Equal(task.connectionBarrierReached) &&
+		activeNextConfig.Equal(task.connectionManagerBarrierReached) {
+
+		// again, we use all new RMs as actives, and F+1 surviving as actives
+		active, passive := task.partitionByActiveConnection(task.active.RMs())
+		if len(active) <= len(passive) {
+			log.Printf("Topology: Can not make progress at this time due to too many failures (failures: %v)",
+				passive)
+			return nil
+		}
+		fInc := ((len(active) + len(passive)) >> 1) + 1
+		active, passive = active[:fInc], append(active[fInc:], passive...)
+
+		newActive := next.NewRMIds
+		for _, rmId := range newActive {
+			if _, found := task.activeConnections[rmId]; !found {
+				log.Printf("Topology: awaiting connections to new cluster members.")
+				return nil
+			}
+		}
+		active = append(newActive, active...)
+
+		log.Printf("Topology: Barrier1 reached. Active: %v, Passive: %v", active, passive)
+
+		topology := task.active.Clone()
+		next = topology.Next()
+		next.BarrierReached1 = append(next.BarrierReached1, task.connectionManager.RMId)
+
+		_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
+		if err != nil {
+			return task.fatal(err)
+		}
+		if resubmit {
+			server.Log("Topology: Barrier1 reached. Requires resubmit.")
+			task.enqueueTick(task)
+		}
+	}
+	return nil
+}
+
+// awaitBarrier2
+
+type awaitBarrier2 struct {
+	*targetConfig
+	varBarrierReached *configuration.Configuration
+	installing        bool
+}
+
+func (task *awaitBarrier2) witness() topologyTask { return task }
+
+func (task *awaitBarrier2) tick() error {
+	next := task.active.Next()
+	if !(next != nil && next.Version == task.config.Version && !task.active.NextBarrierReached2(task.connectionManager.RMId)) {
+		return task.completed()
+	}
+
+	localHost, err := task.firstLocalHost(task.active.Configuration)
+	if err != nil {
+		return task.fatal(err)
+	}
+
+	activeNextConfig := next.Configuration
+	if !task.installing {
+		//task.installing = true
+		task.installTopology(task.newTopologyChanger(task.active, map[eng.TopologyChangeSubscriberType]func() error{
+			eng.VarSubscriber: func() error {
+				task.varBarrierReached = activeNextConfig
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+		}))
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	}
+	task.shareGoalWithAll()
+
+	if task.varBarrierReached != nil && activeNextConfig.Equal(task.varBarrierReached) {
+		// again, we use all new RMs as actives, and F+1 surviving as actives
+		active, passive := task.partitionByActiveConnection(task.active.RMs())
+		if len(active) <= len(passive) {
+			log.Printf("Topology: Can not make progress at this time due to too many failures (failures: %v)",
+				passive)
+			return nil
+		}
+		fInc := ((len(active) + len(passive)) >> 1) + 1
+		active, passive = active[:fInc], append(active[fInc:], passive...)
+
+		newActive := next.NewRMIds
+		for _, rmId := range newActive {
+			if _, found := task.activeConnections[rmId]; !found {
+				log.Printf("Topology: awaiting connections to new cluster members.")
+				return nil
+			}
+		}
+		active = append(newActive, active...)
+
+		log.Printf("Topology: Barrier2 reached. Active: %v, Passive: %v", active, passive)
+
+		topology := task.active.Clone()
+		next = topology.Next()
+		next.BarrierReached2 = append(next.BarrierReached2, task.connectionManager.RMId)
+
+		_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
+		if err != nil {
+			return task.fatal(err)
+		}
+		if resubmit {
+			server.Log("Topology: Barrier2 reached. Requires resubmit.")
+			task.enqueueTick(task)
+		}
+	}
+	return nil
+}
+
+// migrate
+
 type migrate struct {
 	*targetConfig
 	installing bool
 	emigrator  *emigrator
-	migrateAwaitImmigrations
-	migrateAwaitNoPending
-	currentState migrateInnerState
 }
 
 func (task *migrate) witness() topologyTask { return task.targetConfig.witness() }
 
-type migrateInnerState interface {
-	init(*migrate)
-	tick() error
-	witness() migrateInnerState
-}
-
 func (task *migrate) tick() error {
 	next := task.active.Next()
-	if !(next != nil && next.Version == task.config.Version && next.InstalledOnNew) {
+	if !(next != nil && next.Version == task.config.Version && len(next.Pending) > 0) {
 		return task.completed()
 	}
 
@@ -1394,73 +1404,24 @@ func (task *migrate) tick() error {
 	}
 	if !task.installing {
 		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.installing = true
+		//task.installing = true
 		task.installTopology(task.newTopologyChanger(task.active, nil))
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
 
-	if task.currentState == nil {
-		task.migrateAwaitImmigrations.init(task)
-		task.migrateAwaitNoPending.init(task)
-
-		task.currentState = &task.migrateAwaitImmigrations
-
-		if task.isInRMs(task.active.RMs()) {
-			// don't attempt any emigration unless we were in the old
-			// topology
-			task.ensureEmigrator()
-		}
+	if task.isInRMs(task.active.RMs()) {
+		// don't attempt any emigration unless we were in the old
+		// topology
+		task.ensureEmigrator()
 	}
 
-	return task.currentState.tick()
-}
-
-func (task *migrate) abandon() {
-	task.ensureStopEmigrator()
-	task.targetConfig.abandon()
-}
-
-func (task *migrate) completed() error {
-	task.ensureStopEmigrator()
-	return task.targetConfig.completed()
-}
-
-func (task *migrate) nextState() error {
-	switch task.currentState {
-	case &task.migrateAwaitImmigrations:
-		task.currentState = &task.migrateAwaitNoPending
-	case &task.migrateAwaitNoPending:
-		task.currentState = nil
+	if _, found := next.Pending[task.connectionManager.RMId]; !found {
+		log.Println("Topology: All migration into all this RM completed. Awaiting others.")
 		return nil
 	}
-	return task.currentState.tick()
-}
 
-func (task *migrate) ensureEmigrator() {
-	if task.emigrator == nil {
-		task.emigrator = newEmigrator(task)
-	}
-}
-
-func (task *migrate) ensureStopEmigrator() {
-	if task.emigrator != nil {
-		task.emigrator.stopAsync()
-		task.emigrator = nil
-	}
-}
-
-type migrateAwaitImmigrations struct{ *migrate }
-
-func (task *migrateAwaitImmigrations) witness() migrateInnerState { return task }
-func (task *migrateAwaitImmigrations) init(migrate *migrate)      { task.migrate = migrate }
-func (task *migrateAwaitImmigrations) tick() error {
-	if _, found := task.active.Next().Pending[task.connectionManager.RMId]; !found {
-		log.Println("Topology: All migration into all this RM completed. Awaiting others.")
-		return task.nextState()
-	}
-
-	senders, found := task.migrations[task.active.Next().Version]
+	senders, found := task.migrations[next.Version]
 	if !found {
 		return nil
 	}
@@ -1470,7 +1431,7 @@ func (task *migrateAwaitImmigrations) tick() error {
 		maxSuppliers--
 	}
 	topology := task.active.Clone()
-	next := topology.Next()
+	next = topology.Next()
 	changed := false
 	for sender, inprogressPtr := range senders {
 		if atomic.LoadInt32(inprogressPtr) == 0 {
@@ -1500,7 +1461,7 @@ func (task *migrateAwaitImmigrations) tick() error {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.enqueueTick(task.migrate)
+		task.enqueueTick(task)
 		return nil
 	}
 	// Must be badread, which means again we should receive the
@@ -1508,16 +1469,27 @@ func (task *migrateAwaitImmigrations) tick() error {
 	return nil
 }
 
-type migrateAwaitNoPending struct{ *migrate }
+func (task *migrate) abandon() {
+	task.ensureStopEmigrator()
+	task.targetConfig.abandon()
+}
 
-func (task *migrateAwaitNoPending) witness() migrateInnerState { return task }
-func (task *migrateAwaitNoPending) init(migrate *migrate)      { task.migrate = migrate }
-func (task *migrateAwaitNoPending) tick() error {
-	if next := task.active.Next(); next != nil && len(task.active.Next().Pending) == 0 {
-		log.Println("Topology: All migration into all RMs completed.")
-		return task.completed()
+func (task *migrate) completed() error {
+	task.ensureStopEmigrator()
+	return task.targetConfig.completed()
+}
+
+func (task *migrate) ensureEmigrator() {
+	if task.emigrator == nil {
+		task.emigrator = newEmigrator(task)
 	}
-	return nil
+}
+
+func (task *migrate) ensureStopEmigrator() {
+	if task.emigrator != nil {
+		task.emigrator.stopAsync()
+		task.emigrator = nil
+	}
 }
 
 // install Completion
@@ -1529,7 +1501,7 @@ type installCompletion struct {
 
 func (task *installCompletion) tick() error {
 	next := task.active.Next()
-	if !(next != nil && next.Version == task.config.Version && next.InstalledOnNew && len(next.Pending) == 0) {
+	if next == nil {
 		log.Println("Topology: completion installed")
 		return task.completed()
 	}
@@ -1545,9 +1517,9 @@ func (task *installCompletion) tick() error {
 	}
 
 	if !task.installing {
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installing = true
 		task.installTopology(task.newTopologyChanger(task.active, nil))
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
 	task.shareGoalWithAll()
@@ -1876,15 +1848,18 @@ type emigrator struct {
 	stop              int32
 	db                *db.Databases
 	connectionManager *ConnectionManager
+	activeBatches     map[common.RMId]*sendBatch
 	topology          *configuration.Topology
+	conns             map[common.RMId]paxos.Connection
 }
 
 func newEmigrator(task *migrate) *emigrator {
 	e := &emigrator{
 		db:                task.db,
 		connectionManager: task.connectionManager,
-		topology:          task.active,
+		activeBatches:     make(map[common.RMId]*sendBatch),
 	}
+	e.topology = e.connectionManager.AddTopologySubscriber(e)
 	e.connectionManager.AddServerConnectionSubscriber(e)
 	return e
 }
@@ -1892,31 +1867,49 @@ func newEmigrator(task *migrate) *emigrator {
 func (e *emigrator) stopAsync() {
 	atomic.StoreInt32(&e.stop, 1)
 	e.connectionManager.RemoveServerConnectionSubscriber(e)
+	e.connectionManager.RemoveTopologySubscriberAsync(e)
+}
+
+func (e *emigrator) TopologyChanged(tc eng.TopologyChange) {
+	e.topology = tc.Topology()
+	e.startBatches()
 }
 
 func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	batchConds := make([]*sendBatch, 0, len(conns))
-	for rmId, cond := range e.topology.Next().Pending {
-		if rmId == e.connectionManager.RMId {
-			continue
-		}
-		if conn, found := conns[rmId]; found {
-			batchConds = append(batchConds, e.newBatch(conn, cond.Cond))
-		}
-	}
-	if len(batchConds) > 0 {
-		e.startBatch(batchConds)
-	}
+	e.conns = conns
+	e.startBatches()
 }
 
-func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {}
+func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
+	delete(e.activeBatches, rmId)
+}
 
 func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
 	if rmId == e.connectionManager.RMId {
 		return
 	}
-	if cond, found := e.topology.Next().Pending[rmId]; found {
-		batchConds := []*sendBatch{e.newBatch(conn, cond.Cond)}
+	e.conns = conns
+	e.startBatches()
+}
+
+func (e *emigrator) startBatches() {
+	pending := e.topology.Next().Pending
+	batchConds := make([]*sendBatch, 0, len(pending))
+	for rmId, cond := range pending {
+		if rmId == e.connectionManager.RMId {
+			continue
+		}
+		if _, found := e.activeBatches[rmId]; found {
+			continue
+		}
+		if conn, found := e.conns[rmId]; found && e.topology.NextBarrierReached2(rmId) {
+			log.Println("starting emigration batch for", rmId)
+			batch := e.newBatch(conn, cond.Cond)
+			e.activeBatches[rmId] = batch
+			batchConds = append(batchConds, batch)
+		}
+	}
+	if len(batchConds) > 0 {
 		e.startBatch(batchConds)
 	}
 }
@@ -2061,7 +2054,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	defer it.connectionManager.RemoveServerConnectionSubscriber(it)
 
-	if atomic.LoadInt32(&it.stop) == 1 {
+	if atomic.LoadInt32(&it.stop) != 0 {
 		return
 	}
 
@@ -2077,7 +2070,9 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 			// The connection has not changed since we started sending to
 			// it (because we cached it, you can discount the issue of
 			// memory reuse here - phew). Therefore, it's safe to send
-			// the completion msg.
+			// the completion msg. If it has changed, we rely on the
+			// ConnectionLost being called in the emigrator to do any
+			// necessary tidying up.
 			server.Log("Topology: Sending migration completion to", conn.RMId())
 			conn.Send(bites)
 		}
@@ -2147,6 +2142,7 @@ func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
 }
 
 // topologychanger
+
 type TopologyChanger struct {
 	*TopologyTransmogrifier
 	topology  *configuration.Topology

@@ -90,8 +90,13 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, 
 		accept := true
 		if pm.topology != nil {
 			accept = (pm.topology.Next() == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
-				(pm.topology.Next() != nil &&
-					(pm.topology.Next().Version == txnCap.TopologyVersion() || !pm.topology.NextBarrierReachedVar()))
+				// Could also do pm.topology.BarrierReached1(sender), but
+				// would need to specialise that to rolls rather than
+				// topology txns, and it's enforced on the sending side
+				// anyway. One the sender has received the next topology,
+				// it'll do the right thing and locally block until it's
+				// in barrier1.
+				(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion())
 			if accept {
 				_, found := pm.topology.RMsRemoved()[sender]
 				accept = !found

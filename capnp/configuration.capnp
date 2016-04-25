@@ -17,15 +17,15 @@ struct Configuration {
   fingerprints       @8: List(Data);
   union {
     transitioningTo :group {
-      configuration      @9: Configuration;
-      allHosts           @10: List(Text);
-      newRMIds           @11: List(UInt32);
-      survivingRMIds     @12: List(UInt32);
-      lostRMIds          @13: List(UInt32);
-      installedOnNew     @14: Bool;
-      barrierReachedVar  @15: List(UInt32);
-      barrierReachedProp @16: List(UInt32);
-      pending            @17: List(ConditionPair);
+      configuration   @9: Configuration;
+      allHosts        @10: List(Text);
+      newRMIds        @11: List(UInt32);
+      survivingRMIds  @12: List(UInt32);
+      lostRMIds       @13: List(UInt32);
+      installedOnNew  @14: Bool;
+      barrierReached1 @15: List(UInt32);
+      barrierReached2 @16: List(UInt32);
+      pending         @17: List(ConditionPair);
     }
     stable           @18: Void;
   }
