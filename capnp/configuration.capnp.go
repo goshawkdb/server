@@ -25,7 +25,7 @@ func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
 func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(8)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
-func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
+func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToData() }
 func (s Configuration) SetClusterId(v string)          { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
 func (s Configuration) Version() uint32                { return C.Struct(s).Get32(0) }
 func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(0, v) }
