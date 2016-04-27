@@ -140,7 +140,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 
 func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() || (!useNextVersion && sts.topology.Next() != nil) || (useNextVersion && !sts.topology.NextBarrierReached1(sts.rmId)) {
+	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
@@ -322,14 +322,12 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 				}
 			}
 			if !found {
-				fmt.Println("A")
 				return nil, eng.AbortRollError
 			}
 
 			// If we're not first then first must not be active
 			if hashCodes[0] != sts.rmId {
 				if _, found := sts.connections[hashCodes[0]]; found {
-					fmt.Println("B", hashCodes)
 					return nil, eng.AbortRollError
 				}
 			}

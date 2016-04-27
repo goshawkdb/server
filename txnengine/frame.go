@@ -668,7 +668,8 @@ func (fo *frameOpen) maybeCreateChild() {
 }
 
 func (fo *frameOpen) maybeScheduleRoll() {
-	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.vm.RollAllowed &&
+	// do not check vm.RollAllowed here.
+	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
 		(fo.reads.Len() > fo.uncommittedReads || (len(fo.frameTxnClock.Clock) > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollScheduled = true
 		fo.v.vm.ScheduleCallback(func() {

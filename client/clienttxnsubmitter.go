@@ -9,7 +9,6 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
-	"log"
 	"time"
 )
 
@@ -83,7 +82,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					return
 				}
 			}
-			log.Println("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
+			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
 			retryCount++
 			switch {
 			case retryCount == server.SubmissionInitialAttempts:
