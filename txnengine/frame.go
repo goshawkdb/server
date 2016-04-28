@@ -682,7 +682,7 @@ func (fo *frameOpen) maybeScheduleRoll() {
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	if !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.vm.RollAllowed &&
+	if fo.v.vm.RollAllowed && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
 		(fo.reads.Len() > fo.uncommittedReads || (len(fo.frameTxnClock.Clock) > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollActive = true
 		ctxn, varPosMap := fo.createRollClientTxn()
@@ -778,11 +778,11 @@ func (fo *frameOpen) subtractClock(clock *VectorClock) {
 }
 
 func (fo *frameOpen) isIdle() bool {
-	return fo.parent == nil && fo.isEmpty()
+	return fo.parent == nil && !fo.rollScheduled && fo.isEmpty()
 }
 
 func (fo *frameOpen) isEmpty() bool {
-	return fo.currentState == fo && !fo.rollScheduled && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
+	return fo.currentState == fo && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
 }
 
 // closed

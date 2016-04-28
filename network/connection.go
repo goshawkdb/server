@@ -261,6 +261,7 @@ func (conn *Connection) handleShutdown(err error) {
 	if conn.isClient {
 		if onIdle := conn.onIdle; onIdle != nil {
 			conn.onIdle = nil
+			log.Printf("Connection %v onIdle.Done %v handleShutdown\n", conn, onIdle)
 			onIdle.Done(eng.ConnectionSubscriber)
 		}
 		conn.connectionManager.ClientLost(conn.ConnectionNumber, conn)
@@ -685,6 +686,7 @@ func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 	if cr.onIdle != nil && cr.submitter.IsIdle() {
 		onIdle := cr.onIdle
 		cr.onIdle = nil
+		log.Printf("Connection %v onIdle.Done %v outcomeReceived\n", cr.Connection, onIdle)
 		onIdle.Done(eng.ConnectionSubscriber)
 	}
 }
@@ -730,31 +732,33 @@ func (cr *connectionRun) start() (bool, error) {
 }
 
 func (cr *connectionRun) topologyChanged(tc eng.TopologyChange) error {
-	if cr.onIdle != nil {
-		cr.onIdle.Done(eng.ConnectionSubscriber)
-		cr.onIdle = nil
-	}
+	cr.onIdle = nil
 	topology := tc.Topology()
 	cr.topology = topology
 	if cr.currentState != cr {
+		log.Printf("Connection %v onIdle.Done %v topologyChanged (not in run)\n", cr.Connection, tc)
 		tc.Done(eng.ConnectionSubscriber)
 		return nil
 	}
 	if cr.isClient {
 		if topology != nil {
 			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+				log.Printf("Connection %v onIdle.Done %v topologyChanged (client unauthed)\n", cr.Connection, tc)
 				tc.Done(eng.ConnectionSubscriber)
 				return errors.New("Client connection closed: No client certificate known")
 			}
 		}
 		cr.submitter.TopologyChanged(topology)
 		if cr.submitter.IsIdle() || !tc.HasCallbackFor(eng.ConnectionSubscriber) {
+			log.Printf("Connection %v onIdle.Done %v topologyChanged (client, submitter idle or no callback)\n", cr.Connection, tc)
 			tc.Done(eng.ConnectionSubscriber)
 		} else {
+			log.Printf("Connection %v onIdle.Done %v topologyChanged (SAVING FOR LATER)\n", cr.Connection, tc)
 			cr.onIdle = tc
 		}
 	}
 	if cr.isServer {
+		log.Printf("Connection %v onIdle.Done %v topologyChanged (isServer)\n", cr.Connection, tc)
 		tc.Done(eng.ConnectionSubscriber)
 		if topology != nil {
 			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {

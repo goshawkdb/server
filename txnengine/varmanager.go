@@ -43,7 +43,7 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 	}
 	exe.Enqueue(func() {
 		vm.Topology = tp.AddTopologySubscriber(vm)
-		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReached2(rmId)
+		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReached1(rmId)
 	})
 	return vm
 }
@@ -51,20 +51,22 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 func (vm *VarManager) TopologyChanged(tc TopologyChange) {
 	tc.AddOne(VarSubscriber)
 	vm.exe.Enqueue(func() {
-		if onDisk := vm.onDisk; onDisk != nil {
-			vm.onDisk = nil
-			onDisk.Done(VarSubscriber)
-		}
-
+		vm.onDisk = nil
 		topology := tc.Topology()
 		vm.Topology = topology
-		vm.RollAllowed = topology == nil || !topology.NextBarrierReached2(vm.RMId)
+		oldRollAllowed := vm.RollAllowed
+		if !vm.RollAllowed {
+			vm.RollAllowed = topology == nil || !topology.NextBarrierReached1(vm.RMId)
+		}
+		server.Log("VarManager", fmt.Sprintf("%p", vm), "rollAllowed:", oldRollAllowed, "->", vm.RollAllowed, fmt.Sprintf("%p", tc))
+
 		goingToDisk := topology != nil && topology.NextBarrierReached1(vm.RMId) && !topology.NextBarrierReached2(vm.RMId)
 
 		if goingToDisk && tc.HasCallbackFor(VarSubscriber) {
 			vm.onDisk = tc
 			vm.checkAllDisk()
 		} else {
+			server.Log("VarManager", fmt.Sprintf("%p", vm), "calling done", fmt.Sprintf("%p", tc))
 			tc.Done(VarSubscriber)
 		}
 	})
@@ -91,12 +93,16 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 func (vm *VarManager) checkAllDisk() {
 	if onDisk := vm.onDisk; onDisk != nil {
 		for _, v := range vm.active {
-			if !v.isOnDisk() {
+			if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ && !v.isOnDisk(true) {
+				if !vm.RollAllowed {
+					server.Log("VarManager", fmt.Sprintf("%p", vm), "WTF?! rolls are banned, but have var", v.UUId, "not on disk!")
+				}
 				return
 			}
 		}
 		vm.onDisk = nil
 		vm.RollAllowed = false
+		server.Log("VarManager", fmt.Sprintf("%p", vm), "Rolls banned; calling done", fmt.Sprintf("%p", onDisk))
 		onDisk.Done(VarSubscriber)
 	}
 }

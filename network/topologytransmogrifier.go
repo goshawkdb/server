@@ -2168,6 +2168,7 @@ func (tc *TopologyChanger) Topology() *configuration.Topology {
 func (tc *TopologyChanger) Done(idx eng.TopologyChangeSubscriberType) {
 	if gf := &tc.callbacks[idx]; gf.fun != nil {
 		if atomic.AddInt32(&gf.sem, -1) == 0 {
+			atomic.AddInt32(&gf.sem, -1)
 			tc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				return gf.fun()
 			}))
@@ -2177,7 +2178,9 @@ func (tc *TopologyChanger) Done(idx eng.TopologyChangeSubscriberType) {
 
 func (tc *TopologyChanger) AddOne(idx eng.TopologyChangeSubscriberType) {
 	if gf := &tc.callbacks[idx]; gf.fun != nil {
-		atomic.AddInt32(&gf.sem, 1)
+		if atomic.AddInt32(&gf.sem, 1) == 0 {
+			panic(fmt.Sprintf("AddOne for %v called AFTER function invoked", idx))
+		}
 	}
 }
 

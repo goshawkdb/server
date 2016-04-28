@@ -7,7 +7,6 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"math/rand"
@@ -310,9 +309,9 @@ func (v *Var) isIdle() bool {
 	return len(v.subscribers) == 0 && v.writeInProgress == nil && v.curFrame.isIdle()
 }
 
-func (v *Var) isOnDisk() bool {
+func (v *Var) isOnDisk(cancelSubs bool) bool {
 	if v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty() {
-		if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ {
+		if cancelSubs {
 			for _, sub := range v.subscribers {
 				sub.Cancel(v)
 			}
@@ -322,10 +321,6 @@ func (v *Var) isOnDisk() bool {
 	return false
 }
 
-func (v *Var) maybeRoll() {
-	v.curFrame.maybeScheduleRoll()
-}
-
 func (v *Var) applyToVar(fun func()) {
 	v.exe.Enqueue(func() {
 		v.vm.ApplyToVar(func(v1 *Var, err error) {
@@ -333,6 +328,7 @@ func (v *Var) applyToVar(fun func()) {
 			case err != nil:
 				panic(err)
 			case v1 != v:
+				server.Log(v.UUId, "ignoring callback as var object has changed")
 				v1.maybeMakeInactive()
 			default:
 				fun()
@@ -352,6 +348,6 @@ func (v *Var) Status(sc *server.StatusConsumer) {
 	v.curFrame.Status(sc.Fork())
 	sc.Emit(fmt.Sprintf("- Subscribers: %v", len(v.subscribers)))
 	sc.Emit(fmt.Sprintf("- Idle? %v", v.isIdle()))
-	sc.Emit(fmt.Sprintf("- IsOnDisk? %v", v.isOnDisk()))
+	sc.Emit(fmt.Sprintf("- IsOnDisk? %v", v.isOnDisk(false)))
 	sc.Join()
 }
