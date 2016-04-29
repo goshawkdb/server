@@ -8,6 +8,7 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
@@ -52,7 +53,8 @@ type localConnectionMsgOutcomeReceived struct {
 
 type localConnectionMsgTopologyChanged struct {
 	localConnectionMsgBasic
-	topologyChange eng.TopologyChange
+	localConnectionMsgSyncQuery
+	topology *configuration.Topology
 }
 
 type localConnectionTxnQuery interface {
@@ -126,7 +128,7 @@ func (lc *LocalConnection) enqueueQuery(msg localConnectionMsg) bool {
 	return lc.cellTail.WithCell(f)
 }
 
-func (lc *LocalConnection) enqueueSyncQuery(msg localConnectionMsg, resultChan chan struct{}) bool {
+func (lc *LocalConnection) enqueueQuerySync(msg localConnectionMsg, resultChan chan struct{}) bool {
 	if lc.enqueueQuery(msg) {
 		select {
 		case <-resultChan:
@@ -158,9 +160,26 @@ func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *
 	})
 }
 
-func (lc *LocalConnection) TopologyChanged(tc eng.TopologyChange) {
-	tc.AddOne(eng.ConnectionSubscriber)
-	lc.enqueueQuery(localConnectionMsgTopologyChanged{topologyChange: tc})
+func (lc *LocalConnection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	msg := &localConnectionMsgTopologyChanged{topology: topology}
+	msg.init()
+	if lc.enqueueQuery(msg) {
+		go func() {
+			select {
+			case <-msg.resultChan:
+				done(true)
+			case <-lc.cellTail.Terminated:
+				select {
+				case <-msg.resultChan:
+					done(true)
+				default:
+					done(false)
+				}
+			}
+		}()
+	} else {
+		done(false)
+	}
 }
 
 func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error) {
@@ -170,7 +189,7 @@ func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap 
 		assignTxnId: assignTxnId,
 	}
 	query.init()
-	if lc.enqueueSyncQuery(query, query.resultChan) {
+	if lc.enqueueQuerySync(query, query.resultChan) {
 		return query.outcome, query.err
 	} else {
 		return nil, nil
@@ -184,7 +203,7 @@ func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, assignTxnId bool, activ
 		activeRMs:   activeRMs,
 	}
 	query.init()
-	if lc.enqueueSyncQuery(query, query.resultChan) {
+	if lc.enqueueQuerySync(query, query.resultChan) {
 		return query.outcome, query.err
 	} else {
 		return nil, nil
@@ -242,8 +261,8 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 }
 
 func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
-	topology := lc.connectionManager.AddTopologySubscriber(lc)
-	defer lc.connectionManager.RemoveTopologySubscriberAsync(lc)
+	topology := lc.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, lc)
+	defer lc.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, lc)
 	servers := lc.connectionManager.ClientEstablished(0, lc)
 	defer lc.connectionManager.ClientLost(0, lc)
 	lc.submitter.TopologyChanged(topology)
@@ -261,9 +280,9 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 			switch msgT := msg.(type) {
 			case localConnectionMsgShutdown:
 				terminate = true
-			case localConnectionMsgTopologyChanged:
-				lc.submitter.TopologyChanged(msgT.topologyChange.Topology())
-				msgT.topologyChange.Done(eng.ConnectionSubscriber)
+			case *localConnectionMsgTopologyChanged:
+				lc.submitter.TopologyChanged(msgT.topology)
+				msgT.maybeClose()
 			case *localConnectionMsgRunTxn:
 				lc.runTransaction(msgT)
 			case *localConnectionMsgRunClientTxn:

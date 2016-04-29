@@ -48,7 +48,7 @@ func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm Connectio
 		DB:            db,
 		topology:      nil,
 	}
-	exe.Enqueue(func() { pm.topology = cm.AddTopologySubscriber(pm) })
+	exe.Enqueue(func() { pm.topology = cm.AddTopologySubscriber(eng.ProposerSubscriber, pm) })
 	return pm
 }
 
@@ -64,15 +64,31 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (pm *ProposerManager) TopologyChanged(tc eng.TopologyChange) {
-	tc.AddOne(eng.ProposerSubscriber)
-	pm.Exe.Enqueue(func() {
-		pm.topology = tc.Topology()
+func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	resultChan := make(chan struct{})
+	enqueued := pm.Exe.Enqueue(func() {
+		pm.topology = topology
 		for _, proposer := range pm.proposers {
-			proposer.TopologyChange(pm.topology)
+			proposer.TopologyChange(topology)
 		}
-		tc.Done(eng.ProposerSubscriber)
+		close(resultChan)
+		done(true)
 	})
+	if enqueued {
+		go pm.Exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-resultChan:
+			case <-terminated:
+				select {
+				case <-resultChan:
+				default:
+					done(false)
+				}
+			}
+		})
+	} else {
+		done(false)
+	}
 }
 
 func (pm *ProposerManager) ImmigrationReceived(txnId *common.TxnId, txnCap *msgs.Txn, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {

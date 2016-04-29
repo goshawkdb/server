@@ -71,7 +71,12 @@ type connectionMsgOutcomeReceived struct {
 
 type connectionMsgTopologyChanged struct {
 	connectionMsgBasic
-	topologyChange eng.TopologyChange
+	topology   *configuration.Topology
+	resultChan chan struct{}
+}
+
+func (cmtc *connectionMsgTopologyChanged) Done() {
+	close(cmtc.resultChan)
 }
 
 type connectionMsgStatus struct {
@@ -97,9 +102,22 @@ func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *com
 	})
 }
 
-func (conn *Connection) TopologyChanged(tc eng.TopologyChange) {
-	tc.AddOne(eng.ConnectionSubscriber)
-	conn.enqueueQuery(connectionMsgTopologyChanged{topologyChange: tc})
+func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	msg := &connectionMsgTopologyChanged{
+		resultChan: make(chan struct{}),
+		topology:   topology,
+	}
+	if conn.enqueueQuery(msg) {
+		go func() {
+			select {
+			case <-msg.resultChan:
+			case <-conn.cellTail.Terminated:
+			}
+			done(true) // connection drop is not a problem
+		}()
+	} else {
+		done(true)
+	}
 }
 
 func (conn *Connection) Status(sc *server.StatusConsumer) {
@@ -192,8 +210,8 @@ func (conn *Connection) start() {
 }
 
 func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
-	conn.topology = conn.connectionManager.AddTopologySubscriber(conn)
-	defer conn.connectionManager.RemoveTopologySubscriberAsync(conn)
+	conn.topology = conn.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, conn)
+	defer conn.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, conn)
 
 	var (
 		err       error
@@ -240,8 +258,8 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
 		conn.outcomeReceived(msgT)
-	case connectionMsgTopologyChanged:
-		err = conn.topologyChanged(msgT.topologyChange)
+	case *connectionMsgTopologyChanged:
+		err = conn.topologyChanged(msgT)
 	case connectionMsgServerConnectionsChanged:
 		conn.serverConnectionsChanged(msgT)
 	case connectionMsgStatus:
@@ -259,11 +277,6 @@ func (conn *Connection) handleShutdown(err error) {
 	conn.maybeStopBeater()
 	conn.maybeStopReaderAndCloseSocket()
 	if conn.isClient {
-		if onIdle := conn.onIdle; onIdle != nil {
-			conn.onIdle = nil
-			log.Printf("Connection %v onIdle.Done %v handleShutdown\n", conn, onIdle)
-			onIdle.Done(eng.ConnectionSubscriber)
-		}
 		conn.connectionManager.ClientLost(conn.ConnectionNumber, conn)
 		if conn.submitter != nil {
 			conn.submitter.Shutdown()
@@ -662,13 +675,13 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *
 
 type connectionRun struct {
 	*Connection
-	beater       *connectionBeater
-	reader       *connectionReader
-	mustSendBeat bool
-	missingBeats int
-	beatBytes    []byte
-	restart      bool
-	onIdle       eng.TopologyChange
+	beater        *connectionBeater
+	reader        *connectionReader
+	mustSendBeat  bool
+	missingBeats  int
+	beatBytes     []byte
+	restart       bool
+	submitterIdle *connectionMsgTopologyChanged
 }
 
 func (cr *connectionRun) connectionStateMachineComponentWitness() {}
@@ -683,11 +696,11 @@ func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 		return
 	}
 	cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
-	if cr.onIdle != nil && cr.submitter.IsIdle() {
-		onIdle := cr.onIdle
-		cr.onIdle = nil
-		log.Printf("Connection %v onIdle.Done %v outcomeReceived\n", cr.Connection, onIdle)
-		onIdle.Done(eng.ConnectionSubscriber)
+	if cr.submitterIdle != nil && cr.submitter.IsIdle() {
+		si := cr.submitterIdle
+		cr.submitterIdle = nil
+		server.Log("Connection", cr.Connection, "outcomeReceived", si, "(submitterIdle)")
+		si.Done()
 	}
 }
 
@@ -731,35 +744,39 @@ func (cr *connectionRun) start() (bool, error) {
 	return false, nil
 }
 
-func (cr *connectionRun) topologyChanged(tc eng.TopologyChange) error {
-	cr.onIdle = nil
-	topology := tc.Topology()
+func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
+	if si := cr.submitterIdle; si != nil {
+		cr.submitterIdle = nil
+		server.Log("Connection", cr.Connection, "topologyChanged:", tc, "clearing old:", si)
+		si.Done()
+	}
+	topology := tc.topology
 	cr.topology = topology
 	if cr.currentState != cr {
-		log.Printf("Connection %v onIdle.Done %v topologyChanged (not in run)\n", cr.Connection, tc)
-		tc.Done(eng.ConnectionSubscriber)
+		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(not in cr)")
+		tc.Done()
 		return nil
 	}
 	if cr.isClient {
 		if topology != nil {
 			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
-				log.Printf("Connection %v onIdle.Done %v topologyChanged (client unauthed)\n", cr.Connection, tc)
-				tc.Done(eng.ConnectionSubscriber)
+				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client unauthed)")
+				tc.Done()
 				return errors.New("Client connection closed: No client certificate known")
 			}
 		}
 		cr.submitter.TopologyChanged(topology)
-		if cr.submitter.IsIdle() || !tc.HasCallbackFor(eng.ConnectionSubscriber) {
-			log.Printf("Connection %v onIdle.Done %v topologyChanged (client, submitter idle or no callback)\n", cr.Connection, tc)
-			tc.Done(eng.ConnectionSubscriber)
+		if cr.submitter.IsIdle() {
+			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter is idle)")
+			tc.Done()
 		} else {
-			log.Printf("Connection %v onIdle.Done %v topologyChanged (SAVING FOR LATER)\n", cr.Connection, tc)
-			cr.onIdle = tc
+			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter not idle)")
+			cr.submitterIdle = tc
 		}
 	}
 	if cr.isServer {
-		log.Printf("Connection %v onIdle.Done %v topologyChanged (isServer)\n", cr.Connection, tc)
-		tc.Done(eng.ConnectionSubscriber)
+		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(isServer)")
+		tc.Done()
 		if topology != nil {
 			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
 				cr.restart = false
@@ -866,10 +883,6 @@ func (cr *connectionRun) maybeRestartConnection(err error) error {
 		}
 
 	case cr.isClient:
-		if onIdle := cr.onIdle; onIdle != nil {
-			cr.onIdle = nil
-			onIdle.Done(eng.ConnectionSubscriber)
-		}
 		log.Printf("Error on client connection to %v: %v", cr.remoteHost, err)
 		cr.connectionManager.ClientLost(cr.ConnectionNumber, cr.Connection)
 		return err

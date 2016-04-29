@@ -12,12 +12,12 @@ import (
 )
 
 type TopologyPublisher interface {
-	AddTopologySubscriber(obs TopologySubscriber) *configuration.Topology
-	RemoveTopologySubscriberAsync(obs TopologySubscriber)
+	AddTopologySubscriber(TopologyChangeSubscriberType, TopologySubscriber) *configuration.Topology
+	RemoveTopologySubscriberAsync(TopologyChangeSubscriberType, TopologySubscriber)
 }
 
 type TopologySubscriber interface {
-	TopologyChanged(TopologyChange)
+	TopologyChanged(*configuration.Topology, func(bool))
 }
 
 type TopologyChangeSubscriberType uint8
@@ -26,17 +26,11 @@ const (
 	VarSubscriber                     TopologyChangeSubscriberType = iota
 	ProposerSubscriber                TopologyChangeSubscriberType = iota
 	AcceptorSubscriber                TopologyChangeSubscriberType = iota
-	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
 	ConnectionSubscriber              TopologyChangeSubscriberType = iota
+	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
+	EmigratorSubscriber               TopologyChangeSubscriberType = iota
 	TopologyChangeSubscriberTypeLimit int                          = iota
 )
-
-type TopologyChange interface {
-	Topology() *configuration.Topology
-	Done(TopologyChangeSubscriberType)
-	AddOne(TopologyChangeSubscriberType)
-	HasCallbackFor(TopologyChangeSubscriberType) bool
-}
 
 type VarDispatcher struct {
 	dispatcher.Dispatcher

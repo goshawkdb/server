@@ -108,6 +108,10 @@ func (exe *Executor) Enqueue(fun func()) bool {
 	return exe.send(applyQuery(fun))
 }
 
+func (exe *Executor) WithTerminatedChan(fun func(chan struct{})) {
+	fun(exe.cellTail.Terminated)
+}
+
 func (exe *Executor) shutdown() {
 	if exe.send(shutdownQuery{}) {
 		exe.cellTail.Wait()

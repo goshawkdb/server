@@ -20,7 +20,7 @@ type VarManager struct {
 	db          *db.Databases
 	active      map[common.VarUUId]*Var
 	RollAllowed bool
-	onDisk      TopologyChange
+	onDisk      func(bool)
 	lc          LocalConnection
 	callbacks   []func()
 	beaterLive  bool
@@ -42,34 +42,55 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 		exe:             exe,
 	}
 	exe.Enqueue(func() {
-		vm.Topology = tp.AddTopologySubscriber(vm)
+		vm.Topology = tp.AddTopologySubscriber(VarSubscriber, vm)
 		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReached1(rmId)
 	})
 	return vm
 }
 
-func (vm *VarManager) TopologyChanged(tc TopologyChange) {
-	tc.AddOne(VarSubscriber)
-	vm.exe.Enqueue(func() {
-		vm.onDisk = nil
-		topology := tc.Topology()
+func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	resultChan := make(chan struct{})
+	enqueued := vm.exe.Enqueue(func() {
+		if od := vm.onDisk; od != nil {
+			vm.onDisk = nil
+			od(false)
+		}
 		vm.Topology = topology
 		oldRollAllowed := vm.RollAllowed
 		if !vm.RollAllowed {
 			vm.RollAllowed = topology == nil || !topology.NextBarrierReached1(vm.RMId)
 		}
-		server.Log("VarManager", fmt.Sprintf("%p", vm), "rollAllowed:", oldRollAllowed, "->", vm.RollAllowed, fmt.Sprintf("%p", tc))
+		server.Log("VarManager", fmt.Sprintf("%p", vm), "rollAllowed:", oldRollAllowed, "->", vm.RollAllowed, fmt.Sprintf("%p", topology))
 
 		goingToDisk := topology != nil && topology.NextBarrierReached1(vm.RMId) && !topology.NextBarrierReached2(vm.RMId)
 
-		if goingToDisk && tc.HasCallbackFor(VarSubscriber) {
-			vm.onDisk = tc
+		doneWrapped := func(result bool) {
+			close(resultChan)
+			done(result)
+		}
+		if goingToDisk {
+			vm.onDisk = doneWrapped
 			vm.checkAllDisk()
 		} else {
-			server.Log("VarManager", fmt.Sprintf("%p", vm), "calling done", fmt.Sprintf("%p", tc))
-			tc.Done(VarSubscriber)
+			server.Log("VarManager", fmt.Sprintf("%p", vm), "calling done", fmt.Sprintf("%p", topology))
+			doneWrapped(true)
 		}
 	})
+	if enqueued {
+		go vm.exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-resultChan:
+			case <-terminated:
+				select {
+				case <-resultChan:
+				default:
+					done(false)
+				}
+			}
+		})
+	} else {
+		done(false)
+	}
 }
 
 func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uuid *common.VarUUId) {
@@ -91,7 +112,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 }
 
 func (vm *VarManager) checkAllDisk() {
-	if onDisk := vm.onDisk; onDisk != nil {
+	if od := vm.onDisk; od != nil {
 		for _, v := range vm.active {
 			if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ && !v.isOnDisk(true) {
 				if !vm.RollAllowed {
@@ -102,8 +123,8 @@ func (vm *VarManager) checkAllDisk() {
 		}
 		vm.onDisk = nil
 		vm.RollAllowed = false
-		server.Log("VarManager", fmt.Sprintf("%p", vm), "Rolls banned; calling done", fmt.Sprintf("%p", onDisk))
-		onDisk.Done(VarSubscriber)
+		server.Log("VarManager", fmt.Sprintf("%p", vm), "Rolls banned; calling done", fmt.Sprintf("%p", od))
+		od(true)
 	}
 }
 

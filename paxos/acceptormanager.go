@@ -39,7 +39,7 @@ func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm Connectio
 		instances: make(map[instanceId]*instance),
 		acceptors: make(map[common.TxnId]*acceptorInstances),
 	}
-	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(am) })
+	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(eng.AcceptorSubscriber, am) })
 	return am
 }
 
@@ -137,18 +137,33 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (am *AcceptorManager) TopologyChanged(tc eng.TopologyChange) {
-	tc.AddOne(eng.AcceptorSubscriber)
-	am.Exe.Enqueue(func() {
-		topology := tc.Topology()
+func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	resultChan := make(chan struct{})
+	enqueued := am.Exe.Enqueue(func() {
 		am.Topology = topology
 		for _, ai := range am.acceptors {
 			if ai.acceptor != nil {
 				ai.acceptor.TopologyChanged(topology)
 			}
 		}
-		tc.Done(eng.AcceptorSubscriber)
+		close(resultChan)
+		done(true)
 	})
+	if enqueued {
+		go am.Exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-resultChan:
+			case <-terminated:
+				select {
+				case <-resultChan:
+				default:
+					done(false)
+				}
+			}
+		})
+	} else {
+		done(false)
+	}
 }
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {
