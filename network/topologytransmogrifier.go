@@ -878,7 +878,6 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 
 type installTargetOld struct {
 	*targetConfig
-	installing bool
 }
 
 func (task *installTargetOld) tick() error {
@@ -963,11 +962,10 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 			}
 		}
 	}
-	if !task.installing {
-		task.installing = true
-		task.installTopology(task.active, nil)
-		task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
-	}
+
+	task.installTopology(task.active, nil)
+	task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
+
 	// the -1 is because allRemoteHosts will not include localHost
 	hostsAddedList := allRemoteHosts[len(hostsOld)-1:]
 	allAddedFound, err := task.verifyRoots(task.active.Root.VarUUId, hostsAddedList)
@@ -1134,7 +1132,6 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 
 type installTargetNew struct {
 	*targetConfig
-	installing bool
 }
 
 func (task *installTargetNew) tick() error {
@@ -1148,12 +1145,9 @@ func (task *installTargetNew) tick() error {
 		return task.fatal(err)
 	}
 
-	if !task.installing {
-		task.installing = true
-		task.installTopology(task.active, nil)
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	}
+	task.installTopology(task.active, nil)
+	remoteHosts := task.allHostsBarLocalHost(localHost, next)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 
 	if !task.isInRMs(next.NewRMIds) {
@@ -1211,7 +1205,7 @@ type awaitBarrier1 struct {
 	proposerBarrierReached          *configuration.Configuration
 	connectionBarrierReached        *configuration.Configuration
 	connectionManagerBarrierReached *configuration.Configuration
-	installing                      bool
+	installing                      *configuration.Configuration
 }
 
 func (task *awaitBarrier1) witness() topologyTask { return task }
@@ -1228,49 +1222,10 @@ func (task *awaitBarrier1) tick() error {
 	}
 
 	activeNextConfig := next.Configuration
-	if !task.installing {
-		task.installing = true
-		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.VarSubscriber: func() error {
-				task.varBarrierReached = activeNextConfig
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			},
-			eng.ProposerSubscriber: func() error {
-				task.proposerBarrierReached = activeNextConfig
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			},
-			eng.ConnectionSubscriber: func() error {
-				task.connectionBarrierReached = activeNextConfig
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			},
-			eng.ConnectionManagerSubscriber: func() error {
-				task.connectionManagerBarrierReached = activeNextConfig
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			},
-		})
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	}
-	task.shareGoalWithAll()
-
-	if task.varBarrierReached != nil && task.proposerBarrierReached != nil &&
-		task.connectionBarrierReached != nil && task.connectionManagerBarrierReached != nil &&
-		activeNextConfig.Equal(task.varBarrierReached) &&
-		activeNextConfig.Equal(task.proposerBarrierReached) &&
-		activeNextConfig.Equal(task.connectionBarrierReached) &&
-		activeNextConfig.Equal(task.connectionManagerBarrierReached) {
+	if activeNextConfig == task.varBarrierReached &&
+		activeNextConfig == task.proposerBarrierReached &&
+		activeNextConfig == task.connectionBarrierReached &&
+		activeNextConfig == task.connectionManagerBarrierReached {
 
 		// again, we use all new RMs as actives, and F+1 surviving as actives
 		active, passive := task.partitionByActiveConnection(task.active.RMs())
@@ -1305,7 +1260,56 @@ func (task *awaitBarrier1) tick() error {
 			server.Log("Topology: Barrier1 reached. Requires resubmit.")
 			task.enqueueTick(task)
 		}
+
+	} else if activeNextConfig != task.installing {
+		task.installing = activeNextConfig
+		task.varBarrierReached = nil
+		task.proposerBarrierReached = nil
+		task.connectionBarrierReached = nil
+		task.connectionManagerBarrierReached = nil
+		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
+			eng.VarSubscriber: func() error {
+				if activeNextConfig == task.installing {
+					task.varBarrierReached = activeNextConfig
+				}
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+			eng.ProposerSubscriber: func() error {
+				if activeNextConfig == task.installing {
+					task.proposerBarrierReached = activeNextConfig
+				}
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+			eng.ConnectionSubscriber: func() error {
+				if activeNextConfig == task.installing {
+					task.connectionBarrierReached = activeNextConfig
+				}
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+			eng.ConnectionManagerSubscriber: func() error {
+				if activeNextConfig == task.installing {
+					task.connectionManagerBarrierReached = activeNextConfig
+				}
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+		})
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
+
+	task.shareGoalWithAll()
 	return nil
 }
 
@@ -1314,7 +1318,7 @@ func (task *awaitBarrier1) tick() error {
 type awaitBarrier2 struct {
 	*targetConfig
 	varBarrierReached *configuration.Configuration
-	installing        bool
+	installing        *configuration.Configuration
 }
 
 func (task *awaitBarrier2) witness() topologyTask { return task }
@@ -1331,23 +1335,7 @@ func (task *awaitBarrier2) tick() error {
 	}
 
 	activeNextConfig := next.Configuration
-	if !task.installing {
-		//task.installing = true
-		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.VarSubscriber: func() error {
-				task.varBarrierReached = activeNextConfig
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			},
-		})
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	}
-	task.shareGoalWithAll()
-
-	if task.varBarrierReached != nil && activeNextConfig.Equal(task.varBarrierReached) {
+	if activeNextConfig == task.varBarrierReached {
 		// again, we use all new RMs as actives, and F+1 surviving as actives
 		active, passive := task.partitionByActiveConnection(task.active.RMs())
 		if len(active) <= len(passive) {
@@ -1381,7 +1369,26 @@ func (task *awaitBarrier2) tick() error {
 			server.Log("Topology: Barrier2 reached. Requires resubmit.")
 			task.enqueueTick(task)
 		}
+
+	} else if activeNextConfig != task.installing {
+		task.installing = activeNextConfig
+		task.varBarrierReached = nil
+		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
+			eng.VarSubscriber: func() error {
+				if activeNextConfig == task.installing {
+					task.varBarrierReached = activeNextConfig
+				}
+				if task.task != nil {
+					return task.task.tick()
+				}
+				return nil
+			},
+		})
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
+		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	}
+
+	task.shareGoalWithAll()
 	return nil
 }
 
@@ -1389,8 +1396,7 @@ func (task *awaitBarrier2) tick() error {
 
 type migrate struct {
 	*targetConfig
-	installing bool
-	emigrator  *emigrator
+	emigrator *emigrator
 }
 
 func (task *migrate) witness() topologyTask { return task.targetConfig.witness() }
@@ -1405,12 +1411,10 @@ func (task *migrate) tick() error {
 	if err != nil {
 		return task.fatal(err)
 	}
-	if !task.installing {
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		//task.installing = true
-		task.installTopology(task.active, nil)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	}
+
+	remoteHosts := task.allHostsBarLocalHost(localHost, next)
+	task.installTopology(task.active, nil)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 
 	if task.isInRMs(task.active.RMs()) {
@@ -1499,7 +1503,6 @@ func (task *migrate) ensureStopEmigrator() {
 
 type installCompletion struct {
 	*targetConfig
-	installing bool
 }
 
 func (task *installCompletion) tick() error {
@@ -1519,12 +1522,9 @@ func (task *installCompletion) tick() error {
 		return task.fatal(err)
 	}
 
-	if !task.installing {
-		task.installing = true
-		task.installTopology(task.active, nil)
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	}
+	task.installTopology(task.active, nil)
+	remoteHosts := task.allHostsBarLocalHost(localHost, next)
+	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
 	task.shareGoalWithAll()
 
 	// As before, we use the new topology now and we only need to
