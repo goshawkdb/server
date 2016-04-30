@@ -13,7 +13,8 @@ import (
 	"sort"
 )
 
-var AbortRollError = errors.New("AbortRollError")
+var AbortRollNotFirst = errors.New("AbortRollNotFirst")
+var AbortRollNotInPermutation = errors.New("AbortRollNotInPermutation")
 
 type frame struct {
 	parent           *frame
@@ -701,7 +702,9 @@ func (fo *frameOpen) maybeStartRoll() {
 			if outcome == nil || outcome.Which() != msgs.OUTCOME_COMMIT {
 				fo.v.applyToVar(func() {
 					fo.rollActive = false
-					if err != AbortRollError {
+					if err == AbortRollNotInPermutation {
+						fo.v.maybeMakeInactive()
+					} else {
 						fo.maybeScheduleRoll()
 					}
 				})

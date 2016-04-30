@@ -229,7 +229,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, 
 
 	rmIdToActionIndices, err := sts.translateActions(outgoingSeg, picker, &actions, &clientActions)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Error translating actions: %v", err)
+		return nil, nil, nil, err
 	}
 
 	// NB: we're guaranteed that activeRMs and passiveRMs are
@@ -322,13 +322,13 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 				}
 			}
 			if !found {
-				return nil, eng.AbortRollError
+				return nil, eng.AbortRollNotInPermutation
 			}
 
 			// If we're not first then first must not be active
 			if hashCodes[0] != sts.rmId {
 				if _, found := sts.connections[hashCodes[0]]; found {
-					return nil, eng.AbortRollError
+					return nil, eng.AbortRollNotFirst
 				}
 			}
 		}
