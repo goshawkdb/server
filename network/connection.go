@@ -418,7 +418,7 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 		return cah.maybeRestartConnection(err)
 	}
 
-	if seg, err := capn.ReadFromStream(cah.socket, nil); err == nil {
+	if seg, err := cah.readOne(); err == nil {
 		hello := cmsgs.ReadRootHello(seg)
 		if cah.verifyHello(&hello) {
 			if hello.IsClient() {
@@ -837,7 +837,7 @@ func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
 		configCap := msg.TopologyChangeRequest()
 		config := configuration.ConfigurationFromCap(&configCap)
-		cr.connectionManager.Transmogrifier.RequestConfigurationChange(config)
+		cr.connectionManager.RequestConfigurationChange(config)
 	default:
 		cr.connectionManager.DispatchMessage(cr.remoteRMId, which, msg)
 	}
@@ -942,9 +942,9 @@ func (cr *connectionRun) maybeStopReaderAndCloseSocket() {
 		}
 		cr.reader.terminated.Wait()
 		cr.reader = nil
-		cr.socket = nil
+	}
 
-	} else if cr.socket != nil {
+	if cr.socket != nil {
 		if err := cr.socket.Close(); err != nil {
 			log.Println(err)
 		}

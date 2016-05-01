@@ -619,10 +619,6 @@ func (task *targetConfig) completed() error {
 	return nil
 }
 
-func (task *targetConfig) activeChange(active *configuration.Topology) error {
-	return task.setActive(active)
-}
-
 // NB filters out empty RMIds so no need to pre-filter.
 func (task *targetConfig) partitionByActiveConnection(rmIdLists ...common.RMIds) (active, passive common.RMIds) {
 	active, passive = []common.RMId{}, []common.RMId{}
@@ -738,7 +734,7 @@ func (task *ensureLocalTopology) tick() error {
 		return nil
 	} else {
 		// It's already on disk, we're not going to see it through the subscriber.
-		return task.activeChange(topology)
+		return task.setActive(topology)
 	}
 }
 
@@ -885,13 +881,16 @@ func (task *installTargetOld) tick() error {
 		return task.completed()
 	}
 
-	task.shareGoalWithAll()
-
 	if !task.isInRMs(task.active.RMs()) {
+		task.shareGoalWithAll()
 		log.Printf("Topology: Awaiting existing cluster members.")
 		// this step must be performed by the existing RMs
 		return nil
 	}
+	// If we're in the old config, do not share with others just yet
+	// because we may well have more information (new connections) than
+	// the others so they might calculate different targets and then
+	// we'd be racing.
 
 	targetTopology, err := task.calculateTargetTopology()
 	if err != nil || targetTopology == nil {

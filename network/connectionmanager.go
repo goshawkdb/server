@@ -178,6 +178,11 @@ type connectionManagerMsgTopologyRemoveSubscriber struct {
 	subType eng.TopologyChangeSubscriberType
 }
 
+type connectionManagerMsgRequestConfigChange struct {
+	connectionManagerMsgBasic
+	config *configuration.Configuration
+}
+
 type connectionManagerMsgStatus struct {
 	connectionManagerMsgBasic
 	*server.StatusConsumer
@@ -288,6 +293,10 @@ func (cm *ConnectionManager) RemoveTopologySubscriberAsync(subType eng.TopologyC
 		TopologySubscriber: obs,
 		subType:            subType,
 	})
+}
+
+func (cm *ConnectionManager) RequestConfigurationChange(config *configuration.Configuration) {
+	cm.enqueueQuery(connectionManagerMsgRequestConfigChange{config: config})
 }
 
 func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
@@ -408,6 +417,8 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 				cm.topologySubscribers.AddSubscriber(msgT.subType, msgT.TopologySubscriber)
 			case connectionManagerMsgTopologyRemoveSubscriber:
 				cm.topologySubscribers.RemoveSubscriber(msgT.subType, msgT.TopologySubscriber)
+			case connectionManagerMsgRequestConfigChange:
+				cm.Transmogrifier.RequestConfigurationChange(msgT.config)
 			case connectionManagerMsgStatus:
 				cm.status(msgT.StatusConsumer)
 			default:
