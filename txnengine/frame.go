@@ -162,7 +162,6 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v ReadRetry called for %v with frame in state %v", fo.v, txn, fo.currentState))
-		return false
 	case fo.frameTxnActions == nil || fo.frameTxnId.Compare(action.readVsn) == common.EQ:
 		return false
 	default:
@@ -421,7 +420,6 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		return true
 	} else {
 		panic(fmt.Sprintf("%v ReadLearnt called for known txn %v", fo.frame, txn))
-		return false
 	}
 }
 
@@ -469,7 +467,6 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 		return true
 	} else {
 		panic(fmt.Sprintf("%v WriteLearnt called for known txn %v", fo.frame, txn))
-		return false
 	}
 }
 

@@ -105,7 +105,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uu
 	}
 	fun(v, nil)
 	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
-		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %v", uuid, fun))
+		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %p", uuid, fun))
 	} else {
 		vm.checkAllDisk()
 	}

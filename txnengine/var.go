@@ -274,7 +274,6 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 		// ... but process the result in a new go-routine to avoid blocking the executor.
 		if _, err := future.ResultError(); err != nil {
 			panic(fmt.Sprintf("Var error when writing to disk: %v\n", err))
-			return
 		}
 		// Switch back to the right go-routine
 		v.applyToVar(func() {

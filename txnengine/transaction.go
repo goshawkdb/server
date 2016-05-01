@@ -356,7 +356,6 @@ func (txn *Txn) nextState() {
 		return
 	default:
 		panic(fmt.Sprintf("%v Next state called on txn with txn in terminal state: %v\n", txn.Id, txn.currentState))
-		return
 	}
 	txn.currentState.start()
 }
@@ -534,7 +533,6 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	if tro.currentState != tro {
 		// We've received the outcome too early! Be noisy!
 		panic(fmt.Sprintf("%v error: Ballot outcome received with txn in wrong state: %v\n", tro.Id, tro.currentState))
-		return
 	}
 	switch outcome.Which() {
 	case msgs.OUTCOME_COMMIT:
@@ -627,7 +625,6 @@ func (trc *txnReceiveCompletion) CompletionReceived() {
 	if trc.currentState != trc {
 		// We've been completed early! Be noisy!
 		panic(fmt.Sprintf("%v error: Txn completion received with txn in wrong state: %v\n", trc.Id, trc.currentState))
-		return
 	}
 	trc.completed = true
 	trc.maybeFinish()

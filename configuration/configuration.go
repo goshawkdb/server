@@ -685,7 +685,6 @@ func conditionFromCap(condCap *msgs.Condition) Cond {
 		}
 	default:
 		panic(fmt.Sprintf("Unexpected Condition type (%v)", condCap.Which()))
-		return nil
 	}
 }
 
