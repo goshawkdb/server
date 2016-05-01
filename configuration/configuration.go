@@ -153,10 +153,8 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 		return nil, fmt.Errorf("F given as %v, requires minimum 2F+1=%v hosts but only %v hosts specified.",
 			config.F, twoFInc, len(config.Hosts))
 	}
-	if config.MaxRMCount == 0 && twoFInc < 128 {
-		config.MaxRMCount = 2 * uint16(twoFInc)
-	} else if int(config.MaxRMCount) < twoFInc {
-		return nil, fmt.Errorf("MaxRMCount given as %v but must be at least 2F+1=%v.", config.MaxRMCount, twoFInc)
+	if int(config.MaxRMCount) < len(config.Hosts) {
+		return nil, fmt.Errorf("MaxRMCount given as %v but must be at least the number of hosts (%v).", config.MaxRMCount, len(config.Hosts))
 	}
 	for idx, hostPort := range config.Hosts {
 		port := common.DefaultPort
