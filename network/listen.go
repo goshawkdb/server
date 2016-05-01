@@ -47,7 +47,7 @@ func (l *Listener) enqueueQuery(msg listenerMsg) bool {
 	return l.cellTail.WithCell(f)
 }
 
-func NewListener(listenPort int, cm *ConnectionManager) (*Listener, error) {
+func NewListener(listenPort uint16, cm *ConnectionManager) (*Listener, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", listenPort))
 	if err != nil {
 		return nil, err

@@ -10,8 +10,10 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	eng "goshawkdb.io/server/txnengine"
 )
 
 func init() {
@@ -19,21 +21,26 @@ func init() {
 }
 
 type AcceptorManager struct {
-	Disk              *mdbs.MDBServer
-	ConnectionManager ConnectionManager
-	Exe               *dispatcher.Executor
-	instances         map[instanceId]*instance
-	acceptors         map[common.TxnId]*acceptorInstances
+	ServerConnectionPublisher
+	RMId      common.RMId
+	DB        *db.Databases
+	Exe       *dispatcher.Executor
+	instances map[instanceId]*instance
+	acceptors map[common.TxnId]*acceptorInstances
+	Topology  *configuration.Topology
 }
 
-func NewAcceptorManager(exe *dispatcher.Executor, cm ConnectionManager, server *mdbs.MDBServer) *AcceptorManager {
-	return &AcceptorManager{
-		Disk:              server,
-		ConnectionManager: cm,
-		Exe:               exe,
-		instances:         make(map[instanceId]*instance),
-		acceptors:         make(map[common.TxnId]*acceptorInstances),
+func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
+	am := &AcceptorManager{
+		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		RMId:      rmId,
+		DB:        db,
+		Exe:       exe,
+		instances: make(map[instanceId]*instance),
+		acceptors: make(map[common.TxnId]*acceptorInstances),
 	}
+	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(eng.AcceptorSubscriber, am) })
+	return am
 }
 
 func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceId, vUUId *common.VarUUId) *instance {
@@ -130,6 +137,35 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
+func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	resultChan := make(chan struct{})
+	enqueued := am.Exe.Enqueue(func() {
+		am.Topology = topology
+		for _, ai := range am.acceptors {
+			if ai.acceptor != nil {
+				ai.acceptor.TopologyChanged(topology)
+			}
+		}
+		close(resultChan)
+		done(true)
+	})
+	if enqueued {
+		go am.Exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-resultChan:
+			case <-terminated:
+				select {
+				case <-resultChan:
+				default:
+					done(false)
+				}
+			}
+		})
+	} else {
+		done(false)
+	}
+}
+
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {
 	instanceRMId := common.RMId(oneATxnVotes.RmId())
 	server.Log(txnId, "1A received from", sender, "; instance:", instanceRMId)
@@ -158,7 +194,7 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 	}
 
 	// The proposal senders are repeating, so this use of OSS is fine.
-	NewOneShotSender(server.SegToBytes(replySeg), am.ConnectionManager, sender)
+	NewOneShotSender(server.SegToBytes(replySeg), am, sender)
 }
 
 func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *common.TxnId, twoATxnVotes *msgs.TwoATxnVotes) {
@@ -208,7 +244,7 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *commo
 		}
 		server.Log(txnId, "Sending 2B failures to", sender, "; instance:", instanceRMId)
 		// The proposal senders are repeating, so this use of OSS is fine.
-		NewOneShotSender(server.SegToBytes(replySeg), am.ConnectionManager, sender)
+		NewOneShotSender(server.SegToBytes(replySeg), am, sender)
 	}
 }
 
@@ -231,7 +267,7 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		server.Log(txnId, "Sending single TGC to", sender)
 		// Use of OSS here is ok because this is the default action on
 		// not finding state.
-		NewOneShotSender(server.SegToBytes(seg), am.ConnectionManager, sender)
+		NewOneShotSender(server.SegToBytes(seg), am, sender)
 	}
 }
 

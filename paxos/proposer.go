@@ -7,7 +7,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/db"
+	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 )
@@ -27,6 +27,7 @@ type Proposer struct {
 	txn             *eng.Txn
 	txnId           *common.TxnId
 	acceptors       common.RMIds
+	topology        *configuration.Topology
 	fInc            int
 	currentState    proposerStateMachineComponent
 	proposerAwaitBallots
@@ -40,12 +41,13 @@ type Proposer struct {
 // we receive outcomes before the txn itself, we do not vote. So you
 // can be active, but not a voter.
 
-func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mode ProposerMode) *Proposer {
+func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mode ProposerMode, topology *configuration.Topology) *Proposer {
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            mode,
 		txnId:           txnId,
 		acceptors:       GetAcceptorsFromTxn(txnCap),
+		topology:        topology,
 		fInc:            int(txnCap.FInc()),
 	}
 	if mode == ProposerActiveVoter {
@@ -55,7 +57,7 @@ func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mod
 	return p
 }
 
-func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) (*Proposer, error) {
+func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, topology *configuration.Topology) (*Proposer, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
 		return nil, err
@@ -76,6 +78,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte) (*P
 		mode:            proposerTLCSender,
 		txnId:           txnId,
 		acceptors:       acceptors,
+		topology:        topology,
 		fInc:            -1,
 	}
 	p.init()
@@ -107,6 +110,12 @@ func (p *Proposer) Start() {
 		p.currentState = &p.proposerReceiveGloballyComplete
 	}
 
+	if p.topology != nil {
+		topology := p.topology
+		p.topology = nil
+		p.TopologyChange(topology)
+	}
+
 	p.currentState.start()
 }
 
@@ -122,6 +131,40 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 		p.txn.Status(sc.Fork())
 	}
 	sc.Join()
+}
+
+func (p *Proposer) TopologyChange(topology *configuration.Topology) {
+	if topology == p.topology {
+		return
+	}
+	p.topology = topology
+	rmsRemoved := topology.RMsRemoved()
+	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rmsRemoved)
+	if _, found := rmsRemoved[p.proposerManager.RMId]; found {
+		return
+	}
+	// create new acceptors slice because the initial slice can be
+	// shared with proposals.
+	acceptors := make([]common.RMId, 0, len(p.acceptors))
+	for _, rmId := range p.acceptors {
+		if _, found := rmsRemoved[rmId]; !found {
+			acceptors = append(acceptors, rmId)
+		}
+	}
+	p.acceptors = acceptors
+
+	switch p.currentState {
+	case &p.proposerAwaitBallots, &p.proposerReceiveOutcomes, &p.proposerAwaitLocallyComplete:
+		if p.outcomeAccumulator.TopologyChange(topology) {
+			p.allAcceptorsAgree()
+		}
+	case &p.proposerReceiveGloballyComplete:
+		for rmId := range rmsRemoved {
+			p.TxnGloballyCompleteReceived(rmId)
+		}
+	case &p.proposerAwaitFinished:
+		// do nothing
+	}
 }
 
 type proposerStateMachineComponent interface {
@@ -164,7 +207,7 @@ func (pab *proposerAwaitBallots) start() {
 	pab.submitter = common.RMId(pab.txn.TxnCap.Submitter())
 	pab.submitterBootCount = pab.txn.TxnCap.SubmitterBootCount()
 	if pab.txn.Retry {
-		pab.proposerManager.ConnectionManager.AddSender(pab)
+		pab.proposerManager.AddServerConnectionSubscriber(pab)
 	}
 }
 
@@ -173,7 +216,7 @@ func (pab *proposerAwaitBallots) String() string {
 	return "proposerAwaitBallots"
 }
 
-func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
+func (pab *proposerAwaitBallots) TxnBallotsComplete(_ *eng.Txn, ballots ...*eng.Ballot) {
 	if pab.currentState == pab {
 		server.Log(pab.txnId, "TxnBallotsComplete callback. Acceptors:", pab.acceptors)
 		if !pab.allAcceptorsAgreed {
@@ -199,7 +242,7 @@ func (pab *proposerAwaitBallots) Abort() {
 		txnCap := pab.txn.TxnCap
 		alloc := AllocForRMId(txnCap, pab.proposerManager.RMId)
 		ballots := MakeAbortBallots(txnCap, alloc)
-		pab.TxnBallotsComplete(ballots...)
+		pab.TxnBallotsComplete(pab.txn, ballots...)
 	}
 }
 
@@ -238,7 +281,7 @@ func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 
 func (pro *proposerReceiveOutcomes) start() {
 	if pro.txn != nil && pro.txn.Retry {
-		pro.proposerManager.ConnectionManager.RemoveSenderAsync(&pro.proposerAwaitBallots)
+		pro.proposerManager.RemoveServerConnectionSubscriber(&pro.proposerAwaitBallots)
 	}
 	if pro.outcome != nil {
 		// we've received enough outcomes already!
@@ -283,7 +326,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// goes missing, if the acceptor sends us further 2Bs then
 			// we'll send back further TLCs from proposer manager. So the
 			// use of OSS here is correct.
-			NewOneShotSender(tlcMsg, pro.proposerManager.ConnectionManager, knownAcceptors...)
+			NewOneShotSender(tlcMsg, pro.proposerManager, knownAcceptors...)
 			return
 		}
 	}
@@ -327,7 +370,7 @@ func (palc *proposerAwaitLocallyComplete) start() {
 		palc.txn.Start(false)
 	}
 	if palc.txn == nil {
-		palc.TxnLocallyComplete()
+		palc.TxnLocallyComplete(palc.txn)
 	} else {
 		palc.txn.BallotOutcomeReceived(palc.outcome)
 	}
@@ -338,7 +381,7 @@ func (palc *proposerAwaitLocallyComplete) String() string {
 	return "proposerAwaitLocallyComplete"
 }
 
-func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete() {
+func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete(*eng.Txn) {
 	if palc.currentState == palc && !palc.callbackInvoked {
 		server.Log(palc.txnId, "Txn locally completed")
 		palc.callbackInvoked = true
@@ -369,8 +412,8 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 
 	data := server.SegToBytes(stateSeg)
 
-	future := palc.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-		rwtxn.Put(db.DB.Proposers, palc.txnId[:], data, 0)
+	future := palc.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Put(palc.proposerManager.DB.Proposers, palc.txnId[:], data, 0)
 		return nil
 	})
 	go func() {
@@ -407,7 +450,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		tlcMsg := MakeTxnLocallyCompleteMsg(prgc.txnId)
 		prgc.tlcSender = NewRepeatingSender(tlcMsg, prgc.acceptors...)
 		server.Log(prgc.txnId, "Adding TLC Sender to", prgc.acceptors)
-		prgc.proposerManager.ConnectionManager.AddSender(prgc.tlcSender)
+		prgc.proposerManager.AddServerConnectionSubscriber(prgc.tlcSender)
 	}
 }
 
@@ -443,7 +486,7 @@ func (paf *proposerAwaitFinished) init(proposer *Proposer) {
 
 func (paf *proposerAwaitFinished) start() {
 	if paf.txn == nil {
-		paf.TxnFinished()
+		paf.TxnFinished(paf.txn)
 	} else {
 		paf.txn.CompletionReceived()
 	}
@@ -454,12 +497,12 @@ func (paf *proposerAwaitFinished) String() string {
 	return "proposerAwaitFinished"
 }
 
-func (paf *proposerAwaitFinished) TxnFinished() {
+func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 	server.Log(paf.txnId, "Txn Finished Callback")
 	if paf.currentState == paf {
 		paf.nextState()
-		future := paf.proposerManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
-			rwtxn.Del(db.DB.Proposers, paf.txnId[:], nil)
+		future := paf.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+			rwtxn.Del(paf.proposerManager.DB.Proposers, paf.txnId[:], nil)
 			return nil
 		})
 		go func() {
@@ -468,7 +511,7 @@ func (paf *proposerAwaitFinished) TxnFinished() {
 				return
 			}
 			paf.proposerManager.Exe.Enqueue(func() {
-				paf.proposerManager.ConnectionManager.RemoveSenderAsync(paf.tlcSender)
+				paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender)
 				paf.tlcSender = nil
 				paf.proposerManager.TxnFinished(paf.txnId)
 			})

@@ -24,22 +24,20 @@ func AutoNewHelloServerFromServer(s *C.Segment) HelloServerFromServer {
 func ReadRootHelloServerFromServer(s *C.Segment) HelloServerFromServer {
 	return HelloServerFromServer(s.Root(0).ToStruct())
 }
-func (s HelloServerFromServer) LocalHost() string         { return C.Struct(s).GetObject(0).ToText() }
-func (s HelloServerFromServer) SetLocalHost(v string)     { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
-func (s HelloServerFromServer) RmId() uint32              { return C.Struct(s).Get32(0) }
-func (s HelloServerFromServer) SetRmId(v uint32)          { C.Struct(s).Set32(0, v) }
-func (s HelloServerFromServer) BootCount() uint32         { return C.Struct(s).Get32(4) }
-func (s HelloServerFromServer) SetBootCount(v uint32)     { C.Struct(s).Set32(4, v) }
-func (s HelloServerFromServer) TieBreak() uint32          { return C.Struct(s).Get32(8) }
-func (s HelloServerFromServer) SetTieBreak(v uint32)      { C.Struct(s).Set32(8, v) }
-func (s HelloServerFromServer) TopologyDBVersion() []byte { return C.Struct(s).GetObject(1).ToData() }
-func (s HelloServerFromServer) SetTopologyDBVersion(v []byte) {
-	C.Struct(s).SetObject(1, s.Segment.NewData(v))
-}
-func (s HelloServerFromServer) Topology() Topology {
-	return Topology(C.Struct(s).GetObject(2).ToStruct())
-}
-func (s HelloServerFromServer) SetTopology(v Topology) { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s HelloServerFromServer) LocalHost() string      { return C.Struct(s).GetObject(0).ToText() }
+func (s HelloServerFromServer) LocalHostBytes() []byte { return C.Struct(s).GetObject(0).ToData() }
+func (s HelloServerFromServer) SetLocalHost(v string)  { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
+func (s HelloServerFromServer) RmId() uint32           { return C.Struct(s).Get32(0) }
+func (s HelloServerFromServer) SetRmId(v uint32)       { C.Struct(s).Set32(0, v) }
+func (s HelloServerFromServer) BootCount() uint32      { return C.Struct(s).Get32(4) }
+func (s HelloServerFromServer) SetBootCount(v uint32)  { C.Struct(s).Set32(4, v) }
+func (s HelloServerFromServer) TieBreak() uint32       { return C.Struct(s).Get32(8) }
+func (s HelloServerFromServer) SetTieBreak(v uint32)   { C.Struct(s).Set32(8, v) }
+func (s HelloServerFromServer) ClusterId() string      { return C.Struct(s).GetObject(1).ToText() }
+func (s HelloServerFromServer) ClusterIdBytes() []byte { return C.Struct(s).GetObject(1).ToData() }
+func (s HelloServerFromServer) SetClusterId(v string)  { C.Struct(s).SetObject(1, s.Segment.NewText(v)) }
+func (s HelloServerFromServer) RootId() []byte         { return C.Struct(s).GetObject(2).ToData() }
+func (s HelloServerFromServer) SetRootId(v []byte)     { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
 func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -125,12 +123,12 @@ func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"topologyDBVersion\":")
+	_, err = b.WriteString("\"clusterId\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.TopologyDBVersion()
+		s := s.ClusterId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -144,13 +142,17 @@ func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"topology\":")
+	_, err = b.WriteString("\"rootId\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Topology()
-		err = s.WriteJSON(b)
+		s := s.RootId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -252,12 +254,12 @@ func (s HelloServerFromServer) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("topologyDBVersion = ")
+	_, err = b.WriteString("clusterId = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.TopologyDBVersion()
+		s := s.ClusterId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -271,13 +273,17 @@ func (s HelloServerFromServer) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("topology = ")
+	_, err = b.WriteString("rootId = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Topology()
-		err = s.WriteCapLit(b)
+		s := s.RootId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -320,81 +326,110 @@ type Message C.Struct
 type Message_Which uint16
 
 const (
-	MESSAGE_HEARTBEAT           Message_Which = 0
-	MESSAGE_TXNSUBMISSION       Message_Which = 1
-	MESSAGE_SUBMISSIONOUTCOME   Message_Which = 2
-	MESSAGE_SUBMISSIONCOMPLETE  Message_Which = 3
-	MESSAGE_SUBMISSIONABORT     Message_Which = 4
-	MESSAGE_ONEATXNVOTES        Message_Which = 5
-	MESSAGE_ONEBTXNVOTES        Message_Which = 6
-	MESSAGE_TWOATXNVOTES        Message_Which = 7
-	MESSAGE_TWOBTXNVOTES        Message_Which = 8
-	MESSAGE_TXNLOCALLYCOMPLETE  Message_Which = 9
-	MESSAGE_TXNGLOBALLYCOMPLETE Message_Which = 10
+	MESSAGE_HEARTBEAT             Message_Which = 0
+	MESSAGE_CONNECTIONERROR       Message_Which = 1
+	MESSAGE_TXNSUBMISSION         Message_Which = 2
+	MESSAGE_SUBMISSIONOUTCOME     Message_Which = 3
+	MESSAGE_SUBMISSIONCOMPLETE    Message_Which = 4
+	MESSAGE_SUBMISSIONABORT       Message_Which = 5
+	MESSAGE_ONEATXNVOTES          Message_Which = 6
+	MESSAGE_ONEBTXNVOTES          Message_Which = 7
+	MESSAGE_TWOATXNVOTES          Message_Which = 8
+	MESSAGE_TWOBTXNVOTES          Message_Which = 9
+	MESSAGE_TXNLOCALLYCOMPLETE    Message_Which = 10
+	MESSAGE_TXNGLOBALLYCOMPLETE   Message_Which = 11
+	MESSAGE_TOPOLOGYCHANGEREQUEST Message_Which = 12
+	MESSAGE_MIGRATION             Message_Which = 13
+	MESSAGE_MIGRATIONCOMPLETE     Message_Which = 14
 )
 
-func NewMessage(s *C.Segment) Message      { return Message(s.NewStruct(8, 1)) }
-func NewRootMessage(s *C.Segment) Message  { return Message(s.NewRootStruct(8, 1)) }
-func AutoNewMessage(s *C.Segment) Message  { return Message(s.NewStructAR(8, 1)) }
-func ReadRootMessage(s *C.Segment) Message { return Message(s.Root(0).ToStruct()) }
-func (s Message) Which() Message_Which     { return Message_Which(C.Struct(s).Get16(0)) }
-func (s Message) SetHeartbeat()            { C.Struct(s).Set16(0, 0) }
-func (s Message) TxnSubmission() Txn       { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
-func (s Message) SetTxnSubmission(v Txn) {
+func NewMessage(s *C.Segment) Message          { return Message(s.NewStruct(8, 1)) }
+func NewRootMessage(s *C.Segment) Message      { return Message(s.NewRootStruct(8, 1)) }
+func AutoNewMessage(s *C.Segment) Message      { return Message(s.NewStructAR(8, 1)) }
+func ReadRootMessage(s *C.Segment) Message     { return Message(s.Root(0).ToStruct()) }
+func (s Message) Which() Message_Which         { return Message_Which(C.Struct(s).Get16(0)) }
+func (s Message) SetHeartbeat()                { C.Struct(s).Set16(0, 0) }
+func (s Message) ConnectionError() string      { return C.Struct(s).GetObject(0).ToText() }
+func (s Message) ConnectionErrorBytes() []byte { return C.Struct(s).GetObject(0).ToData() }
+func (s Message) SetConnectionError(v string) {
 	C.Struct(s).Set16(0, 1)
+	C.Struct(s).SetObject(0, s.Segment.NewText(v))
+}
+func (s Message) TxnSubmission() Txn { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
+func (s Message) SetTxnSubmission(v Txn) {
+	C.Struct(s).Set16(0, 2)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) SubmissionOutcome() Outcome { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetSubmissionOutcome(v Outcome) {
-	C.Struct(s).Set16(0, 2)
+	C.Struct(s).Set16(0, 3)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) SubmissionComplete() TxnSubmissionComplete {
 	return TxnSubmissionComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetSubmissionComplete(v TxnSubmissionComplete) {
-	C.Struct(s).Set16(0, 3)
+	C.Struct(s).Set16(0, 4)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) SubmissionAbort() TxnSubmissionAbort {
 	return TxnSubmissionAbort(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetSubmissionAbort(v TxnSubmissionAbort) {
-	C.Struct(s).Set16(0, 4)
+	C.Struct(s).Set16(0, 5)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) OneATxnVotes() OneATxnVotes { return OneATxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetOneATxnVotes(v OneATxnVotes) {
-	C.Struct(s).Set16(0, 5)
+	C.Struct(s).Set16(0, 6)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) OneBTxnVotes() OneBTxnVotes { return OneBTxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetOneBTxnVotes(v OneBTxnVotes) {
-	C.Struct(s).Set16(0, 6)
+	C.Struct(s).Set16(0, 7)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TwoATxnVotes() TwoATxnVotes { return TwoATxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetTwoATxnVotes(v TwoATxnVotes) {
-	C.Struct(s).Set16(0, 7)
+	C.Struct(s).Set16(0, 8)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TwoBTxnVotes() TwoBTxnVotes { return TwoBTxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetTwoBTxnVotes(v TwoBTxnVotes) {
-	C.Struct(s).Set16(0, 8)
+	C.Struct(s).Set16(0, 9)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TxnLocallyComplete() TxnLocallyComplete {
 	return TxnLocallyComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetTxnLocallyComplete(v TxnLocallyComplete) {
-	C.Struct(s).Set16(0, 9)
+	C.Struct(s).Set16(0, 10)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TxnGloballyComplete() TxnGloballyComplete {
 	return TxnGloballyComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetTxnGloballyComplete(v TxnGloballyComplete) {
-	C.Struct(s).Set16(0, 10)
+	C.Struct(s).Set16(0, 11)
+	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s Message) TopologyChangeRequest() Configuration {
+	return Configuration(C.Struct(s).GetObject(0).ToStruct())
+}
+func (s Message) SetTopologyChangeRequest(v Configuration) {
+	C.Struct(s).Set16(0, 12)
+	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s Message) Migration() Migration { return Migration(C.Struct(s).GetObject(0).ToStruct()) }
+func (s Message) SetMigration(v Migration) {
+	C.Struct(s).Set16(0, 13)
+	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s Message) MigrationComplete() MigrationComplete {
+	return MigrationComplete(C.Struct(s).GetObject(0).ToStruct())
+}
+func (s Message) SetMigrationComplete(v MigrationComplete) {
+	C.Struct(s).Set16(0, 14)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) WriteJSON(w io.Writer) error {
@@ -415,6 +450,23 @@ func (s Message) WriteJSON(w io.Writer) error {
 		_, err = b.WriteString("null")
 		if err != nil {
 			return err
+		}
+	}
+	if s.Which() == MESSAGE_CONNECTIONERROR {
+		_, err = b.WriteString("\"connectionError\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.ConnectionError()
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if s.Which() == MESSAGE_TXNSUBMISSION {
@@ -547,6 +599,45 @@ func (s Message) WriteJSON(w io.Writer) error {
 			}
 		}
 	}
+	if s.Which() == MESSAGE_TOPOLOGYCHANGEREQUEST {
+		_, err = b.WriteString("\"topologyChangeRequest\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.TopologyChangeRequest()
+			err = s.WriteJSON(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATION {
+		_, err = b.WriteString("\"migration\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.Migration()
+			err = s.WriteJSON(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATIONCOMPLETE {
+		_, err = b.WriteString("\"migrationComplete\":")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.MigrationComplete()
+			err = s.WriteJSON(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	err = b.WriteByte('}')
 	if err != nil {
 		return err
@@ -577,6 +668,23 @@ func (s Message) WriteCapLit(w io.Writer) error {
 		_, err = b.WriteString("null")
 		if err != nil {
 			return err
+		}
+	}
+	if s.Which() == MESSAGE_CONNECTIONERROR {
+		_, err = b.WriteString("connectionError = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.ConnectionError()
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	if s.Which() == MESSAGE_TXNSUBMISSION {
@@ -703,6 +811,45 @@ func (s Message) WriteCapLit(w io.Writer) error {
 		}
 		{
 			s := s.TxnGloballyComplete()
+			err = s.WriteCapLit(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_TOPOLOGYCHANGEREQUEST {
+		_, err = b.WriteString("topologyChangeRequest = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.TopologyChangeRequest()
+			err = s.WriteCapLit(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATION {
+		_, err = b.WriteString("migration = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.Migration()
+			err = s.WriteCapLit(b)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if s.Which() == MESSAGE_MIGRATIONCOMPLETE {
+		_, err = b.WriteString("migrationComplete = ")
+		if err != nil {
+			return err
+		}
+		{
+			s := s.MigrationComplete()
 			err = s.WriteCapLit(b)
 			if err != nil {
 				return err

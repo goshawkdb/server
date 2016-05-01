@@ -15,9 +15,9 @@ import (
 )
 
 type TxnLocalStateChange interface {
-	TxnBallotsComplete(...*Ballot)
-	TxnLocallyComplete()
-	TxnFinished()
+	TxnBallotsComplete(*Txn, ...*Ballot)
+	TxnLocallyComplete(*Txn)
+	TxnFinished(*Txn)
 }
 
 type Txn struct {
@@ -57,15 +57,16 @@ func (txnA *Txn) Compare(txnB *Txn) common.Cmp {
 
 type localAction struct {
 	*Txn
-	vUUId            *common.VarUUId
-	ballot           *Ballot
-	frame            *frame
-	readVsn          *common.TxnId
-	writeTxnActions  *msgs.Action_List
-	writeAction      *msgs.Action
-	createPositions  *common.Positions
-	roll             bool
-	outcomeClockCopy *VectorClock
+	vUUId           *common.VarUUId
+	ballot          *Ballot
+	frame           *frame
+	readVsn         *common.TxnId
+	writeTxnActions *msgs.Action_List
+	writeAction     *msgs.Action
+	createPositions *common.Positions
+	roll            bool
+	outcomeClock    *VectorClock
+	writesClock     *VectorClock
 }
 
 func (action *localAction) IsRead() bool {
@@ -78,6 +79,10 @@ func (action *localAction) IsWrite() bool {
 
 func (action *localAction) IsRoll() bool {
 	return action.roll
+}
+
+func (action *localAction) IsImmigrant() bool {
+	return action.writesClock != nil
 }
 
 func (action *localAction) VoteDeadlock(clock *VectorClock) {
@@ -137,7 +142,52 @@ func (action localAction) String() string {
 	if action.ballot != nil {
 		b = "|b"
 	}
-	return fmt.Sprintf("Action for %v: create:%v|read:%v|write:%v|roll:%v%v%v", action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b)
+	i := ""
+	if action.writesClock != nil {
+		i = "|i"
+	}
+	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
+}
+
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, txnCap *msgs.Txn, varCaps *msgs.Var_List) {
+	txn := TxnFromCap(exe, vd, stateChange, ourRMId, txnCap)
+	txnActions := txnCap.Actions()
+	txn.localActions = make([]localAction, varCaps.Len())
+	actionsMap := make(map[common.VarUUId]*localAction)
+	for idx, l := 0, varCaps.Len(); idx < l; idx++ {
+		varCap := varCaps.At(idx)
+		action := &txn.localActions[idx]
+		action.Txn = txn
+		action.vUUId = common.MakeVarUUId(varCap.Id())
+		action.writeTxnActions = &txnActions
+		positions := varCap.Positions()
+		action.createPositions = (*common.Positions)(&positions)
+		action.outcomeClock = VectorClockFromCap(varCap.WriteTxnClock())
+		action.writesClock = VectorClockFromCap(varCap.WritesClock())
+		actionsMap[*action.vUUId] = action
+	}
+
+	for idx, l := 0, txnActions.Len(); idx < l; idx++ {
+		actionCap := txnActions.At(idx)
+		vUUId := common.MakeVarUUId(actionCap.VarId())
+		if action, found := actionsMap[*vUUId]; found {
+			action.writeAction = &actionCap
+		}
+	}
+
+	txn.Start(false)
+	txn.nextState()
+	for idx := range txn.localActions {
+		action := &txn.localActions[idx]
+		f := func(v *Var, err error) {
+			if err != nil {
+				panic(fmt.Sprintf("%v immigration error: %v", txn.Id, err))
+			} else {
+				v.ReceiveTxnOutcome(action)
+			}
+		}
+		vd.ApplyToVar(f, true, action.vUUId)
+	}
 }
 
 func TxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, txnCap *msgs.Txn) *Txn {
@@ -439,7 +489,7 @@ func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() {
 			action := &talb.localActions[idx]
 			ballots[idx] = action.ballot
 		}
-		talb.stateChange.TxnBallotsComplete(ballots...)
+		talb.stateChange.TxnBallotsComplete(talb.Txn, ballots...)
 	} else {
 		panic(fmt.Sprintf("%v error: Ballots completed with txn in wrong state: %v\n", talb.Id, talb.currentState))
 	}
@@ -452,7 +502,7 @@ func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) {
 	// Up until we actually receive the outcome, we should pass on all
 	// of these to the proposer.
 	if talb.currentState == &talb.txnReceiveOutcome {
-		talb.stateChange.TxnBallotsComplete(ballot)
+		talb.stateChange.TxnBallotsComplete(talb.Txn, ballot)
 	}
 }
 
@@ -501,6 +551,7 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	}
 	for idx := 0; idx < len(tro.localActions); idx++ {
 		action := &tro.localActions[idx]
+		action.outcomeClock = tro.outcomeClock
 		f := func(v *Var, err error) {
 			if err != nil {
 				panic(fmt.Sprintf("%v error (%v, aborted? %v, preAborted? %v, frame == nil? %v): %v", tro.Id, tro, tro.aborted, tro.preAbortedBool, action.frame == nil, err))
@@ -547,7 +598,7 @@ func (talc *txnAwaitLocallyComplete) LocallyComplete() {
 func (talc *txnAwaitLocallyComplete) locallyComplete() {
 	if talc.currentState == talc {
 		talc.nextState() // do state first!
-		talc.stateChange.TxnLocallyComplete()
+		talc.stateChange.TxnLocallyComplete(talc.Txn)
 	}
 }
 
@@ -604,6 +655,6 @@ func (trc *txnReceiveCompletion) CompletionReceived() {
 func (trc *txnReceiveCompletion) maybeFinish() {
 	if trc.currentState == trc && trc.completed {
 		trc.nextState()
-		trc.stateChange.TxnFinished()
+		trc.stateChange.TxnFinished(trc.Txn)
 	}
 }

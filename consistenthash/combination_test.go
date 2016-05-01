@@ -250,6 +250,28 @@ func TestCombinationDisabled(t *testing.T) {
 	}
 }
 
+func isPermutationOf(perm, hashcodes []common.RMId) bool {
+	if len(perm) != len(hashcodes) {
+		return false
+	}
+	freq := make(map[common.RMId]int)
+	for _, hc := range perm {
+		if count := freq[hc]; count == 0 {
+			freq[hc] = 1
+		} else {
+			return false
+		}
+	}
+	for _, hc := range hashcodes {
+		if _, found := freq[hc]; found {
+			delete(freq, hc)
+		} else {
+			return false
+		}
+	}
+	return len(freq) == 0
+}
+
 func BenchmarkPicker_4PermsOf4_8HC_DL4(b *testing.B) {
 	benchmarkPicker(8, 4, 4, 4, b)
 }

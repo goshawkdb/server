@@ -6,17 +6,14 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
 	goshawk "goshawkdb.io/server"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -114,7 +111,7 @@ func newServer() (*server, error) {
 		configFile:  configFile,
 		certificate: certificate,
 		dataDir:     dataDir,
-		port:        port,
+		port:        uint16(port),
 		onShutdown:  []func(){},
 	}
 
@@ -133,17 +130,19 @@ type server struct {
 	configFile        string
 	certificate       []byte
 	dataDir           string
-	port              int
+	port              uint16
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
-	dispatchers       *paxos.Dispatchers
+	transmogrifier    *network.TopologyTransmogrifier
 	profileFile       *os.File
 	traceFile         *os.File
 	onShutdown        []func()
 }
 
 func (s *server) start() {
+	os.Stdin.Close()
+
 	procs := runtime.NumCPU()
 	if procs < 2 {
 		procs = 2
@@ -155,75 +154,39 @@ func (s *server) start() {
 
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
 	s.maybeShutdown(err)
-	s.addOnShutdown(disk.Shutdown)
+	db := disk.(*db.Databases)
+	s.addOnShutdown(db.Shutdown)
 
-	cm, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, nodeCertPrivKeyPair)
+	commandLineConfig, err := s.commandLineConfig()
+	s.maybeShutdown(err)
+
+	if commandLineConfig == nil {
+		commandLineConfig = configuration.BlankTopology("").Configuration
+	}
+
+	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, commandLineConfig)
+	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
+	s.addOnShutdown(transmogrifier.Shutdown)
 	s.connectionManager = cm
-	s.addOnShutdown(cm.Shutdown)
-	s.addOnShutdown(lc.Shutdown)
+	s.transmogrifier = transmogrifier
 
 	s.Add(1)
 	go s.signalHandler()
 
-	topologyLocal, err := network.GetTopologyFromLocalDatabase(cm, cm.Dispatchers.VarDispatcher, lc)
-	s.maybeShutdown(err)
-
-	topology, err := s.chooseTopology(topologyLocal)
-	s.maybeShutdown(err)
-
-	if topologyLocal == nil {
-		topologyTxnId, err := network.CreateTopologyZero(cm, topology, lc)
-		s.maybeShutdown(err)
-		topology.DBVersion = topologyTxnId
-	}
-
-	cm.SetTopology(topology)
-
-	cm.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
-		if err != nil {
-			log.Println("Error trying to subscribe to topology:", err)
-			return
-		}
-		emptyTxnId := common.MakeTxnId([]byte{})
-		v.AddWriteSubscriber(emptyTxnId,
-			func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-				var rootVarPosPtr *msgs.VarIdPos
-				if refs.Len() == 1 {
-					root := refs.At(0)
-					rootVarPosPtr = &root
-				}
-				topology, err := configuration.TopologyDeserialize(txn.Id, rootVarPosPtr, value)
-				if err != nil {
-					log.Println("Unable to deserialize new topology:", err)
-				}
-				cm.SetTopology(topology)
-				disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
-					return nil, env.SetFlags(mdb.MAPASYNC, topology.AsyncFlush)
-				})
-			})
-	}, false, configuration.TopologyVarUUId)
-
-	cm.AddSender(network.NewTopologyWriter(topology, lc, cm))
-
-	localHost, remoteHosts, err := topology.LocalRemoteHosts(s.port)
-	s.maybeShutdown(err)
-
-	log.Printf(">==> We are %v (%v) <==<\n", localHost, s.rmId)
-
 	listener, err := network.NewListener(s.port, cm)
-	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
-
-	cm.SetDesiredServers(localHost, remoteHosts)
+	s.maybeShutdown(err)
 
 	defer s.shutdown(nil)
 	s.Wait()
 }
 
 func (s *server) addOnShutdown(f func()) {
-	s.onShutdown = append(s.onShutdown, f)
+	if f != nil {
+		s.onShutdown = append(s.onShutdown, f)
+	}
 }
 
 func (s *server) shutdown(err error) {
@@ -272,33 +235,15 @@ func (s *server) ensureBootCount() error {
 	return ioutil.WriteFile(path, b, 0600)
 }
 
-func (s *server) chooseTopology(topology *configuration.Topology) (*configuration.Topology, error) {
-	var config *configuration.Configuration
+func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	if s.configFile != "" {
-		var err error
-		config, err = configuration.LoadConfigurationFromPath(s.configFile)
-		if err != nil {
-			return nil, err
-		}
+		return configuration.LoadConfigurationFromPath(s.configFile)
 	}
-
-	switch {
-	case topology == nil && config == nil:
-		return nil, fmt.Errorf("Local data store is empty and no external config supplied. Must supply config with -config")
-	case topology == nil:
-		return configuration.NewTopology(config), nil
-	case config == nil:
-		return topology, nil
-	case topology.Configuration.Equal(config):
-		return topology, nil
-	case topology.ClusterId != config.ClusterId:
-		return nil, fmt.Errorf("Local data store is configured for cluster '%v', but supplied config is for cluster '%v'. Cannot continue. Either adjust config or use clean data directory", topology.ClusterId, config.ClusterId)
-	default:
-		return nil, fmt.Errorf("Topology change not currently supported. Sorry.")
-	}
+	return nil, nil
 }
 
 func (s *server) signalShutdown() {
+	// this may file if stdout has died
 	log.Println("Shutting down.")
 	s.Done()
 }
@@ -315,7 +260,6 @@ func (s *server) signalStatus() {
 }
 
 func (s *server) signalReloadConfig() {
-	return // not supported for now.
 	if s.configFile == "" {
 		log.Println("Attempt to reload config failed as no path to configuration provided on command line.")
 		return
@@ -325,13 +269,7 @@ func (s *server) signalReloadConfig() {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	localHost, remoteHosts, err := config.LocalRemoteHosts(s.port)
-	if err != nil {
-		log.Println("Cannot reload config due to error:", err)
-		return
-	}
-	s.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	log.Println("Reloaded configuration.")
+	s.transmogrifier.RequestConfigurationChange(config)
 }
 
 func (s *server) signalDumpStacks() {
@@ -402,12 +340,18 @@ func (s *server) signalToggleTrace() {
 
 func (s *server) signalHandler() {
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, os.Interrupt)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGPIPE, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, os.Interrupt)
 	for {
 		sig := <-sigs
 		switch sig {
+		case syscall.SIGPIPE:
+			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
+				s.signalShutdown()
+				return
+			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.signalShutdown()
+			return
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
 		case syscall.SIGQUIT:

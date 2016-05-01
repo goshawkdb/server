@@ -2,6 +2,7 @@ package txnengine
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	sl "github.com/msackman/skiplist"
@@ -12,7 +13,8 @@ import (
 	"sort"
 )
 
-var AbortRollError = fmt.Errorf("Not leading hashcode")
+var AbortRollNotFirst = errors.New("AbortRollNotFirst")
+var AbortRollNotInPermutation = errors.New("AbortRollNotInPermutation")
 
 type frame struct {
 	parent           *frame
@@ -76,7 +78,7 @@ func (f *frame) nextState() {
 }
 
 func (f *frame) String() string {
-	return fmt.Sprintf("%v Frame %v r%v w%v", f.v.UUId, f.frameTxnId, f.readVoteClock, f.writeVoteClock)
+	return fmt.Sprintf("%v Frame %v (%v) r%v w%v", f.v.UUId, f.frameTxnId, len(f.frameTxnClock.Clock), f.readVoteClock, f.writeVoteClock)
 }
 
 func (f *frame) Status(sc *server.StatusConsumer) {
@@ -362,7 +364,6 @@ func (fo *frameOpen) ReadWriteCommitted(action *localAction) {
 	if node := fo.writes.Get(action); node != nil && node.Value == uncommitted {
 		node.Value = committed
 		fo.uncommittedWrites--
-		fo.positionsFound = fo.positionsFound || (fo.frameTxnActions == nil && action.createPositions != nil)
 		fo.maybeCreateChild()
 	} else {
 		panic(fmt.Sprintf("%v ReadWriteCommitted called for unknown txn %v", fo.frame, txn))
@@ -375,6 +376,9 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		panic(fmt.Sprintf("%v ReadLearnt called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
 	actClockElem := action.outcomeClock.Clock[*fo.v.UUId] - 1
+	if action.outcomeClock.Clock[*fo.v.UUId] == 0 {
+		panic("Just did 0 - 1 in int64")
+	}
 	reqClockElem := fo.frameTxnClock.Clock[*fo.v.UUId]
 	if action.readVsn.Compare(fo.frameTxnId) != common.EQ {
 		// The write would be one less than the read. We want to know if
@@ -432,12 +436,16 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 		server.Log(fo.frame, "WriteLearnt", txn, "ignored, too old")
 		return false
 	}
+	if action.Id.Compare(fo.frameTxnId) == common.EQ {
+		server.Log(fo.frame, "WriteLearnt", txn, "is duplicate of current frame")
+		return false
+	}
 	if actClockElem == reqClockElem {
 		// ok, so ourself and this txn were actually siblings, but we
 		// created this frame before we knew that. By definition, there
 		// cannot be any committed reads of us.
 		if fo.reads.Len() > fo.uncommittedReads {
-			panic(fmt.Sprintf("%v Found committed reads where there should have been none", fo.frame))
+			panic(fmt.Sprintf("%v (%v) Found committed reads where there should have been none for action %v (%v)", fo.frame, fo.frameTxnClock, action, action.outcomeClock))
 		}
 	}
 	if fo.writes.Get(action) == nil {
@@ -466,13 +474,20 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 }
 
 func (fo *frameOpen) isLocked() bool {
-	if fo.frameTxnActions == nil || fo.parent == nil {
-		return false
-	}
-	rvcLen := len(fo.readVoteClock.Clock)
-	actionsLen := fo.frameTxnActions.Len()
-	excess := rvcLen - actionsLen
-	return excess > server.FrameLockMinExcessSize && rvcLen > actionsLen*server.FrameLockMinRatio
+	return false
+	// Locking is disabled because it's unsafe when there are temporary
+	// node failures around: with node failures, TGCs don't get issued
+	// so the clocks don't get tidied up, so the frame can lock itself
+	// and then we can't make progress. TODO FIXME.
+	/*
+		if fo.frameTxnActions == nil || fo.parent == nil {
+			return false
+		}
+		rvcLen := len(fo.readVoteClock.Clock)
+		actionsLen := fo.frameTxnActions.Len()
+		excess := rvcLen - actionsLen
+		return excess > server.FrameLockMinExcessSize && rvcLen > actionsLen*server.FrameLockMinRatio
+	*/
 }
 
 func (fo *frameOpen) maybeFindMaxReadFrom(action *localAction, node *sl.Node) {
@@ -622,22 +637,26 @@ func (fo *frameOpen) maybeCreateChild() {
 	for _, localElemVal := range localElemVals {
 		actions := localElemValToTxns[localElemVal]
 		for _, action := range *actions {
-			action.outcomeClockCopy = action.outcomeClock.Clone()
-			action.outcomeClockCopy.MergeInMissing(clock)
+			action.outcomeClock = action.outcomeClock.Clone()
+			action.outcomeClock.MergeInMissing(clock)
 			winner = maxTxnByOutcomeClock(winner, action)
 
 			if positions == nil && action.createPositions != nil {
 				positions = action.createPositions
 			}
 
-			clock.MergeInMax(action.outcomeClockCopy)
-			for _, k := range action.writes {
-				written.SetVarIdMax(*k, action.outcomeClockCopy.Clock[*k])
+			clock.MergeInMax(action.outcomeClock)
+			if action.writesClock == nil {
+				for _, k := range action.writes {
+					written.SetVarIdMax(*k, action.outcomeClock.Clock[*k])
+				}
+			} else {
+				written.MergeInMax(action.writesClock)
 			}
 		}
 	}
 
-	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.writeTxnActions, winner.outcomeClockCopy, written)
+	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.writeTxnActions, winner.outcomeClock, written)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
 		if !fo.child.ReadLearnt(action) {
@@ -650,6 +669,7 @@ func (fo *frameOpen) maybeCreateChild() {
 }
 
 func (fo *frameOpen) maybeScheduleRoll() {
+	// do not check vm.RollAllowed here.
 	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
 		(fo.reads.Len() > fo.uncommittedReads || (len(fo.frameTxnClock.Clock) > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollScheduled = true
@@ -663,7 +683,7 @@ func (fo *frameOpen) maybeScheduleRoll() {
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	if !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
+	if fo.v.vm.RollAllowed && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
 		(fo.reads.Len() > fo.uncommittedReads || (len(fo.frameTxnClock.Clock) > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollActive = true
 		ctxn, varPosMap := fo.createRollClientTxn()
@@ -682,7 +702,9 @@ func (fo *frameOpen) maybeStartRoll() {
 			if outcome == nil || outcome.Which() != msgs.OUTCOME_COMMIT {
 				fo.v.applyToVar(func() {
 					fo.rollActive = false
-					if err != AbortRollError {
+					if err == AbortRollNotInPermutation {
+						fo.v.maybeMakeInactive()
+					} else {
 						fo.maybeScheduleRoll()
 					}
 				})
@@ -759,7 +781,11 @@ func (fo *frameOpen) subtractClock(clock *VectorClock) {
 }
 
 func (fo *frameOpen) isIdle() bool {
-	return fo.currentState == fo && !fo.rollScheduled && !fo.rollActive && fo.child == nil && fo.parent == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
+	return fo.parent == nil && !fo.rollScheduled && fo.isEmpty()
+}
+
+func (fo *frameOpen) isEmpty() bool {
+	return fo.currentState == fo && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
 }
 
 // closed
@@ -852,11 +878,7 @@ func (fe *frameErase) WriteGloballyComplete(action *localAction) {
 	}
 	if node := fe.writes.Get(action); node != nil && node.Value == completing {
 		node.Remove()
-		if action.outcomeClockCopy == nil {
-			fe.v.curFrame.subtractClock(action.outcomeClock)
-		} else {
-			fe.v.curFrame.subtractClock(action.outcomeClockCopy)
-		}
+		fe.v.curFrame.subtractClock(action.outcomeClock)
 		fe.maybeErase()
 	} else {
 		panic(fmt.Sprintf("ReadGloballyComplete for invalid action %v %v", fe.frame, node))
@@ -890,8 +912,8 @@ func maxTxnByOutcomeClock(a, b *localAction) *localAction {
 	case b == nil:
 		return a
 	default:
-		agt := b.outcomeClockCopy.LessThan(a.outcomeClockCopy)
-		bgt := a.outcomeClockCopy.LessThan(b.outcomeClockCopy)
+		agt := b.outcomeClock.LessThan(a.outcomeClock)
+		bgt := a.outcomeClock.LessThan(b.outcomeClock)
 		switch {
 		case agt == bgt:
 			if a.Id.Compare(b.Id) == common.LT {

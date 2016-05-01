@@ -383,6 +383,9 @@ func (br badReads) combine(rmBal *rmBallot) {
 				clockElem: clock.Clock[*vUUId] - 1,
 				action:    &action,
 			}
+			if clock.Clock[*vUUId] == 0 {
+				panic(fmt.Sprintf("Just did 0 - 1 in int64 (%v, %v) (%v)", vUUId, clock, txnId))
+			}
 		} else {
 			br[*vUUId] = &badReadAction{
 				rmBallot:  rmBal,

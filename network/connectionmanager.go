@@ -1,17 +1,19 @@
 package network
 
 import (
+	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
-	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"sync"
 )
@@ -22,116 +24,226 @@ type ConnectionManager struct {
 	RMId                          common.RMId
 	BootCount                     uint32
 	NodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
+	Transmogrifier                *TopologyTransmogrifier
 	topology                      *configuration.Topology
-	remoteTopology                *configuration.Topology
 	cellTail                      *cc.ChanCellTail
 	enqueueQueryInner             func(connectionManagerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan                     <-chan connectionManagerMsg
-	servers                       map[string]*Connection
-	rmToServer                    map[common.RMId]*connectionWithBootCount
+	servers                       map[string]*connectionManagerMsgServerEstablished
+	rmToServer                    map[common.RMId]*connectionManagerMsgServerEstablished
 	connCountToClient             map[uint32]paxos.ClientConnection
 	desired                       []string
-	senders                       map[paxos.Sender]server.EmptyStruct
+	serverConnSubscribers         serverConnSubscribers
+	topologySubscribers           topologySubscribers
 	Dispatchers                   *paxos.Dispatchers
 }
 
-type connectionManagerMsg interface {
-	connectionManagerMsgWitness()
+type serverConnSubscribers struct {
+	*ConnectionManager
+	subscribers map[paxos.ServerConnectionSubscriber]server.EmptyStruct
 }
+
+type topologySubscribers struct {
+	*ConnectionManager
+	subscribers []map[eng.TopologySubscriber]server.EmptyStruct
+}
+
+func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg *msgs.Message) {
+	d := cm.Dispatchers
+	switch msgType {
+	case msgs.MESSAGE_TXNSUBMISSION:
+		txn := msg.TxnSubmission()
+		d.ProposerDispatcher.TxnReceived(sender, &txn)
+	case msgs.MESSAGE_SUBMISSIONOUTCOME:
+		outcome := msg.SubmissionOutcome()
+		txnId := common.MakeTxnId(outcome.Txn().Id())
+		connNumber := binary.BigEndian.Uint32(txnId[8:12])
+		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
+		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
+			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
+			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
+		} else {
+			conn.SubmissionOutcomeReceived(sender, txnId, &outcome)
+			return
+		}
+	case msgs.MESSAGE_SUBMISSIONCOMPLETE:
+		tsc := msg.SubmissionComplete()
+		d.AcceptorDispatcher.TxnSubmissionCompleteReceived(sender, &tsc)
+	case msgs.MESSAGE_SUBMISSIONABORT:
+		tsa := msg.SubmissionAbort()
+		d.ProposerDispatcher.TxnSubmissionAbortReceived(sender, &tsa)
+	case msgs.MESSAGE_ONEATXNVOTES:
+		oneATxnVotes := msg.OneATxnVotes()
+		d.AcceptorDispatcher.OneATxnVotesReceived(sender, &oneATxnVotes)
+	case msgs.MESSAGE_ONEBTXNVOTES:
+		oneBTxnVotes := msg.OneBTxnVotes()
+		d.ProposerDispatcher.OneBTxnVotesReceived(sender, &oneBTxnVotes)
+	case msgs.MESSAGE_TWOATXNVOTES:
+		twoATxnVotes := msg.TwoATxnVotes()
+		d.AcceptorDispatcher.TwoATxnVotesReceived(sender, &twoATxnVotes)
+	case msgs.MESSAGE_TWOBTXNVOTES:
+		twoBTxnVotes := msg.TwoBTxnVotes()
+		d.ProposerDispatcher.TwoBTxnVotesReceived(sender, &twoBTxnVotes)
+	case msgs.MESSAGE_TXNLOCALLYCOMPLETE:
+		tlc := msg.TxnLocallyComplete()
+		d.AcceptorDispatcher.TxnLocallyCompleteReceived(sender, &tlc)
+	case msgs.MESSAGE_TXNGLOBALLYCOMPLETE:
+		tgc := msg.TxnGloballyComplete()
+		d.ProposerDispatcher.TxnGloballyCompleteReceived(sender, &tgc)
+	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
+		// do nothing - we've just sent it to ourselves.
+	case msgs.MESSAGE_MIGRATION:
+		migration := msg.Migration()
+		cm.Transmogrifier.MigrationReceived(sender, &migration)
+	case msgs.MESSAGE_MIGRATIONCOMPLETE:
+		migrationComplete := msg.MigrationComplete()
+		cm.Transmogrifier.MigrationCompleteReceived(sender, &migrationComplete)
+	default:
+		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
+	}
+}
+
+type connectionManagerMsg interface {
+	witness() connectionManagerMsg
+}
+
+type connectionManagerMsgBasic struct{}
+
+func (cmmb connectionManagerMsgBasic) witness() connectionManagerMsg { return cmmb }
 
 type connectionManagerMsgShutdown chan struct{}
 
-func (cmms connectionManagerMsgShutdown) connectionManagerMsgWitness() {}
+func (cmms connectionManagerMsgShutdown) witness() connectionManagerMsg { return cmms }
 
 type connectionManagerMsgSetDesired struct {
+	connectionManagerMsgBasic
 	local  string
 	remote []string
 }
 
-func (cmmsd *connectionManagerMsgSetDesired) connectionManagerMsgWitness() {}
+type connectionManagerMsgServerEstablished struct {
+	connectionManagerMsgBasic
+	*Connection
+	send        func([]byte)
+	established bool
+	host        string
+	rmId        common.RMId
+	bootCount   uint32
+	tieBreak    uint32
+	rootId      *common.VarUUId
+}
 
-type connectionManagerMsgServerEstablished Connection
-
-func (cmmse *connectionManagerMsgServerEstablished) connectionManagerMsgWitness() {}
-
-type connectionManagerMsgServerLost Connection
-
-func (cmmsl *connectionManagerMsgServerLost) connectionManagerMsgWitness() {}
+type connectionManagerMsgServerLost struct {
+	connectionManagerMsgBasic
+	*Connection
+	rmId       common.RMId
+	restarting bool
+}
 
 type connectionManagerMsgClientEstablished struct {
+	connectionManagerMsgBasic
 	connNumber uint32
 	conn       paxos.ClientConnection
 	servers    map[common.RMId]paxos.Connection
+	resultChan chan struct{}
+}
+
+type connectionManagerMsgServerConnAddSubscriber struct {
+	connectionManagerMsgBasic
+	paxos.ServerConnectionSubscriber
+}
+
+type connectionManagerMsgServerConnRemoveSubscriber struct {
+	connectionManagerMsgBasic
+	paxos.ServerConnectionSubscriber
+}
+
+type connectionManagerMsgSetTopology struct {
+	connectionManagerMsgBasic
+	topology  *configuration.Topology
+	callbacks map[eng.TopologyChangeSubscriberType]func()
+}
+
+type connectionManagerMsgTopologyAddSubscriber struct {
+	connectionManagerMsgBasic
+	eng.TopologySubscriber
+	subType    eng.TopologyChangeSubscriberType
 	topology   *configuration.Topology
 	resultChan chan struct{}
 }
 
-func (cmmce *connectionManagerMsgClientEstablished) connectionManagerMsgWitness() {}
-
-type connectionManagerMsgSenderStart struct{ paxos.Sender }
-
-func (cmms connectionManagerMsgSenderStart) connectionManagerMsgWitness() {}
-
-type connectionManagerMsgSenderFinished struct {
-	paxos.Sender
-	resultChan chan struct{}
+type connectionManagerMsgTopologyRemoveSubscriber struct {
+	connectionManagerMsgBasic
+	eng.TopologySubscriber
+	subType eng.TopologyChangeSubscriberType
 }
 
-func (cmms connectionManagerMsgSenderFinished) connectionManagerMsgWitness() {}
-
-type connectionManagerMsgGetTopology struct {
-	resultChan chan struct{}
-	topology   *configuration.Topology
+type connectionManagerMsgRequestConfigChange struct {
+	connectionManagerMsgBasic
+	config *configuration.Configuration
 }
 
-func (cmmgt *connectionManagerMsgGetTopology) connectionManagerMsgWitness() {}
+type connectionManagerMsgStatus struct {
+	connectionManagerMsgBasic
+	*server.StatusConsumer
+}
 
-type connectionManagerMsgSetTopology configuration.Topology
-
-func (cmmst *connectionManagerMsgSetTopology) connectionManagerMsgWitness() {}
-
-type connectionManagerMsgStatus server.StatusConsumer
-
-func (cmms *connectionManagerMsgStatus) connectionManagerMsgWitness() {}
-
-func (cm *ConnectionManager) Shutdown() {
+func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
 	c := make(chan struct{})
 	cm.enqueueSyncQuery(connectionManagerMsgShutdown(c), c)
-	<-c
+	if sync == paxos.Sync {
+		<-c
+	}
 }
 
 func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string) {
-	cm.enqueueQuery(&connectionManagerMsgSetDesired{
+	cm.enqueueQuery(connectionManagerMsgSetDesired{
 		local:  localhost,
 		remote: remotehosts,
 	})
 }
 
-func (cm *ConnectionManager) ServerEstablished(conn *Connection) {
-	cm.enqueueQuery((*connectionManagerMsgServerEstablished)(conn))
+func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, rootId *common.VarUUId) {
+	cm.enqueueQuery(&connectionManagerMsgServerEstablished{
+		Connection:  conn,
+		send:        conn.Send,
+		established: true,
+		host:        host,
+		rmId:        rmId,
+		bootCount:   bootCount,
+		tieBreak:    tieBreak,
+		rootId:      rootId,
+	})
 }
 
-func (cm *ConnectionManager) ServerLost(conn *Connection) {
-	cm.enqueueQuery((*connectionManagerMsgServerLost)(conn))
+func (cm *ConnectionManager) ServerLost(conn *Connection, rmId common.RMId, restarting bool) {
+	cm.enqueueQuery(connectionManagerMsgServerLost{
+		Connection: conn,
+		rmId:       rmId,
+		restarting: restarting,
+	})
 }
 
-func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) (*configuration.Topology, map[common.RMId]paxos.Connection) {
+// NB client established gets you server connection subscriber too. It
+// does not get you a topology subscriber.
+func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) map[common.RMId]paxos.Connection {
 	query := &connectionManagerMsgClientEstablished{
 		connNumber: connNumber,
 		conn:       conn,
 		resultChan: make(chan struct{}),
 	}
 	if cm.enqueueSyncQuery(query, query.resultChan) {
-		return query.topology, query.servers
+		return query.servers
 	} else {
-		return nil, nil
+		return nil
 	}
 }
 
-func (cm *ConnectionManager) ClientLost(connNumber uint32) {
+func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConnection) {
 	cm.Lock()
 	delete(cm.connCountToClient, connNumber)
 	cm.Unlock()
+	cm.RemoveServerConnectionSubscriber(conn)
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
@@ -149,9 +261,26 @@ func (cm *ConnectionManager) LocalHost() string {
 	return cm.localHost
 }
 
-func (cm *ConnectionManager) Topology() *configuration.Topology {
-	query := &connectionManagerMsgGetTopology{
-		resultChan: make(chan struct{}),
+func (cm *ConnectionManager) AddServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber) {
+	cm.enqueueQuery(connectionManagerMsgServerConnAddSubscriber{ServerConnectionSubscriber: obs})
+}
+
+func (cm *ConnectionManager) RemoveServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber) {
+	cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
+}
+
+func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
+	cm.enqueueQuery(connectionManagerMsgSetTopology{
+		topology:  topology,
+		callbacks: callbacks,
+	})
+}
+
+func (cm *ConnectionManager) AddTopologySubscriber(subType eng.TopologyChangeSubscriberType, obs eng.TopologySubscriber) *configuration.Topology {
+	query := &connectionManagerMsgTopologyAddSubscriber{
+		TopologySubscriber: obs,
+		subType:            subType,
+		resultChan:         make(chan struct{}),
 	}
 	if cm.enqueueSyncQuery(query, query.resultChan) {
 		return query.topology
@@ -159,25 +288,19 @@ func (cm *ConnectionManager) Topology() *configuration.Topology {
 	return nil
 }
 
-func (cm *ConnectionManager) SetTopology(topology *configuration.Topology) {
-	cm.enqueueQuery((*connectionManagerMsgSetTopology)(topology))
+func (cm *ConnectionManager) RemoveTopologySubscriberAsync(subType eng.TopologyChangeSubscriberType, obs eng.TopologySubscriber) {
+	cm.enqueueQuery(connectionManagerMsgTopologyRemoveSubscriber{
+		TopologySubscriber: obs,
+		subType:            subType,
+	})
 }
 
-func (cm *ConnectionManager) AddSender(sender paxos.Sender) {
-	cm.enqueueQuery(connectionManagerMsgSenderStart{sender})
-}
-
-func (cm *ConnectionManager) RemoveSenderAsync(sender paxos.Sender) {
-	cm.enqueueQuery(connectionManagerMsgSenderFinished{Sender: sender})
-}
-
-func (cm *ConnectionManager) RemoveSenderSync(sender paxos.Sender) {
-	resultChan := make(chan struct{})
-	cm.enqueueSyncQuery(connectionManagerMsgSenderFinished{Sender: sender, resultChan: resultChan}, resultChan)
+func (cm *ConnectionManager) RequestConfigurationChange(config *configuration.Configuration) {
+	cm.enqueueQuery(connectionManagerMsgRequestConfigChange{config: config})
 }
 
 func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
-	cm.enqueueQuery((*connectionManagerMsgStatus)(sc))
+	cm.enqueueQuery(connectionManagerMsgStatus{StatusConsumer: sc})
 }
 
 func (cm *ConnectionManager) enqueueQuery(msg connectionManagerMsg) bool {
@@ -201,17 +324,27 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *mdbs.MDBServer, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair) (*ConnectionManager, *client.LocalConnection) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair, port uint16, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
 	cm := &ConnectionManager{
 		RMId:                          rmId,
 		BootCount:                     bootCount,
 		NodeCertificatePrivateKeyPair: nodeCertPrivKeyPair,
-		servers:           make(map[string]*Connection),
-		rmToServer:        make(map[common.RMId]*connectionWithBootCount),
+		servers:           make(map[string]*connectionManagerMsgServerEstablished),
+		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
 		connCountToClient: make(map[uint32]paxos.ClientConnection),
 		desired:           nil,
-		senders:           make(map[paxos.Sender]server.EmptyStruct),
 	}
+	cm.serverConnSubscribers.subscribers = make(map[paxos.ServerConnectionSubscriber]server.EmptyStruct)
+	cm.serverConnSubscribers.ConnectionManager = cm
+
+	topSubs := make([]map[eng.TopologySubscriber]server.EmptyStruct, eng.TopologyChangeSubscriberTypeLimit)
+	for idx := range topSubs {
+		topSubs[idx] = make(map[eng.TopologySubscriber]server.EmptyStruct)
+	}
+	topSubs[eng.ConnectionManagerSubscriber][cm] = server.EmptyStructVal
+	cm.topologySubscribers.subscribers = topSubs
+	cm.topologySubscribers.ConnectionManager = cm
+
 	var head *cc.ChanCellHead
 	head, cm.cellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
@@ -231,12 +364,21 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, disk *m
 				}
 			}
 		})
-	lc := client.NewLocalConnection(rmId, bootCount, configuration.BlankTopology, cm)
-	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), disk, lc)
-	cm.rmToServer[rmId] = &connectionWithBootCount{connectionSend: cm, bootCount: bootCount}
+	cd := &connectionManagerMsgServerEstablished{
+		send:        cm.Send,
+		established: true,
+		rmId:        rmId,
+		bootCount:   bootCount,
+	}
+	cm.rmToServer[cd.rmId] = cd
+	cm.servers[cd.host] = cd
+	lc := client.NewLocalConnection(rmId, bootCount, cm)
+	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), db, lc)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, config)
+	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
-	cm.ClientEstablished(0, lc)
-	return cm, lc
+	<-localEstablished
+	return cm, transmogrifier
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
@@ -255,24 +397,32 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgShutdown:
 				shutdownChan = msgT
 				terminate = true
-			case *connectionManagerMsgSetDesired:
+			case connectionManagerMsgSetDesired:
 				cm.setDesiredServers(msgT)
 			case *connectionManagerMsgServerEstablished:
-				cm.serverEstablished((*Connection)(msgT))
-			case *connectionManagerMsgServerLost:
-				cm.serverLost((*Connection)(msgT))
-			case connectionManagerMsgSenderStart:
-				cm.startSender(msgT.Sender)
-			case connectionManagerMsgSenderFinished:
-				cm.removeSender(msgT.Sender, msgT.resultChan)
-			case *connectionManagerMsgSetTopology:
-				cm.updateTopology((*configuration.Topology)(msgT))
-			case *connectionManagerMsgGetTopology:
-				cm.getTopology(msgT)
+				cm.serverEstablished(msgT)
+			case connectionManagerMsgServerLost:
+				cm.serverLost(msgT)
 			case *connectionManagerMsgClientEstablished:
 				cm.clientEstablished(msgT)
-			case *connectionManagerMsgStatus:
-				cm.status((*server.StatusConsumer)(msgT))
+			case connectionManagerMsgSetTopology:
+				cm.setTopology(msgT.topology, msgT.callbacks)
+			case connectionManagerMsgServerConnAddSubscriber:
+				cm.serverConnSubscribers.AddSubscriber(msgT.ServerConnectionSubscriber)
+			case connectionManagerMsgServerConnRemoveSubscriber:
+				cm.serverConnSubscribers.RemoveSubscriber(msgT.ServerConnectionSubscriber)
+			case *connectionManagerMsgTopologyAddSubscriber:
+				msgT.topology = cm.topology
+				close(msgT.resultChan)
+				cm.topologySubscribers.AddSubscriber(msgT.subType, msgT.TopologySubscriber)
+			case connectionManagerMsgTopologyRemoveSubscriber:
+				cm.topologySubscribers.RemoveSubscriber(msgT.subType, msgT.TopologySubscriber)
+			case connectionManagerMsgRequestConfigChange:
+				cm.Transmogrifier.RequestConfigurationChange(msgT.config)
+			case connectionManagerMsgStatus:
+				cm.status(msgT.StatusConsumer)
+			default:
+				err = fmt.Errorf("Fatal to ConnectionManager: Received unexpected message: %#v", msgT)
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -283,103 +433,150 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 		log.Println("ConnectionManager error:", err)
 	}
 	cm.cellTail.Terminate()
-	for _, conn := range cm.servers {
-		conn.Shutdown(true)
+	for _, cd := range cm.servers {
+		cd.Shutdown(paxos.Sync)
 	}
+	cm.RLock()
+	for _, cc := range cm.connCountToClient {
+		cc.Shutdown(paxos.Sync)
+	}
+	cm.RUnlock()
 	if shutdownChan != nil {
 		close(shutdownChan)
 	}
 }
 
-func (cm *ConnectionManager) setDesiredServers(hosts *connectionManagerMsgSetDesired) {
+func (cm *ConnectionManager) setDesiredServers(hosts connectionManagerMsgSetDesired) {
+	cm.desired = hosts.remote
+
+	localHostChanged := cm.localHost != hosts.local
 	cm.Lock()
 	cm.localHost = hosts.local
 	cm.Unlock()
-	cm.desired = hosts.remote
-	oldServers := cm.servers
-	cm.servers = make(map[string]*Connection)
-	for _, host := range hosts.remote {
-		if conn, found := oldServers[host]; found {
-			cm.servers[host] = conn
-			delete(oldServers, host)
-		} else {
-			cm.servers[host] = NewConnectionToDial(host, cm)
-		}
+
+	if localHostChanged {
+		cd := cm.rmToServer[cm.RMId]
+		delete(cm.rmToServer, cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
+		cd = cd.clone()
+		cd.host = hosts.local
+		cm.rmToServer[cd.rmId] = cd
+		cm.servers[cd.host] = cd
+		cm.serverConnSubscribers.ServerConnEstablished(cd)
 	}
 
-	for _, conn := range oldServers {
-		_, _, rmId, _, _, _ := conn.RemoteDetails()
-		if c, found := cm.rmToServer[rmId]; found && c.connectionSend == conn {
-			delete(cm.rmToServer, rmId)
-			cm.sendersConnectionLost(rmId)
+	desiredMap := make(map[string]server.EmptyStruct, len(hosts.remote))
+	for _, host := range hosts.remote {
+		desiredMap[host] = server.EmptyStructVal
+		if _, found := cm.servers[host]; !found {
+			cm.servers[host] = &connectionManagerMsgServerEstablished{
+				Connection: NewConnectionToDial(host, cm),
+				host:       host,
+			}
 		}
 	}
-	for _, conn := range oldServers {
-		conn.Shutdown(false)
+	for host, sconn := range cm.servers {
+		if _, found := desiredMap[host]; !found && !sconn.established {
+			sconn.Shutdown(paxos.Async)
+			delete(cm.servers, host)
+		}
 	}
 }
 
-func (cm *ConnectionManager) serverEstablished(conn *Connection) {
-	established, host, rmId, bootCount, tiebreak, remoteTopology := conn.RemoteDetails()
-	if !established {
-		return
-	}
-	cm.Lock()
-	if cm.remoteTopology == nil && len(remoteTopology.AllRMs) >= int(remoteTopology.FInc) {
-		cm.remoteTopology = remoteTopology
-	}
-	cm.Unlock()
-	if c, found := cm.servers[host]; found && c == conn {
-		cwbc := &connectionWithBootCount{connectionSend: conn, bootCount: bootCount}
-		cm.rmToServer[rmId] = cwbc
-		cm.sendersConnectionEstablished(rmId, cwbc)
-		return
+func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServerEstablished) {
+	if cd, found := cm.servers[connEst.host]; found && cd.Connection == connEst.Connection {
+		// fall through to where we do the safe insert of connEst
+
 	} else if found {
-		establishedC, _, _, bootCountC, tiebreakC, _ := c.RemoteDetails()
 		killOld, killNew := false, false
 		switch {
-		case !establishedC || bootCountC < bootCount:
+		case !cd.established:
 			killOld = true
-		case bootCountC > bootCount:
+		case cd.rmId != connEst.rmId:
+			killOld, killNew = true, true
+		case cd.bootCount < connEst.bootCount:
+			killOld = true
+		case cd.bootCount > connEst.bootCount:
 			killNew = true
-		case tiebreakC == tiebreak:
+		case cd.tieBreak == connEst.tieBreak:
 			killOld, killNew = true, true
 		default:
-			killOld = tiebreakC < tiebreak
+			killOld = cd.tieBreak < connEst.tieBreak
 			killNew = !killOld
 		}
-		switch {
-		case killOld && killNew:
-			conn.Shutdown(false)
-			c.Shutdown(false)
-			cm.servers[host] = NewConnectionToDial(host, cm)
-			if c2, found := cm.rmToServer[rmId]; found && c2.connectionSend == c {
-				delete(cm.rmToServer, rmId)
-				cm.sendersConnectionLost(rmId)
+
+		if killOld {
+			cd.Shutdown(paxos.Async)
+			if cd.established {
+				delete(cm.rmToServer, cd.rmId)
+				cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 			}
-		case killOld:
-			c.Shutdown(false)
-			cm.servers[host] = conn
-			cwbc := &connectionWithBootCount{connectionSend: conn, bootCount: bootCount}
-			cm.rmToServer[rmId] = cwbc
-			cm.sendersConnectionEstablished(rmId, cwbc)
-		case killNew:
-			conn.Shutdown(false)
 		}
+		if killNew {
+			connEst.Shutdown(paxos.Async)
+			if killOld {
+				cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
+					Connection: NewConnectionToDial(cd.host, cm),
+					host:       cd.host,
+				}
+			}
+			return
+		}
+	}
+
+	if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.rmId == cm.RMId {
+		log.Printf("%v is claiming to have the same RMId as ourself! (%v)",
+			connEst.host, cm.RMId)
+		connEst.Shutdown(paxos.Async)
+		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
+			Connection: NewConnectionToDial(connEst.host, cm),
+			host:       connEst.host,
+		}
+
+	} else if found && connEst.host != cd.host {
+		log.Printf("%v claimed by multiple servers: %v and %v. Recreating both connections.",
+			connEst.rmId, cd.host, connEst.host)
+		cd.Shutdown(paxos.Async)
+		connEst.Shutdown(paxos.Async)
+		delete(cm.rmToServer, cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
+		cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
+			Connection: NewConnectionToDial(cd.host, cm),
+			host:       cd.host,
+		}
+		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
+			Connection: NewConnectionToDial(connEst.host, cm),
+			host:       connEst.host,
+		}
+
 	} else {
-		// It's not a desired connection. Kill it.
-		conn.Shutdown(false)
-		delete(cm.rmToServer, rmId)
-		cm.sendersConnectionLost(rmId)
+		cm.servers[connEst.host] = connEst
+		cm.rmToServer[connEst.rmId] = connEst
+		cm.serverConnSubscribers.ServerConnEstablished(connEst)
 	}
 }
 
-func (cm *ConnectionManager) serverLost(conn *Connection) {
-	_, _, rmId, _, _, _ := conn.RemoteDetails()
-	if c, found := cm.rmToServer[rmId]; found && c.connectionSend == conn {
+func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost) {
+	rmId := connLost.rmId
+	if cd, found := cm.rmToServer[connLost.rmId]; found && cd.Connection == connLost.Connection {
 		log.Printf("Connection to RMId %v lost\n", rmId)
+		cd.established = false
 		delete(cm.rmToServer, rmId)
-		cm.sendersConnectionLost(rmId)
+		if !connLost.restarting {
+			if cd1, found := cm.servers[cd.host]; found && cd1 == cd {
+				delete(cm.servers, cd.host)
+				for _, host := range cm.desired {
+					if host == cd.host {
+						cm.servers[host] = &connectionManagerMsgServerEstablished{
+							Connection: NewConnectionToDial(host, cm),
+							host:       host,
+						}
+						break
+					}
+				}
+			}
+		}
+		cm.serverConnSubscribers.ServerConnLost(rmId)
 	}
 }
 
@@ -387,64 +584,29 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 	cm.Lock()
 	cm.connCountToClient[msg.connNumber] = msg.conn
 	cm.Unlock()
-	msg.topology = cm.topology
 	msg.servers = cm.cloneRMToServer()
 	close(msg.resultChan)
+	cm.serverConnSubscribers.AddSubscriber(msg.conn)
 }
 
-func (cm *ConnectionManager) startSender(sender paxos.Sender) {
-	if _, found := cm.senders[sender]; found {
-		server.Log(sender, "CM found duplicate add sender")
-		return
-	} else {
-		cm.senders[sender] = server.EmptyStructVal
-		rmToServerCopy := cm.cloneRMToServer()
-		sender.ConnectedRMs(rmToServerCopy)
-	}
-}
-
-func (cm *ConnectionManager) removeSender(sender paxos.Sender, resultChan chan struct{}) {
-	delete(cm.senders, sender)
-	if resultChan != nil {
-		close(resultChan)
-	}
-}
-
-func (cm *ConnectionManager) sendersConnectionEstablished(rmId common.RMId, conn *connectionWithBootCount) {
-	rmToServerCopy := cm.cloneRMToServer()
-	for sender := range cm.senders {
-		sender.ConnectionEstablished(rmId, conn, rmToServerCopy)
-	}
-}
-
-func (cm *ConnectionManager) sendersConnectionLost(rmId common.RMId) {
-	rmToServerCopy := cm.cloneRMToServer()
-	for sender := range cm.senders {
-		sender.ConnectionLost(rmId, rmToServerCopy)
-	}
-}
-
-func (cm *ConnectionManager) updateTopology(topology *configuration.Topology) {
-	if cm.topology.Equal(topology) {
-		return
-	}
-	rmEq := cm.topology != nil && cm.topology.AllRMs.Equal(topology.AllRMs)
-	// Even if no semantic change, the DBVersion/TxnId may have
-	// changed, so we must update our cache.
-	cm.topology = topology.Clone()
-	if rmEq {
-		return
-	}
+func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
 	server.Log("Topology change:", topology)
-	rmToServerCopy := cm.cloneRMToServer()
-	for _, cconn := range cm.connCountToClient {
-		cconn.TopologyChange(topology, rmToServerCopy)
+	cm.topology = topology
+	cm.topologySubscribers.TopologyChanged(topology, callbacks)
+	cd := cm.rmToServer[cm.RMId]
+	if topology.Root.VarUUId.Compare(cd.rootId) != common.EQ {
+		delete(cm.rmToServer, cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
+		cd = cd.clone()
+		cd.rootId = topology.Root.VarUUId
+		cm.rmToServer[cm.RMId] = cd
+		cm.servers[cd.host] = cd
+		cm.serverConnSubscribers.ServerConnEstablished(cd)
 	}
 }
 
-func (cm *ConnectionManager) getTopology(msg *connectionManagerMsgGetTopology) {
-	msg.topology = cm.topology
-	close(msg.resultChan)
+func (cm *ConnectionManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	done(true)
 }
 
 func (cm *ConnectionManager) cloneRMToServer() map[common.RMId]paxos.Connection {
@@ -459,11 +621,19 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Address: %v", cm.localHost))
 	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.BootCount))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", cm.topology))
+	if cm.topology != nil && cm.topology.Next() != nil {
+		sc.Emit(fmt.Sprintf("Next Topology: %v", cm.topology.Next()))
+	}
 	serverConnections := make([]string, 0, len(cm.servers))
 	for server := range cm.servers {
 		serverConnections = append(serverConnections, server)
 	}
-	sc.Emit(fmt.Sprintf("Senders: %v", len(cm.senders)))
+	sc.Emit(fmt.Sprintf("ServerConnectionSubscribers: %v", len(cm.serverConnSubscribers.subscribers)))
+	topSubs := make([]int, eng.TopologyChangeSubscriberTypeLimit)
+	for idx, subs := range cm.topologySubscribers.subscribers {
+		topSubs[idx] = len(subs)
+	}
+	sc.Emit(fmt.Sprintf("TopologySubscribers: %v", topSubs))
 	rms := make([]common.RMId, 0, len(cm.rmToServer))
 	for rmId := range cm.rmToServer {
 		rms = append(rms, rmId)
@@ -472,8 +642,11 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Active Server Connections: %v", serverConnections))
 	sc.Emit(fmt.Sprintf("Desired Server Connections: %v", cm.desired))
 	for _, conn := range cm.servers {
-		conn.Status(sc.Fork())
+		if conn.Connection != nil {
+			conn.Connection.Status(sc.Fork())
+		}
 	}
+	cm.RLock()
 	sc.Emit(fmt.Sprintf("Client Connection Count: %v", len(cm.connCountToClient)))
 	cm.connCountToClient[0].(*client.LocalConnection).Status(sc.Fork())
 	for _, conn := range cm.connCountToClient {
@@ -481,6 +654,7 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 			c.Status(sc.Fork())
 		}
 	}
+	cm.RUnlock()
 	cm.Dispatchers.VarDispatcher.Status(sc.Fork())
 	cm.Dispatchers.ProposerDispatcher.Status(sc.Fork())
 	cm.Dispatchers.AcceptorDispatcher.Status(sc.Fork())
@@ -492,18 +666,117 @@ func (cm *ConnectionManager) Send(b []byte) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
 	server.CheckFatal(err)
 	msg := msgs.ReadRootMessage(seg)
-	cm.Dispatchers.DispatchMessage(cm.RMId, msg.Which(), &msg)
+	cm.DispatchMessage(cm.RMId, msg.Which(), &msg)
 }
 
-type connectionWithBootCount struct {
-	connectionSend
-	bootCount uint32
+// serverConnSubscribers
+func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsgServerEstablished) {
+	rmToServerCopy := subs.cloneRMToServer()
+	for ob := range subs.subscribers {
+		ob.ConnectionEstablished(cd.rmId, cd, rmToServerCopy)
+	}
 }
 
-func (cwbc *connectionWithBootCount) BootCount() uint32 {
-	return cwbc.bootCount
+func (subs serverConnSubscribers) ServerConnLost(rmId common.RMId) {
+	rmToServerCopy := subs.cloneRMToServer()
+	for ob := range subs.subscribers {
+		ob.ConnectionLost(rmId, rmToServerCopy)
+	}
 }
 
-type connectionSend interface {
-	Send(msg []byte)
+func (subs serverConnSubscribers) AddSubscriber(ob paxos.ServerConnectionSubscriber) {
+	if _, found := subs.subscribers[ob]; found {
+		server.Log(ob, "CM found duplicate add serverConn subscriber")
+	} else {
+		subs.subscribers[ob] = server.EmptyStructVal
+		ob.ConnectedRMs(subs.cloneRMToServer())
+	}
+}
+
+func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubscriber) {
+	delete(subs.subscribers, ob)
+}
+
+// topologySubscribers
+func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
+	for subType, subsMap := range subs.subscribers {
+		subTypeCopy := subType
+		subCount := len(subsMap)
+		resultChan := make(chan bool, subCount)
+		done := func(success bool) { resultChan <- success }
+		for sub := range subsMap {
+			sub.TopologyChanged(topology, done)
+		}
+		if cb, found := callbacks[eng.TopologyChangeSubscriberType(subType)]; found {
+			cbCopy := cb
+			go func() {
+				server.Log("CM TopologyChanged", subTypeCopy, "expects", subCount, "Dones")
+				for subCount > 0 {
+					if result := <-resultChan; result {
+						subCount--
+					} else {
+						server.Log("CM TopologyChanged", subTypeCopy, "failed")
+						return
+					}
+				}
+				server.Log("CM TopologyChanged", subTypeCopy, "all done")
+				cbCopy()
+			}()
+		}
+	}
+}
+
+func (subs topologySubscribers) AddSubscriber(subType eng.TopologyChangeSubscriberType, ob eng.TopologySubscriber) {
+	if _, found := subs.subscribers[subType][ob]; found {
+		server.Log(ob, "CM found duplicate add topology subscriber")
+	} else {
+		subs.subscribers[subType][ob] = server.EmptyStructVal
+	}
+}
+
+func (subs topologySubscribers) RemoveSubscriber(subType eng.TopologyChangeSubscriberType, ob eng.TopologySubscriber) {
+	delete(subs.subscribers[subType], ob)
+}
+
+func (cd *connectionManagerMsgServerEstablished) Host() string {
+	return cd.host
+}
+
+func (cd *connectionManagerMsgServerEstablished) RMId() common.RMId {
+	return cd.rmId
+}
+
+func (cd *connectionManagerMsgServerEstablished) BootCount() uint32 {
+	return cd.bootCount
+}
+
+func (cd *connectionManagerMsgServerEstablished) TieBreak() uint32 {
+	return cd.tieBreak
+}
+
+func (cd *connectionManagerMsgServerEstablished) RootId() *common.VarUUId {
+	return cd.rootId
+}
+
+func (cd *connectionManagerMsgServerEstablished) Send(msg []byte) {
+	cd.send(msg)
+}
+
+func (cd *connectionManagerMsgServerEstablished) Shutdown(sync paxos.Blocking) {
+	if cd.Connection != nil {
+		cd.Connection.Shutdown(sync)
+	}
+}
+
+func (cd *connectionManagerMsgServerEstablished) clone() *connectionManagerMsgServerEstablished {
+	return &connectionManagerMsgServerEstablished{
+		Connection:  cd.Connection,
+		send:        cd.send,
+		established: cd.established,
+		host:        cd.host,
+		rmId:        cd.rmId,
+		bootCount:   cd.bootCount,
+		tieBreak:    cd.tieBreak,
+		rootId:      cd.rootId,
+	}
 }

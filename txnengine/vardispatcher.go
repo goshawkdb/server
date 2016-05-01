@@ -2,12 +2,34 @@ package txnengine
 
 import (
 	"fmt"
-	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/server/capnp"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+)
+
+type TopologyPublisher interface {
+	AddTopologySubscriber(TopologyChangeSubscriberType, TopologySubscriber) *configuration.Topology
+	RemoveTopologySubscriberAsync(TopologyChangeSubscriberType, TopologySubscriber)
+}
+
+type TopologySubscriber interface {
+	TopologyChanged(*configuration.Topology, func(bool))
+}
+
+type TopologyChangeSubscriberType uint8
+
+const (
+	VarSubscriber                     TopologyChangeSubscriberType = iota
+	ProposerSubscriber                TopologyChangeSubscriberType = iota
+	AcceptorSubscriber                TopologyChangeSubscriberType = iota
+	ConnectionSubscriber              TopologyChangeSubscriberType = iota
+	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
+	EmigratorSubscriber               TopologyChangeSubscriberType = iota
+	TopologyChangeSubscriberTypeLimit int                          = iota
 )
 
 type VarDispatcher struct {
@@ -15,13 +37,13 @@ type VarDispatcher struct {
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, server *mdbs.MDBServer, lc LocalConnection) *VarDispatcher {
+func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
 	vd.Dispatcher.Init(count)
 	for idx, exe := range vd.Executors {
-		vd.varmanagers[idx] = NewVarManager(exe, server, lc)
+		vd.varmanagers[idx] = NewVarManager(exe, rmId, cm, db, lc)
 	}
 	return vd
 }

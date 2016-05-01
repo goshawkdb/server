@@ -8,7 +8,6 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	"time"
 )
@@ -21,9 +20,9 @@ type ClientTxnSubmitter struct {
 	txnLive      bool
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, topology *configuration.Topology, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
-		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, topology, cm),
+		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		versionCache:       NewVersionCache(),
 		txnLive:            false,
 	}
@@ -100,7 +99,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
 			ctxnCap.SetId(curTxnId[:])
 
-			err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay)
+			err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
 			if err != nil {
 				cts.txnLive = false
 				continuation(nil, err)
@@ -109,7 +108,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		}
 	}
 
-	err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0)
+	err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, false)
 	if err != nil {
 		continuation(nil, err)
 		return

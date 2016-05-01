@@ -18,21 +18,21 @@ type ProposerDispatcher struct {
 	proposermanagers []*ProposerManager
 }
 
-func NewProposerDispatcher(count uint8, rmId common.RMId, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerDispatcher {
+func NewProposerDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
 		proposermanagers: make([]*ProposerManager, count),
 	}
 	pd.Dispatcher.Init(count)
 	for idx, exe := range pd.Executors {
-		pd.proposermanagers[idx] = NewProposerManager(rmId, exe, varDispatcher, cm, server)
+		pd.proposermanagers[idx] = NewProposerManager(exe, rmId, cm, db, varDispatcher)
 	}
-	pd.loadFromDisk(server)
+	pd.loadFromDisk(db)
 	return pd
 }
 
 func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *msgs.Txn) {
 	txnId := common.MakeTxnId(txn.Id())
-	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(txnId, txn) })
+	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txnId, txn) })
 }
 
 func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
@@ -63,6 +63,18 @@ func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnSubmissionAbortReceived(sender, txnId) })
 }
 
+func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, stateChange eng.TxnLocalStateChange) {
+	elemsList := migration.Elems()
+	elemsCount := elemsList.Len()
+	for idx := 0; idx < elemsCount; idx++ {
+		elem := elemsList.At(idx)
+		txnCap := elem.Txn()
+		txnId := common.MakeTxnId(txnCap.Id())
+		varCaps := elem.Vars()
+		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txnId, &txnCap, &varCaps, stateChange) })
+	}
+}
+
 func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Proposers")
 	for idx, executor := range pd.Executors {
@@ -74,9 +86,9 @@ func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (pd *ProposerDispatcher) loadFromDisk(server *mdbs.MDBServer) {
-	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		res, err := rtxn.WithCursor(db.DB.Proposers, func(cursor *mdbs.Cursor) interface{} {
+func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
+	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, err := rtxn.WithCursor(db.Proposers, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.
@@ -86,7 +98,7 @@ func (pd *ProposerDispatcher) loadFromDisk(server *mdbs.MDBServer) {
 				txnId := common.MakeTxnId(txnIdData)
 				proposerStates[txnId] = proposerState
 			}
-			if err == mdb.NotFound || err == nil {
+			if err == mdb.NotFound {
 				// fine, we just fell off the end as expected.
 				return proposerStates
 			} else {
