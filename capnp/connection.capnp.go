@@ -24,20 +24,24 @@ func AutoNewHelloServerFromServer(s *C.Segment) HelloServerFromServer {
 func ReadRootHelloServerFromServer(s *C.Segment) HelloServerFromServer {
 	return HelloServerFromServer(s.Root(0).ToStruct())
 }
-func (s HelloServerFromServer) LocalHost() string      { return C.Struct(s).GetObject(0).ToText() }
-func (s HelloServerFromServer) LocalHostBytes() []byte { return C.Struct(s).GetObject(0).ToData() }
-func (s HelloServerFromServer) SetLocalHost(v string)  { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
-func (s HelloServerFromServer) RmId() uint32           { return C.Struct(s).Get32(0) }
-func (s HelloServerFromServer) SetRmId(v uint32)       { C.Struct(s).Set32(0, v) }
-func (s HelloServerFromServer) BootCount() uint32      { return C.Struct(s).Get32(4) }
-func (s HelloServerFromServer) SetBootCount(v uint32)  { C.Struct(s).Set32(4, v) }
-func (s HelloServerFromServer) TieBreak() uint32       { return C.Struct(s).Get32(8) }
-func (s HelloServerFromServer) SetTieBreak(v uint32)   { C.Struct(s).Set32(8, v) }
-func (s HelloServerFromServer) ClusterId() string      { return C.Struct(s).GetObject(1).ToText() }
-func (s HelloServerFromServer) ClusterIdBytes() []byte { return C.Struct(s).GetObject(1).ToData() }
-func (s HelloServerFromServer) SetClusterId(v string)  { C.Struct(s).SetObject(1, s.Segment.NewText(v)) }
-func (s HelloServerFromServer) RootId() []byte         { return C.Struct(s).GetObject(2).ToData() }
-func (s HelloServerFromServer) SetRootId(v []byte)     { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
+func (s HelloServerFromServer) LocalHost() string { return C.Struct(s).GetObject(0).ToText() }
+func (s HelloServerFromServer) LocalHostBytes() []byte {
+	return C.Struct(s).GetObject(0).ToDataTrimLastByte()
+}
+func (s HelloServerFromServer) SetLocalHost(v string) { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
+func (s HelloServerFromServer) RmId() uint32          { return C.Struct(s).Get32(0) }
+func (s HelloServerFromServer) SetRmId(v uint32)      { C.Struct(s).Set32(0, v) }
+func (s HelloServerFromServer) BootCount() uint32     { return C.Struct(s).Get32(4) }
+func (s HelloServerFromServer) SetBootCount(v uint32) { C.Struct(s).Set32(4, v) }
+func (s HelloServerFromServer) TieBreak() uint32      { return C.Struct(s).Get32(8) }
+func (s HelloServerFromServer) SetTieBreak(v uint32)  { C.Struct(s).Set32(8, v) }
+func (s HelloServerFromServer) ClusterId() string     { return C.Struct(s).GetObject(1).ToText() }
+func (s HelloServerFromServer) ClusterIdBytes() []byte {
+	return C.Struct(s).GetObject(1).ToDataTrimLastByte()
+}
+func (s HelloServerFromServer) SetClusterId(v string) { C.Struct(s).SetObject(1, s.Segment.NewText(v)) }
+func (s HelloServerFromServer) RootId() []byte        { return C.Struct(s).GetObject(2).ToData() }
+func (s HelloServerFromServer) SetRootId(v []byte)    { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
 func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -350,7 +354,7 @@ func ReadRootMessage(s *C.Segment) Message     { return Message(s.Root(0).ToStru
 func (s Message) Which() Message_Which         { return Message_Which(C.Struct(s).Get16(0)) }
 func (s Message) SetHeartbeat()                { C.Struct(s).Set16(0, 0) }
 func (s Message) ConnectionError() string      { return C.Struct(s).GetObject(0).ToText() }
-func (s Message) ConnectionErrorBytes() []byte { return C.Struct(s).GetObject(0).ToData() }
+func (s Message) ConnectionErrorBytes() []byte { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
 func (s Message) SetConnectionError(v string) {
 	C.Struct(s).Set16(0, 1)
 	C.Struct(s).SetObject(0, s.Segment.NewText(v))
