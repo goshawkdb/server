@@ -414,14 +414,14 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 
 	future := palc.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Put(palc.proposerManager.DB.Proposers, palc.txnId[:], data, 0)
-		return nil
+		return true
 	})
 	go func() {
-		if _, err := future.ResultError(); err != nil {
-			log.Printf("Error: %v when writing proposer to disk: %v\n", palc.txnId, err)
-			return
+		if ran, err := future.ResultError(); err != nil {
+			panic(fmt.Sprintf("Error: %v when writing proposer to disk: %v\n", palc.txnId, err))
+		} else if ran != nil {
+			palc.proposerManager.Exe.Enqueue(palc.writeDone)
 		}
-		palc.proposerManager.Exe.Enqueue(palc.writeDone)
 	}()
 }
 
@@ -503,18 +503,18 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 		paf.nextState()
 		future := paf.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
 			rwtxn.Del(paf.proposerManager.DB.Proposers, paf.txnId[:], nil)
-			return nil
+			return true
 		})
 		go func() {
-			if _, err := future.ResultError(); err != nil {
-				log.Printf("Error: %v when deleting proposer from disk: %v\n", paf.txnId, err)
-				return
+			if ran, err := future.ResultError(); err != nil {
+				panic(fmt.Sprintf("Error: %v when deleting proposer from disk: %v\n", paf.txnId, err))
+			} else if ran != nil {
+				paf.proposerManager.Exe.Enqueue(func() {
+					paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender)
+					paf.tlcSender = nil
+					paf.proposerManager.TxnFinished(paf.txnId)
+				})
 			}
-			paf.proposerManager.Exe.Enqueue(func() {
-				paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender)
-				paf.tlcSender = nil
-				paf.proposerManager.TxnFinished(paf.txnId)
-			})
 		}()
 	} else {
 		log.Printf("Error: %v TxnFinished callback invoked with proposer in wrong state: %v",

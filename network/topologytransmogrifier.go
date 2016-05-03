@@ -169,9 +169,9 @@ func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn p
 
 func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *configuration.Configuration) {
 	subscriberInstalled := make(chan struct{})
-	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
-		if err != nil {
-			panic(fmt.Errorf("Error trying to subscribe to topology: %v", err))
+	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var) {
+		if v == nil {
+			panic("Unable to create topology var!")
 		}
 		v.AddWriteSubscriber(configuration.VersionOne,
 			&eng.VarWriteSubscriber{
@@ -1933,14 +1933,14 @@ type dbIterator struct {
 }
 
 func (it *dbIterator) iterate() {
-	_, err := it.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		result, err := rtxn.WithCursor(it.db.Vars, func(cursor *mdbs.Cursor) interface{} {
+	ran, err := it.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		result, _ := rtxn.WithCursor(it.db.Vars, func(cursor *mdbs.Cursor) interface{} {
 			vUUIdBytes, varBytes, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; vUUIdBytes, varBytes, err = cursor.Get(nil, nil, mdb.NEXT) {
 				seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
 				if err != nil {
 					cursor.Error(err)
-					return nil
+					return true
 				}
 				varCap := msgs.ReadRootVar(seg)
 				if bytes.Equal(varCap.Id(), configuration.TopologyVarUUId[:]) {
@@ -1949,12 +1949,12 @@ func (it *dbIterator) iterate() {
 				txnId := common.MakeTxnId(varCap.WriteTxnId())
 				txnBytes := it.db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
 				if txnBytes == nil {
-					return nil
+					return true
 				}
 				seg, _, err = capn.ReadFromMemoryZeroCopy(txnBytes)
 				if err != nil {
 					cursor.Error(err)
-					return nil
+					return true
 				}
 				txnCap := msgs.ReadRootTxn(seg)
 				// So, we only need to send based on the vars that we have
@@ -1968,7 +1968,7 @@ func (it *dbIterator) iterate() {
 				actions := txnCap.Actions()
 				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], &actions)
 				if err != nil {
-					return nil
+					return true
 				} else if len(varCaps) == 0 {
 					continue
 				}
@@ -1976,30 +1976,29 @@ func (it *dbIterator) iterate() {
 					matchingVarCaps, err := it.matchVarsAgainstCond(sb.cond, varCaps)
 					if err != nil {
 						cursor.Error(err)
-						return nil
+						return true
 					} else if len(matchingVarCaps) != 0 {
 						sb.add(&txnCap, matchingVarCaps)
 					}
 				}
 			}
 			if err == mdb.NotFound {
-				return nil
+				return true
 			} else {
-				return err
+				cursor.Error(err)
+				return true
 			}
 		})
-		if err == nil {
-			return result
-		}
-		return nil
+		return result
 	}).ResultError()
 	if err != nil {
-		log.Println("Topology iterator:", err)
+		panic(fmt.Sprintf("Topology iterator error: %v", err))
+	} else if ran != nil {
+		for _, sb := range it.batch {
+			sb.flush()
+		}
+		it.connectionManager.AddServerConnectionSubscriber(it)
 	}
-	for _, sb := range it.batch {
-		sb.flush()
-	}
-	it.connectionManager.AddServerConnectionSubscriber(it)
 }
 
 func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) ([]*msgs.Var, error) {

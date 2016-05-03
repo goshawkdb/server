@@ -63,7 +63,7 @@ func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {
 
 func (ad *AcceptorDispatcher) loadFromDisk(db *db.Databases) {
 	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		res, err := rtxn.WithCursor(db.BallotOutcomes, func(cursor *mdbs.Cursor) interface{} {
+		res, _ := rtxn.WithCursor(db.BallotOutcomes, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.
@@ -77,16 +77,15 @@ func (ad *AcceptorDispatcher) loadFromDisk(db *db.Databases) {
 				// fine, we just fell off the end as expected.
 				return acceptorStates
 			} else {
+				cursor.Error(err)
 				return nil
 			}
 		})
-		if err == nil {
-			return res
-		} else {
-			return nil
-		}
+		return res
 	}).ResultError()
-	if err == nil {
+	if err != nil {
+		panic(fmt.Sprintf("AcceptorDispatcher error loading from disk: %v", err))
+	} else if res != nil {
 		acceptorStates := res.(map[*common.TxnId][]byte)
 		for txnId, acceptorState := range acceptorStates {
 			acceptorStateCopy := acceptorState
@@ -98,8 +97,6 @@ func (ad *AcceptorDispatcher) loadFromDisk(db *db.Databases) {
 			})
 		}
 		log.Printf("Loaded %v acceptors from disk\n", len(acceptorStates))
-	} else {
-		log.Println("AcceptorDispatcher error loading from disk:", err)
 	}
 }
 

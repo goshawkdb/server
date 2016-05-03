@@ -32,11 +32,9 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
 
-	s, err := newServer()
-	if err != nil {
+	if s, err := newServer(); err != nil {
 		log.Fatalf("%v\nSee https://goshawkdb.io/starting.html for the Getting Started guide.", err)
-	}
-	if s != nil {
+	} else if s != nil {
 		s.start()
 	}
 }
@@ -153,22 +151,23 @@ func (s *server) start() {
 	}
 	runtime.GOMAXPROCS(procs)
 
-	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
-	s.certificate = nil
+	commandLineConfig, err := s.commandLineConfig()
+	s.maybeShutdown(err)
+	if commandLineConfig == nil {
+		commandLineConfig = configuration.BlankTopology("").Configuration
+	}
 
+	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
+	for idx := range s.certificate {
+		s.certificate[idx] = 0
+	}
+	s.certificate = nil
 	s.maybeShutdown(err)
 
 	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
-
-	commandLineConfig, err := s.commandLineConfig()
-	s.maybeShutdown(err)
-
-	if commandLineConfig == nil {
-		commandLineConfig = configuration.BlankTopology("").Configuration
-	}
 
 	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, commandLineConfig)
 	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
@@ -180,8 +179,8 @@ func (s *server) start() {
 	go s.signalHandler()
 
 	listener, err := network.NewListener(s.port, cm)
-	s.addOnShutdown(listener.Shutdown)
 	s.maybeShutdown(err)
+	s.addOnShutdown(listener.Shutdown)
 
 	defer s.shutdown(nil)
 	s.Wait()

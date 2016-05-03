@@ -162,16 +162,16 @@ func (awtd *acceptorWriteToDisk) start() {
 	server.Log(awtd.txnId, "Writing 2B to disk...")
 	future := awtd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Put(awtd.acceptorManager.DB.BallotOutcomes, awtd.txnId[:], data, 0)
-		return nil
+		return true
 	})
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.
-		if _, err := future.ResultError(); err != nil {
-			log.Printf("Error: %v Acceptor Write error: %v", awtd.txnId, err)
-			return
+		if ran, err := future.ResultError(); err != nil {
+			panic(fmt.Sprintf("Error: %v Acceptor Write error: %v", awtd.txnId, err))
+		} else if ran != nil {
+			server.Log(awtd.txnId, "Writing 2B to disk...done.")
+			awtd.acceptorManager.Exe.Enqueue(func() { awtd.writeDone(outcome, sendToAll) })
 		}
-		server.Log(awtd.txnId, "Writing 2B to disk...done.")
-		awtd.acceptorManager.Exe.Enqueue(func() { awtd.writeDone(outcome, sendToAll) })
 	}()
 }
 
@@ -335,15 +335,15 @@ func (adfd *acceptorDeleteFromDisk) start() {
 	}
 	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Del(adfd.acceptorManager.DB.BallotOutcomes, adfd.txnId[:], nil)
-		return nil
+		return true
 	})
 	go func() {
-		if _, err := future.ResultError(); err != nil {
-			log.Printf("Error: %v Acceptor Deletion error: %v", adfd.txnId, err)
-			return
+		if ran, err := future.ResultError(); err != nil {
+			panic(fmt.Sprintf("Error: %v Acceptor Deletion error: %v", adfd.txnId, err))
+		} else if ran != nil {
+			server.Log(adfd.txnId, "Deleted 2B from disk...done.")
+			adfd.acceptorManager.Exe.Enqueue(adfd.deletionDone)
 		}
-		server.Log(adfd.txnId, "Deleted 2B from disk...done.")
-		adfd.acceptorManager.Exe.Enqueue(adfd.deletionDone)
 	}()
 }
 

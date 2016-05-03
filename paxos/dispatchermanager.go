@@ -38,13 +38,13 @@ func NewDispatchers(cm ConnectionManager, rmId common.RMId, count uint8, db *db.
 
 func (d *Dispatchers) IsDatabaseEmpty() (bool, error) {
 	res, err := d.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		res, _ := rtxn.WithCursor(d.db.Transactions, func(cursor *mdbs.Cursor) interface{} {
+		res, _ := rtxn.WithCursor(d.db.Vars, func(cursor *mdbs.Cursor) interface{} {
 			_, _, err := cursor.Get(nil, nil, mdb.FIRST)
 			return err == mdb.NotFound
 		})
 		return res
 	}).ResultError()
-	if err != nil {
+	if err != nil || res == nil {
 		return false, err
 	}
 	return res.(bool), nil
