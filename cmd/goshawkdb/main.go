@@ -30,11 +30,15 @@ import (
 func main() {
 	log.SetPrefix(common.ProductName + " ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println(os.Args)
+	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
 
 	s, err := newServer()
-	goshawk.CheckFatal(err)
-	s.start()
+	if err != nil {
+		log.Fatalf("%v\nSee https://goshawkdb.io/starting.html for the Getting Started guide.", err)
+	}
+	if s != nil {
+		s.start()
+	}
 }
 
 func newServer() (*server, error) {
@@ -42,31 +46,31 @@ func newServer() (*server, error) {
 	var port int
 	var version, genClusterCert, genClientCert bool
 
-	flag.StringVar(&configFile, "config", "", "`Path` to configuration file")
-	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory")
-	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file")
-	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on")
-	flag.BoolVar(&version, "version", false, "Display version and exit")
-	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair")
-	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair")
+	flag.StringVar(&configFile, "config", "", "`Path` to configuration file.")
+	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory.")
+	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file.")
+	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on.")
+	flag.BoolVar(&version, "version", false, "Display version and exit.")
+	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
+	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
 	flag.Parse()
 
 	if version {
 		log.Printf("%v version %v", common.ProductName, goshawk.ServerVersion)
-		os.Exit(0)
+		return nil, nil
 	}
 
 	if genClusterCert {
 		certificatePrivateKeyPair, err := certs.NewClusterCertificate()
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
-		os.Exit(0)
+		return nil, nil
 	}
 
 	if len(certFile) == 0 {
-		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate")
+		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
 	}
 	certificate, err := ioutil.ReadFile(certFile)
 	if err != nil {
@@ -76,12 +80,12 @@ func newServer() (*server, error) {
 	if genClientCert {
 		certificatePrivateKeyPair, err := certs.NewClientCertificate(certificate)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
 		log.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
-		os.Exit(0)
+		return nil, nil
 	}
 
 	if dataDir == "" {
