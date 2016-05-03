@@ -22,7 +22,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -110,11 +110,12 @@ func newServer() (*server, error) {
 	}
 
 	s := &server{
-		configFile:  configFile,
-		certificate: certificate,
-		dataDir:     dataDir,
-		port:        uint16(port),
-		onShutdown:  []func(){},
+		configFile:   configFile,
+		certificate:  certificate,
+		dataDir:      dataDir,
+		port:         uint16(port),
+		onShutdown:   []func(){},
+		shutdownChan: make(chan goshawk.EmptyStruct),
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -128,7 +129,6 @@ func newServer() (*server, error) {
 }
 
 type server struct {
-	sync.WaitGroup
 	configFile        string
 	certificate       []byte
 	dataDir           string
@@ -140,6 +140,8 @@ type server struct {
 	profileFile       *os.File
 	traceFile         *os.File
 	onShutdown        []func()
+	shutdownChan      chan goshawk.EmptyStruct
+	shutdownCounter   int32
 }
 
 func (s *server) start() {
@@ -175,7 +177,6 @@ func (s *server) start() {
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
-	s.Add(1)
 	go s.signalHandler()
 
 	listener, err := network.NewListener(s.port, cm)
@@ -183,7 +184,7 @@ func (s *server) start() {
 	s.addOnShutdown(listener.Shutdown)
 
 	defer s.shutdown(nil)
-	s.Wait()
+	<-s.shutdownChan
 }
 
 func (s *server) addOnShutdown(f func()) {
@@ -246,9 +247,11 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 }
 
 func (s *server) signalShutdown() {
-	// this may file if stdout has died
+	// this may fail if stdout has died
 	log.Println("Shutting down.")
-	s.Done()
+	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
+		s.shutdownChan <- goshawk.EmptyStructVal
+	}
 }
 
 func (s *server) signalStatus() {
@@ -350,11 +353,9 @@ func (s *server) signalHandler() {
 		case syscall.SIGPIPE:
 			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
 				s.signalShutdown()
-				return
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.signalShutdown()
-			return
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
 		case syscall.SIGQUIT:
