@@ -33,7 +33,10 @@ func main() {
 	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
 
 	if s, err := newServer(); err != nil {
-		log.Fatalf("%v\nSee https://goshawkdb.io/starting.html for the Getting Started guide.", err)
+		fmt.Printf("\n%v\n\n", err)
+		flag.Usage()
+		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
+		os.Exit(1)
 	} else if s != nil {
 		s.start()
 	}
@@ -44,10 +47,10 @@ func newServer() (*server, error) {
 	var port int
 	var version, genClusterCert, genClientCert bool
 
-	flag.StringVar(&configFile, "config", "", "`Path` to configuration file.")
-	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory.")
-	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file.")
-	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on.")
+	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
+	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
+	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file (required to run server).")
+	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on (required if non-default).")
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")

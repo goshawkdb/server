@@ -241,7 +241,12 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 		}
 	}
 	if err != nil {
-		panic(err)
+		if tt.localEstablished != nil {
+			close(tt.localEstablished)
+			tt.localEstablished = nil
+		}
+		log.Println(err)
+		tt.shutdownSignaller.SignalShutdown()
 	}
 	tt.connectionManager.RemoveServerConnectionSubscriber(tt)
 	tt.cellTail.Terminate()
@@ -280,13 +285,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	}
 
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
-		log.Println("We have been removed from the cluster. Shutting down.")
-		if tt.localEstablished != nil {
-			close(tt.localEstablished)
-			tt.localEstablished = nil
-		}
-		tt.shutdownSignaller.SignalShutdown()
-		return nil
+		return errors.New("We have been removed from the cluster. Shutting down.")
 	}
 	tt.active = topology
 
