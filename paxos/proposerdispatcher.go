@@ -88,7 +88,7 @@ func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 
 func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
 	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		res, err := rtxn.WithCursor(db.Proposers, func(cursor *mdbs.Cursor) interface{} {
+		res, _ := rtxn.WithCursor(db.Proposers, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.
@@ -102,16 +102,15 @@ func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
 				// fine, we just fell off the end as expected.
 				return proposerStates
 			} else {
+				cursor.Error(err)
 				return nil
 			}
 		})
-		if err == nil {
-			return res
-		} else {
-			return nil
-		}
+		return res
 	}).ResultError()
-	if err == nil {
+	if err != nil {
+		panic(fmt.Sprintf("ProposerDispatcher error loading from disk: %v", err))
+	} else if res != nil {
 		proposerStates := res.(map[*common.TxnId][]byte)
 		for txnId, proposerState := range proposerStates {
 			proposerStateCopy := proposerState
@@ -123,8 +122,6 @@ func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
 			})
 		}
 		log.Printf("Loaded %v proposers from disk\n", len(proposerStates))
-	} else {
-		log.Println("ProposerDispatcher error loading from disk:", err)
 	}
 }
 

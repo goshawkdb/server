@@ -22,7 +22,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -30,11 +30,13 @@ import (
 func main() {
 	log.SetPrefix(common.ProductName + " ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println(os.Args)
+	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
 
-	s, err := newServer()
-	goshawk.CheckFatal(err)
-	s.start()
+	if s, err := newServer(); err != nil {
+		log.Fatalf("%v\nSee https://goshawkdb.io/starting.html for the Getting Started guide.", err)
+	} else if s != nil {
+		s.start()
+	}
 }
 
 func newServer() (*server, error) {
@@ -42,31 +44,31 @@ func newServer() (*server, error) {
 	var port int
 	var version, genClusterCert, genClientCert bool
 
-	flag.StringVar(&configFile, "config", "", "`Path` to configuration file")
-	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory")
-	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file")
-	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on")
-	flag.BoolVar(&version, "version", false, "Display version and exit")
-	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair")
-	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair")
+	flag.StringVar(&configFile, "config", "", "`Path` to configuration file.")
+	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory.")
+	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file.")
+	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on.")
+	flag.BoolVar(&version, "version", false, "Display version and exit.")
+	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
+	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
 	flag.Parse()
 
 	if version {
 		log.Printf("%v version %v", common.ProductName, goshawk.ServerVersion)
-		os.Exit(0)
+		return nil, nil
 	}
 
 	if genClusterCert {
 		certificatePrivateKeyPair, err := certs.NewClusterCertificate()
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
-		os.Exit(0)
+		return nil, nil
 	}
 
 	if len(certFile) == 0 {
-		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate")
+		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
 	}
 	certificate, err := ioutil.ReadFile(certFile)
 	if err != nil {
@@ -76,12 +78,12 @@ func newServer() (*server, error) {
 	if genClientCert {
 		certificatePrivateKeyPair, err := certs.NewClientCertificate(certificate)
 		if err != nil {
-			log.Fatal(err)
+			return nil, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
 		log.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
-		os.Exit(0)
+		return nil, nil
 	}
 
 	if dataDir == "" {
@@ -108,11 +110,12 @@ func newServer() (*server, error) {
 	}
 
 	s := &server{
-		configFile:  configFile,
-		certificate: certificate,
-		dataDir:     dataDir,
-		port:        uint16(port),
-		onShutdown:  []func(){},
+		configFile:   configFile,
+		certificate:  certificate,
+		dataDir:      dataDir,
+		port:         uint16(port),
+		onShutdown:   []func(){},
+		shutdownChan: make(chan goshawk.EmptyStruct),
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -126,7 +129,6 @@ func newServer() (*server, error) {
 }
 
 type server struct {
-	sync.WaitGroup
 	configFile        string
 	certificate       []byte
 	dataDir           string
@@ -138,6 +140,8 @@ type server struct {
 	profileFile       *os.File
 	traceFile         *os.File
 	onShutdown        []func()
+	shutdownChan      chan goshawk.EmptyStruct
+	shutdownCounter   int32
 }
 
 func (s *server) start() {
@@ -149,9 +153,17 @@ func (s *server) start() {
 	}
 	runtime.GOMAXPROCS(procs)
 
-	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
-	s.certificate = nil
+	commandLineConfig, err := s.commandLineConfig()
+	s.maybeShutdown(err)
+	if commandLineConfig == nil {
+		commandLineConfig = configuration.BlankTopology("").Configuration
+	}
 
+	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
+	for idx := range s.certificate {
+		s.certificate[idx] = 0
+	}
+	s.certificate = nil
 	s.maybeShutdown(err)
 
 	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
@@ -159,28 +171,20 @@ func (s *server) start() {
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	commandLineConfig, err := s.commandLineConfig()
-	s.maybeShutdown(err)
-
-	if commandLineConfig == nil {
-		commandLineConfig = configuration.BlankTopology("").Configuration
-	}
-
-	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, commandLineConfig)
+	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, s, commandLineConfig)
 	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
 	s.addOnShutdown(transmogrifier.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
-	s.Add(1)
 	go s.signalHandler()
 
 	listener, err := network.NewListener(s.port, cm)
-	s.addOnShutdown(listener.Shutdown)
 	s.maybeShutdown(err)
+	s.addOnShutdown(listener.Shutdown)
 
 	defer s.shutdown(nil)
-	s.Wait()
+	<-s.shutdownChan
 }
 
 func (s *server) addOnShutdown(f func()) {
@@ -242,10 +246,12 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	return nil, nil
 }
 
-func (s *server) signalShutdown() {
-	// this may file if stdout has died
+func (s *server) SignalShutdown() {
+	// this may fail if stdout has died
 	log.Println("Shutting down.")
-	s.Done()
+	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
+		s.shutdownChan <- goshawk.EmptyStructVal
+	}
 }
 
 func (s *server) signalStatus() {
@@ -346,12 +352,12 @@ func (s *server) signalHandler() {
 		switch sig {
 		case syscall.SIGPIPE:
 			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
-				s.signalShutdown()
-				return
+				// stdout has errored; probably whatever we were being
+				// piped to has died.
+				s.SignalShutdown()
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
-			s.signalShutdown()
-			return
+			s.SignalShutdown()
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
 		case syscall.SIGQUIT:

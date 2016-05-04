@@ -3,7 +3,6 @@ package txnengine
 import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
-	mdb "github.com/msackman/gomdb"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
@@ -179,9 +178,9 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 	txn.nextState()
 	for idx := range txn.localActions {
 		action := &txn.localActions[idx]
-		f := func(v *Var, err error) {
-			if err != nil {
-				panic(fmt.Sprintf("%v immigration error: %v", txn.Id, err))
+		f := func(v *Var) {
+			if v == nil {
+				panic(fmt.Sprintf("%v immigration error: %v unable to create var!", txn.Id, action.vUUId))
 			} else {
 				v.ReceiveTxnOutcome(action)
 			}
@@ -405,9 +404,9 @@ func (tdb *txnDetermineLocalBallots) start() {
 	tdb.nextState() // advance state FIRST!
 	for idx := 0; idx < len(tdb.localActions); idx++ {
 		action := &tdb.localActions[idx]
-		f := func(v *Var, err error) {
-			if err != nil {
-				panic(fmt.Sprintf("%v error (%v): %v", tdb.Id, tdb, err))
+		f := func(v *Var) {
+			if v == nil {
+				panic(fmt.Sprintf("%v error (%v): %v Unable to create var!", tdb.Id, tdb, action.vUUId))
 			} else {
 				v.ReceiveTxn(action)
 			}
@@ -452,16 +451,16 @@ func (talb *txnAwaitLocalBallots) preAbort() {
 		talb.preAbortedBool = true
 		for idx := 0; idx < len(talb.localActions); idx++ {
 			action := &talb.localActions[idx]
-			f := func(v *Var, err error) {
-				if err == mdb.NotFound && action.ballot != nil && action.frame == nil {
-					// no problem - we've already voted to abort
-				} else if err == nil && action.ballot != nil && action.frame == nil {
-					v.maybeMakeInactive()
-				} else if err != nil {
-					panic(fmt.Sprintf("%v error (%v): %v", talb.Id, talb, err))
+			f := func(v *Var) {
+				if action.ballot != nil && action.frame == nil {
+					if v != nil { // no problem if v == nil - we've already voted to abort
+						v.maybeMakeInactive()
+					}
+				} else if v == nil {
+					panic(fmt.Sprintf("%v error (%v): %v not found!", talb.Id, talb, action.vUUId))
 				} else if action.ballot != nil && action.frame != nil {
 					if action.frame.v != v {
-						panic("var has gone idle in the meantime somehow")
+						panic(fmt.Sprintf("%v error (%v): %v has gone idle in the meantime somehow!", talb.Id, talb, action.vUUId))
 					}
 					switch {
 					case action.IsRead() && action.IsWrite():
@@ -550,9 +549,9 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	for idx := 0; idx < len(tro.localActions); idx++ {
 		action := &tro.localActions[idx]
 		action.outcomeClock = tro.outcomeClock
-		f := func(v *Var, err error) {
-			if err != nil {
-				panic(fmt.Sprintf("%v error (%v, aborted? %v, preAborted? %v, frame == nil? %v): %v", tro.Id, tro, tro.aborted, tro.preAbortedBool, action.frame == nil, err))
+		f := func(v *Var) {
+			if v == nil {
+				panic(fmt.Sprintf("%v error (%v, aborted? %v, preAborted? %v, frame == nil? %v): %v not found!", tro.Id, tro, tro.aborted, tro.preAbortedBool, action.frame == nil, action.vUUId))
 			} else {
 				v.ReceiveTxnOutcome(action)
 			}
@@ -638,9 +637,9 @@ func (trc *txnReceiveCompletion) CompletionReceived() {
 			// when we learnt, we never assigned a frame.
 			continue
 		}
-		f := func(v *Var, err error) {
-			if err != nil {
-				panic(fmt.Sprintf("%v error (%v, aborted? %v, frame == nil? %v): %v", trc.Id, trc, trc.aborted, action.frame == nil, err))
+		f := func(v *Var) {
+			if v == nil {
+				panic(fmt.Sprintf("%v error (%v, aborted? %v, frame == nil? %v): %v Not found!", trc.Id, trc, trc.aborted, action.frame == nil, action.vUUId))
 			} else {
 				v.TxnGloballyComplete(action)
 			}

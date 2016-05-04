@@ -52,23 +52,21 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
-	}).ResultError(); err == nil {
+	}).ResultError(); err == nil && result != nil {
 		bites := result.([]byte)
 		if seg, _, err := capn.ReadFromMemoryZeroCopy(bites); err == nil {
 			txn := msgs.ReadRootTxn(seg)
 			actions := txn.Actions()
 			v.curFrame = NewFrame(nil, v, writeTxnId, &actions, writeTxnClock, writesClock)
 			v.curFrameOnDisk = v.curFrame
+			v.varCap = &varCap
+			return v, nil
 		} else {
 			return nil, err
 		}
 	} else {
 		return nil, err
 	}
-
-	v.varCap = &varCap
-
-	return v, nil
 }
 
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
@@ -268,21 +266,22 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 				}
 			}
 		}
-		return nil
+		return true
 	})
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.
-		if _, err := future.ResultError(); err != nil {
+		if ran, err := future.ResultError(); err != nil {
 			panic(fmt.Sprintf("Var error when writing to disk: %v\n", err))
+		} else if ran != nil {
+			// Switch back to the right go-routine
+			v.applyToVar(func() {
+				server.Log(v.UUId, "Wrote", f.frameTxnId)
+				v.curFrameOnDisk = f
+				for ancestor := f.parent; ancestor != nil && ancestor.DescendentOnDisk(); ancestor = ancestor.parent {
+				}
+				v.writeInProgress()
+			})
 		}
-		// Switch back to the right go-routine
-		v.applyToVar(func() {
-			server.Log(v.UUId, "Wrote", f.frameTxnId)
-			v.curFrameOnDisk = f
-			for ancestor := f.parent; ancestor != nil && ancestor.DescendentOnDisk(); ancestor = ancestor.parent {
-			}
-			v.writeInProgress()
-		})
 	}()
 }
 
@@ -322,10 +321,10 @@ func (v *Var) isOnDisk(cancelSubs bool) bool {
 
 func (v *Var) applyToVar(fun func()) {
 	v.exe.Enqueue(func() {
-		v.vm.ApplyToVar(func(v1 *Var, err error) {
+		v.vm.ApplyToVar(func(v1 *Var) {
 			switch {
-			case err != nil:
-				panic(err)
+			case v1 == nil:
+				panic(fmt.Sprintf("%v not found!", v.UUId))
 			case v1 != v:
 				server.Log(v.UUId, "ignoring callback as var object has changed")
 				v1.maybeMakeInactive()

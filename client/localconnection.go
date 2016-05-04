@@ -92,8 +92,9 @@ type localConnectionMsgRunClientTxn struct {
 	outcome     *msgs.Outcome
 }
 
-func (lcmrct *localConnectionMsgRunClientTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome) {
+func (lcmrct *localConnectionMsgRunClientTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
 	lcmrct.outcome = outcome
+	lcmrct.err = err
 	lcmrct.maybeClose()
 }
 
@@ -106,8 +107,9 @@ type localConnectionMsgRunTxn struct {
 	outcome     *msgs.Outcome
 }
 
-func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome) {
+func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
 	lcmrt.outcome = outcome
+	lcmrt.err = err
 	lcmrt.maybeClose()
 }
 
@@ -318,10 +320,7 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
-	err := lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, true)
-	if err != nil {
-		txnQuery.errored(err)
-	}
+	lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, true)
 }
 
 func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {

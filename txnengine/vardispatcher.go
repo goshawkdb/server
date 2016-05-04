@@ -48,7 +48,7 @@ func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *d
 	return vd
 }
 
-func (vd *VarDispatcher) ApplyToVar(fun func(*Var, error), createIfMissing bool, vUUId *common.VarUUId) {
+func (vd *VarDispatcher) ApplyToVar(fun func(*Var), createIfMissing bool, vUUId *common.VarUUId) {
 	vd.withVarManager(vUUId, func(vm *VarManager) { vm.ApplyToVar(fun, createIfMissing, vUUId) })
 }
 

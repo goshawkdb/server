@@ -37,6 +37,7 @@ type TopologyTransmogrifier struct {
 	queryChan            <-chan topologyTransmogrifierMsg
 	listenPort           uint16
 	rng                  *rand.Rand
+	shutdownSignaller    ShutdownSignaller
 	localEstablished     chan struct{}
 }
 
@@ -114,7 +115,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
 		db:                db,
 		connectionManager: cm,
@@ -122,6 +123,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 		migrations:        make(map[uint32]map[common.RMId]*int32),
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		shutdownSignaller: ss,
 		localEstablished:  make(chan struct{}),
 	}
 	tt.task = &targetConfig{
@@ -169,9 +171,9 @@ func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn p
 
 func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *configuration.Configuration) {
 	subscriberInstalled := make(chan struct{})
-	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
-		if err != nil {
-			panic(fmt.Errorf("Error trying to subscribe to topology: %v", err))
+	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var) {
+		if v == nil {
+			panic("Unable to create topology var!")
 		}
 		v.AddWriteSubscriber(configuration.VersionOne,
 			&eng.VarWriteSubscriber{
@@ -239,7 +241,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 		}
 	}
 	if err != nil {
-		log.Println("TopologyTransmogrifier error:", err)
+		panic(err)
 	}
 	tt.connectionManager.RemoveServerConnectionSubscriber(tt)
 	tt.cellTail.Terminate()
@@ -278,7 +280,13 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	}
 
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
-		return errors.New("We have been removed from the cluster. Shutting down.")
+		log.Println("We have been removed from the cluster. Shutting down.")
+		if tt.localEstablished != nil {
+			close(tt.localEstablished)
+			tt.localEstablished = nil
+		}
+		tt.shutdownSignaller.SignalShutdown()
+		return nil
 	}
 	tt.active = topology
 
@@ -1460,7 +1468,7 @@ func (task *migrate) tick() error {
 	active, passive = active[:fInc], append(active[fInc:], passive...)
 	passive = append(passive, next.LostRMIds...)
 
-	log.Printf("Topology: Marking local immigration completed. Active: %v, Passive: %v", active, passive)
+	log.Printf("Topology: Recording local immigration progress (%v). Active: %v, Passive: %v", next.Pending, active, passive)
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
@@ -1933,14 +1941,14 @@ type dbIterator struct {
 }
 
 func (it *dbIterator) iterate() {
-	_, err := it.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		result, err := rtxn.WithCursor(it.db.Vars, func(cursor *mdbs.Cursor) interface{} {
+	ran, err := it.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		result, _ := rtxn.WithCursor(it.db.Vars, func(cursor *mdbs.Cursor) interface{} {
 			vUUIdBytes, varBytes, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; vUUIdBytes, varBytes, err = cursor.Get(nil, nil, mdb.NEXT) {
 				seg, _, err := capn.ReadFromMemoryZeroCopy(varBytes)
 				if err != nil {
 					cursor.Error(err)
-					return nil
+					return true
 				}
 				varCap := msgs.ReadRootVar(seg)
 				if bytes.Equal(varCap.Id(), configuration.TopologyVarUUId[:]) {
@@ -1949,12 +1957,12 @@ func (it *dbIterator) iterate() {
 				txnId := common.MakeTxnId(varCap.WriteTxnId())
 				txnBytes := it.db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
 				if txnBytes == nil {
-					return nil
+					return true
 				}
 				seg, _, err = capn.ReadFromMemoryZeroCopy(txnBytes)
 				if err != nil {
 					cursor.Error(err)
-					return nil
+					return true
 				}
 				txnCap := msgs.ReadRootTxn(seg)
 				// So, we only need to send based on the vars that we have
@@ -1968,7 +1976,7 @@ func (it *dbIterator) iterate() {
 				actions := txnCap.Actions()
 				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], &actions)
 				if err != nil {
-					return nil
+					return true
 				} else if len(varCaps) == 0 {
 					continue
 				}
@@ -1976,30 +1984,29 @@ func (it *dbIterator) iterate() {
 					matchingVarCaps, err := it.matchVarsAgainstCond(sb.cond, varCaps)
 					if err != nil {
 						cursor.Error(err)
-						return nil
+						return true
 					} else if len(matchingVarCaps) != 0 {
 						sb.add(&txnCap, matchingVarCaps)
 					}
 				}
 			}
 			if err == mdb.NotFound {
-				return nil
+				return true
 			} else {
-				return err
+				cursor.Error(err)
+				return true
 			}
 		})
-		if err == nil {
-			return result
-		}
-		return nil
+		return result
 	}).ResultError()
 	if err != nil {
-		log.Println("Topology iterator:", err)
+		panic(fmt.Sprintf("Topology iterator error: %v", err))
+	} else if ran != nil {
+		for _, sb := range it.batch {
+			sb.flush()
+		}
+		it.connectionManager.AddServerConnectionSubscriber(it)
 	}
-	for _, sb := range it.batch {
-		sb.flush()
-	}
-	it.connectionManager.AddServerConnectionSubscriber(it)
 }
 
 func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBytes []byte, actions *msgs.Action_List) ([]*msgs.Var, error) {

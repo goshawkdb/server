@@ -93,18 +93,18 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 	}
 }
 
-func (vm *VarManager) ApplyToVar(fun func(*Var, error), createIfMissing bool, uuid *common.VarUUId) {
-	v, err := vm.find(uuid)
-	if err == mdb.NotFound && createIfMissing {
+func (vm *VarManager) ApplyToVar(fun func(*Var), createIfMissing bool, uuid *common.VarUUId) {
+	v, shutdown := vm.find(uuid)
+	if shutdown {
+		return
+	}
+	if v == nil && createIfMissing {
 		v = NewVar(uuid, vm.exe, vm.db, vm)
 		vm.active[*v.UUId] = v
 		server.Log(uuid, "New var")
-	} else if err != nil {
-		fun(nil, err)
-		return
 	}
-	fun(v, nil)
-	if _, found := vm.active[*uuid]; !found && !v.isIdle() {
+	fun(v)
+	if _, found := vm.active[*uuid]; v != nil && !found && !v.isIdle() {
 		panic(fmt.Sprintf("Var is not active, yet is not idle! %v %p", uuid, fun))
 	} else {
 		vm.checkAllDisk()
@@ -143,9 +143,9 @@ func (vm *VarManager) SetInactive(v *Var) {
 	}
 }
 
-func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
+func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 	if v, found := vm.active[*uuid]; found {
-		return v, nil
+		return v, false
 	}
 
 	result, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
@@ -154,21 +154,27 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, error) {
 		if bites, err := rtxn.Get(vm.db.Vars, uuid[:]); err == nil {
 			return bites
 		} else {
-			return err
+			return true
 		}
 	}).ResultError()
 
 	if err != nil {
-		return nil, err
+		panic(fmt.Sprintf("Error when loading %v from disk: %v", uuid, err))
+	} else if result == nil { // shutdown
+		return nil, true
+	} else if bites, ok := result.([]byte); ok {
+		v, err := VarFromData(bites, vm.exe, vm.db, vm)
+		if err != nil {
+			panic(fmt.Sprintf("Error when recreating %v: %v", uuid, err))
+		} else if v == nil { // shutdown
+			return v, true
+		} else {
+			vm.active[*v.UUId] = v
+			return v, false
+		}
+	} else { // not found
+		return nil, false
 	}
-	if nf, ok := result.(mdb.Errno); ok && nf == mdb.NotFound {
-		return nil, nf
-	}
-	v, err := VarFromData(result.([]byte), vm.exe, vm.db, vm)
-	if err == nil {
-		vm.active[*v.UUId] = v
-	}
-	return v, err
 }
 
 func (vm *VarManager) Status(sc *server.StatusConsumer) {
