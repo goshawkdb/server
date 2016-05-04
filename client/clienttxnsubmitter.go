@@ -50,10 +50,10 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	retryCount := 0
 
 	var cont TxnCompletionConsumer
-	cont = func(txnId *common.TxnId, outcome *msgs.Outcome) {
-		if outcome == nil { // node is shutting down
+	cont = func(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
-			continuation(nil, nil)
+			continuation(nil, err)
 			return
 		}
 		switch outcome.Which() {
@@ -99,22 +99,12 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
 			ctxnCap.SetId(curTxnId[:])
 
-			err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
-			if err != nil {
-				cts.txnLive = false
-				continuation(nil, err)
-				return
-			}
+			cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
 		}
 	}
 
-	err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, false)
-	if err != nil {
-		continuation(nil, err)
-		return
-	}
-
 	cts.txnLive = true
+	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, false)
 }
 
 func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {

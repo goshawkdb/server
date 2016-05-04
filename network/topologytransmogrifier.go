@@ -37,6 +37,7 @@ type TopologyTransmogrifier struct {
 	queryChan            <-chan topologyTransmogrifierMsg
 	listenPort           uint16
 	rng                  *rand.Rand
+	shutdownSignaller    ShutdownSignaller
 	localEstablished     chan struct{}
 }
 
@@ -114,7 +115,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
 		db:                db,
 		connectionManager: cm,
@@ -122,6 +123,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 		migrations:        make(map[uint32]map[common.RMId]*int32),
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		shutdownSignaller: ss,
 		localEstablished:  make(chan struct{}),
 	}
 	tt.task = &targetConfig{
@@ -239,7 +241,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 		}
 	}
 	if err != nil {
-		log.Println("TopologyTransmogrifier error:", err)
+		panic(err)
 	}
 	tt.connectionManager.RemoveServerConnectionSubscriber(tt)
 	tt.cellTail.Terminate()
@@ -278,7 +280,13 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	}
 
 	if _, found := topology.RMsRemoved()[tt.connectionManager.RMId]; found {
-		return errors.New("We have been removed from the cluster. Shutting down.")
+		log.Println("We have been removed from the cluster. Shutting down.")
+		if tt.localEstablished != nil {
+			close(tt.localEstablished)
+			tt.localEstablished = nil
+		}
+		tt.shutdownSignaller.SignalShutdown()
+		return nil
 	}
 	tt.active = topology
 
@@ -1460,7 +1468,7 @@ func (task *migrate) tick() error {
 	active, passive = active[:fInc], append(active[fInc:], passive...)
 	passive = append(passive, next.LostRMIds...)
 
-	log.Printf("Topology: Marking local immigration completed. Active: %v, Passive: %v", active, passive)
+	log.Printf("Topology: Recording local immigration progress (%v). Active: %v, Passive: %v", next.Pending, active, passive)
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {

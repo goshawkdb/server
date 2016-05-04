@@ -32,7 +32,7 @@ type SimpleTxnSubmitter struct {
 }
 
 type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
-type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome)
+type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome, error)
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -57,6 +57,7 @@ func (sts *SimpleTxnSubmitter) Status(sc *server.StatusConsumer) {
 		txnIds = append(txnIds, txnId)
 	}
 	sc.Emit(fmt.Sprintf("SimpleTxnSubmitter: live TxnIds: %v", txnIds))
+	sc.Emit(fmt.Sprintf("SimpleTxnSubmitter: buffered Txns: %v", len(sts.bufferedSubmissions)))
 	sc.Join()
 }
 
@@ -120,7 +121,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 				// problem with these msgs getting to the propposers.
 				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 			}
-			continuation(txnId, nil)
+			continuation(txnId, nil, nil)
 		}
 	}
 	shutdownFunPtr := &shutdownFun
@@ -131,14 +132,14 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
 			shutdownFun(false)
-			continuation(txnId, outcome)
+			continuation(txnId, outcome, nil)
 		}
 	}
 	sts.outcomeConsumers[*txnId] = consumer
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
 		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion) }
@@ -147,7 +148,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		} else {
 			sts.bufferedSubmissions = append(sts.bufferedSubmissions, fun)
 		}
-		return nil
+		return
 	}
 	version := sts.topology.Version
 	if next := sts.topology.Next(); next != nil && useNextVersion {
@@ -155,10 +156,10 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	}
 	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version)
 	if err != nil {
-		return err
+		continuation(nil, nil, err)
+		return
 	}
 	sts.SubmitTransaction(txnCap, activeRMs, continuation, delay)
-	return nil
 }
 
 func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {

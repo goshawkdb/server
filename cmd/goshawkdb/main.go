@@ -171,7 +171,7 @@ func (s *server) start() {
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, commandLineConfig)
+	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, s, commandLineConfig)
 	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
 	s.addOnShutdown(transmogrifier.Shutdown)
 	s.connectionManager = cm
@@ -246,7 +246,7 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	return nil, nil
 }
 
-func (s *server) signalShutdown() {
+func (s *server) SignalShutdown() {
 	// this may fail if stdout has died
 	log.Println("Shutting down.")
 	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
@@ -352,10 +352,12 @@ func (s *server) signalHandler() {
 		switch sig {
 		case syscall.SIGPIPE:
 			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
-				s.signalShutdown()
+				// stdout has errored; probably whatever we were being
+				// piped to has died.
+				s.SignalShutdown()
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
-			s.signalShutdown()
+			s.SignalShutdown()
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
 		case syscall.SIGQUIT:
