@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	cc "github.com/msackman/chancell"
+	"log"
 )
 
 type Dispatcher struct {
@@ -25,18 +26,18 @@ func (dis *Dispatcher) Shutdown() {
 }
 
 type executorQuery interface {
-	executorQueryWitness()
+	witness() executorQuery
 }
 
-type shutdownQuery struct{}
+type executorQueryBasic struct{}
 
-func (sq *shutdownQuery) executorQueryWitness() {}
+func (eqb executorQueryBasic) witness() executorQuery { return eqb }
 
-var shutdownQueryInst = &shutdownQuery{}
+type shutdownQuery struct{ executorQueryBasic }
 
 type applyQuery func()
 
-func (aq applyQuery) executorQueryWitness() {}
+func (aq applyQuery) witness() executorQuery { return aq }
 
 type Executor struct {
 	cellTail  *cc.ChanCellTail
@@ -80,10 +81,13 @@ func (exe *Executor) loop(head *cc.ChanCellHead) {
 	for !terminate {
 		if msg, ok := <-queryChan; ok {
 			switch query := msg.(type) {
-			case *shutdownQuery:
+			case shutdownQuery:
 				terminate = true
 			case applyQuery:
 				query()
+			default:
+				log.Printf("Fatal to Executor: Received unexpected message: %#v", query)
+				terminate = true
 			}
 		} else {
 			head.Next(queryCell, chanFun)
@@ -104,8 +108,12 @@ func (exe *Executor) Enqueue(fun func()) bool {
 	return exe.send(applyQuery(fun))
 }
 
+func (exe *Executor) WithTerminatedChan(fun func(chan struct{})) {
+	fun(exe.cellTail.Terminated)
+}
+
 func (exe *Executor) shutdown() {
-	if exe.send(shutdownQueryInst) {
+	if exe.send(shutdownQuery{}) {
 		exe.cellTail.Wait()
 	}
 }

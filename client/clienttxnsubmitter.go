@@ -5,13 +5,14 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
 	"time"
 )
 
-type ClientTxnCompletionConsumer func(*msgs.ClientTxnOutcome, error)
+type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error)
 
 type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
@@ -19,9 +20,9 @@ type ClientTxnSubmitter struct {
 	txnLive      bool
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, topology *server.Topology, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
-		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, topology, cm),
+		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		versionCache:       NewVersionCache(),
 		txnLive:            false,
 	}
@@ -33,14 +34,14 @@ func (cts *ClientTxnSubmitter) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *msgs.ClientTxn, continuation ClientTxnCompletionConsumer) {
+func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation ClientTxnCompletionConsumer) {
 	if cts.txnLive {
 		continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
 		return
 	}
 
 	seg := capn.NewBuffer(nil)
-	clientOutcome := msgs.NewClientTxnOutcome(seg)
+	clientOutcome := cmsgs.NewClientTxnOutcome(seg)
 	clientOutcome.SetId(ctxnCap.Id())
 
 	curTxnId := common.MakeTxnId(ctxnCap.Id())
@@ -49,10 +50,10 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *msgs.ClientTxn, 
 	retryCount := 0
 
 	var cont TxnCompletionConsumer
-	cont = func(txnId *common.TxnId, outcome *msgs.Outcome) {
-		if outcome == nil { // node is shutting down
+	cont = func(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
-			continuation(nil, nil)
+			continuation(nil, err)
 			return
 		}
 		switch outcome.Which() {
@@ -98,22 +99,12 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *msgs.ClientTxn, 
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
 			ctxnCap.SetId(curTxnId[:])
 
-			err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay)
-			if err != nil {
-				cts.txnLive = false
-				continuation(nil, err)
-				return
-			}
+			cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
 		}
 	}
 
-	err := cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0)
-	if err != nil {
-		continuation(nil, err)
-		return
-	}
-
 	cts.txnLive = true
+	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, false)
 }
 
 func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
@@ -128,14 +119,14 @@ func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
 	}
 }
 
-func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) msgs.ClientUpdate_List {
-	clientUpdates := msgs.NewClientUpdateList(seg, len(updates))
+func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) cmsgs.ClientUpdate_List {
+	clientUpdates := cmsgs.NewClientUpdateList(seg, len(updates))
 	idx := 0
 	for update, actions := range updates {
 		clientUpdate := clientUpdates.At(idx)
 		idx++
 		clientUpdate.SetVersion(update.TxnId())
-		clientActions := msgs.NewClientActionList(seg, len(actions))
+		clientActions := cmsgs.NewClientActionList(seg, len(actions))
 		clientUpdate.SetActions(clientActions)
 
 		for idy, action := range actions {

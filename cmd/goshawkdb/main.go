@@ -3,18 +3,17 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"flag"
 	"fmt"
-	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	"goshawkdb.io/common/certs"
 	goshawk "goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -23,7 +22,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -31,32 +30,65 @@ import (
 func main() {
 	log.SetPrefix(common.ProductName + " ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println(os.Args)
+	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
 
-	s, err := newServer()
-	goshawk.CheckFatal(err)
-	s.start()
+	if s, err := newServer(); err != nil {
+		fmt.Printf("\n%v\n\n", err)
+		flag.Usage()
+		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
+		os.Exit(1)
+	} else if s != nil {
+		s.start()
+	}
 }
 
 func newServer() (*server, error) {
-	var configFile, dataDir, password, passwordFile string
+	var configFile, dataDir, certFile string
 	var port int
-	var version bool
+	var version, genClusterCert, genClientCert bool
 
-	flag.StringVar(&configFile, "config", "", "`Path` to configuration file")
-	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory")
-	flag.StringVar(&password, "password", "", "Cluster password")
-	flag.StringVar(&passwordFile, "passwordfile", "", "`Path` to file containing cluster password")
-	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on")
-	flag.BoolVar(&version, "version", false, "Display version and exit")
+	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
+	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
+	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file (required to run server).")
+	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on (required if non-default).")
+	flag.BoolVar(&version, "version", false, "Display version and exit.")
+	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
+	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
 	flag.Parse()
 
 	if version {
 		log.Printf("%v version %v", common.ProductName, goshawk.ServerVersion)
-		os.Exit(0)
+		return nil, nil
 	}
 
-	var err error
+	if genClusterCert {
+		certificatePrivateKeyPair, err := certs.NewClusterCertificate()
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
+		return nil, nil
+	}
+
+	if len(certFile) == 0 {
+		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
+	}
+	certificate, err := ioutil.ReadFile(certFile)
+	if err != nil {
+		return nil, err
+	}
+
+	if genClientCert {
+		certificatePrivateKeyPair, err := certs.NewClientCertificate(certificate)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
+		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
+		log.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
+		return nil, nil
+	}
+
 	if dataDir == "" {
 		dataDir, err = ioutil.TempDir("", common.ProductName+"_Data_")
 		if err != nil {
@@ -80,30 +112,13 @@ func newServer() (*server, error) {
 		return nil, fmt.Errorf("Supplied port is illegal (%v). Port must be > 0 and < 65536", port)
 	}
 
-	var passwordHash [sha256.Size]byte
-	switch {
-	case password == "" && passwordFile == "":
-		return nil, fmt.Errorf("Password must be supplied with either -password or -passwordfile")
-	case passwordFile == "":
-		passwordHash = sha256.Sum256([]byte(password))
-		password = ""
-	case password == "":
-		passwordFileBytes, err := ioutil.ReadFile(passwordFile)
-		if err != nil {
-			return nil, err
-		}
-		passwordHash = sha256.Sum256(passwordFileBytes)
-		passwordFile = ""
-	default:
-		return nil, fmt.Errorf("Both -password and -passwordfile supplied. Only one can be supplied.")
-	}
-
 	s := &server{
 		configFile:   configFile,
+		certificate:  certificate,
 		dataDir:      dataDir,
-		port:         port,
-		passwordHash: passwordHash,
+		port:         uint16(port),
 		onShutdown:   []func(){},
+		shutdownChan: make(chan goshawk.EmptyStruct),
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -117,96 +132,68 @@ func newServer() (*server, error) {
 }
 
 type server struct {
-	sync.WaitGroup
 	configFile        string
+	certificate       []byte
 	dataDir           string
-	port              int
-	passwordHash      [sha256.Size]byte
+	port              uint16
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
-	dispatchers       *paxos.Dispatchers
+	transmogrifier    *network.TopologyTransmogrifier
 	profileFile       *os.File
 	traceFile         *os.File
 	onShutdown        []func()
+	shutdownChan      chan goshawk.EmptyStruct
+	shutdownCounter   int32
 }
 
 func (s *server) start() {
+	os.Stdin.Close()
+
 	procs := runtime.NumCPU()
 	if procs < 2 {
 		procs = 2
 	}
 	runtime.GOMAXPROCS(procs)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, mdb.WRITEMAP, 0600, goshawk.OneTB, procs/2, time.Millisecond, db.DB)
+	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
-	s.addOnShutdown(disk.Shutdown)
-
-	cm, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, disk, s.passwordHash)
-	s.connectionManager = cm
-	s.addOnShutdown(cm.Shutdown)
-	s.addOnShutdown(lc.Shutdown)
-
-	s.Add(1)
-	go s.signalHandler()
-
-	topologyLocal, err := network.GetTopologyFromLocalDatabase(cm, cm.Dispatchers.VarDispatcher, lc)
-	s.maybeShutdown(err)
-
-	topology, err := s.chooseTopology(topologyLocal)
-	s.maybeShutdown(err)
-
-	if topologyLocal == nil {
-		topologyTxnId, err := network.CreateTopologyZero(cm, topology, lc)
-		s.maybeShutdown(err)
-		topology.DBVersion = topologyTxnId
+	if commandLineConfig == nil {
+		commandLineConfig = configuration.BlankTopology("").Configuration
 	}
 
-	cm.SetTopology(topology)
-
-	cm.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var, err error) {
-		if err != nil {
-			log.Println("Error trying to subscribe to topology:", err)
-			return
-		}
-		emptyTxnId := common.MakeTxnId([]byte{})
-		v.AddWriteSubscriber(emptyTxnId,
-			func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-				var rootVarPosPtr *msgs.VarIdPos
-				if refs.Len() == 1 {
-					root := refs.At(0)
-					rootVarPosPtr = &root
-				}
-				topology, err := goshawk.TopologyDeserialize(txn.Id, rootVarPosPtr, value)
-				if err != nil {
-					log.Println("Unable to deserialize new topology:", err)
-				}
-				cm.SetTopology(topology)
-				disk.WithEnv(func(env *mdb.Env) (interface{}, error) {
-					return nil, env.SetFlags(mdb.MAPASYNC, topology.AsyncFlush)
-				})
-			})
-	}, false, goshawk.TopologyVarUUId)
-
-	cm.AddSender(network.NewTopologyWriter(topology, lc, cm))
-
-	localHost, remoteHosts, err := topology.LocalRemoteHosts(s.port)
+	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
+	for idx := range s.certificate {
+		s.certificate[idx] = 0
+	}
+	s.certificate = nil
 	s.maybeShutdown(err)
 
-	log.Printf(">==> We are %v (%v) <==<\n", localHost, s.rmId)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Millisecond, db.DB)
+	s.maybeShutdown(err)
+	db := disk.(*db.Databases)
+	s.addOnShutdown(db.Shutdown)
+
+	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, nodeCertPrivKeyPair, s.port, s, commandLineConfig)
+	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
+	s.addOnShutdown(transmogrifier.Shutdown)
+	s.connectionManager = cm
+	s.transmogrifier = transmogrifier
+
+	go s.signalHandler()
 
 	listener, err := network.NewListener(s.port, cm)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
 
-	cm.SetDesiredServers(localHost, remoteHosts)
-
 	defer s.shutdown(nil)
-	s.Wait()
+	<-s.shutdownChan
 }
 
 func (s *server) addOnShutdown(f func()) {
-	s.onShutdown = append(s.onShutdown, f)
+	if f != nil {
+		s.onShutdown = append(s.onShutdown, f)
+	}
 }
 
 func (s *server) shutdown(err error) {
@@ -234,11 +221,8 @@ func (s *server) ensureRMId() error {
 
 	} else {
 		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		for {
+		for s.rmId == common.RMIdEmpty {
 			s.rmId = common.RMId(rng.Uint32())
-			if s.rmId != common.RMIdEmpty {
-				break
-			}
 		}
 		b := make([]byte, 4)
 		binary.BigEndian.PutUint32(b, uint32(s.rmId))
@@ -258,35 +242,19 @@ func (s *server) ensureBootCount() error {
 	return ioutil.WriteFile(path, b, 0600)
 }
 
-func (s *server) chooseTopology(topology *goshawk.Topology) (*goshawk.Topology, error) {
-	var config *configuration.Configuration
+func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	if s.configFile != "" {
-		var err error
-		config, err = configuration.LoadConfigurationFromPath(s.configFile)
-		if err != nil {
-			return nil, err
-		}
+		return configuration.LoadConfigurationFromPath(s.configFile)
 	}
-
-	switch {
-	case topology == nil && config == nil:
-		return nil, fmt.Errorf("Local data store is empty and no external config supplied. Must supply config with -config")
-	case topology == nil:
-		return goshawk.NewTopology(config), nil
-	case config == nil:
-		return topology, nil
-	case topology.Configuration.Equal(config):
-		return topology, nil
-	case topology.ClusterId != config.ClusterId:
-		return nil, fmt.Errorf("Local data store is configured for cluster '%v', but supplied config is for cluster '%v'. Cannot continue. Either adjust config or use clean data directory", topology.ClusterId, config.ClusterId)
-	default:
-		return nil, fmt.Errorf("Topology change not currently supported. Sorry.")
-	}
+	return nil, nil
 }
 
-func (s *server) signalShutdown() {
+func (s *server) SignalShutdown() {
+	// this may fail if stdout has died
 	log.Println("Shutting down.")
-	s.Done()
+	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
+		s.shutdownChan <- goshawk.EmptyStructVal
+	}
 }
 
 func (s *server) signalStatus() {
@@ -310,13 +278,7 @@ func (s *server) signalReloadConfig() {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	localHost, remoteHosts, err := config.LocalRemoteHosts(s.port)
-	if err != nil {
-		log.Println("Cannot reload config due to error:", err)
-		return
-	}
-	s.connectionManager.SetDesiredServers(localHost, remoteHosts)
-	log.Println("Reloaded configuration.")
+	s.transmogrifier.RequestConfigurationChange(config)
 }
 
 func (s *server) signalDumpStacks() {
@@ -387,12 +349,18 @@ func (s *server) signalToggleTrace() {
 
 func (s *server) signalHandler() {
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, os.Interrupt)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGPIPE, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, os.Interrupt)
 	for {
 		sig := <-sigs
 		switch sig {
+		case syscall.SIGPIPE:
+			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
+				// stdout has errored; probably whatever we were being
+				// piped to has died.
+				s.SignalShutdown()
+			}
 		case syscall.SIGTERM, syscall.SIGINT:
-			s.signalShutdown()
+			s.SignalShutdown()
 		case syscall.SIGHUP:
 			s.signalReloadConfig()
 		case syscall.SIGQUIT:

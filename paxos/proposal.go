@@ -4,24 +4,26 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
 )
 
 type proposal struct {
-	proposerManager *ProposerManager
-	instanceRMId    common.RMId
-	acceptors       []common.RMId
-	activeRMIds     map[common.RMId]uint32
-	fInc            int
-	txn             *msgs.Txn
-	txnId           *common.TxnId
-	skipPhase1      bool
-	instances       map[common.VarUUId]*proposalInstance
-	pending         []*proposalInstance
-	abortInstances  []common.RMId
-	finished        bool
+	proposerManager    *ProposerManager
+	instanceRMId       common.RMId
+	acceptors          []common.RMId
+	activeRMIds        map[common.RMId]uint32
+	fInc               int
+	txn                *msgs.Txn
+	txnId              *common.TxnId
+	submitter          common.RMId
+	submitterBootCount uint32
+	skipPhase1         bool
+	instances          map[common.VarUUId]*proposalInstance
+	pending            []*proposalInstance
+	abortInstances     []common.RMId
+	finished           bool
 }
 
 func NewProposal(pm *ProposerManager, txnId *common.TxnId, txn *msgs.Txn, fInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
@@ -37,17 +39,19 @@ func NewProposal(pm *ProposerManager, txnId *common.TxnId, txn *msgs.Txn, fInc i
 		activeRMIds[rmId] = bootCount
 	}
 	p := &proposal{
-		proposerManager: pm,
-		instanceRMId:    instanceRMId,
-		acceptors:       acceptors,
-		activeRMIds:     activeRMIds,
-		fInc:            fInc,
-		txn:             txn,
-		txnId:           txnId,
-		skipPhase1:      skipPhase1,
-		instances:       make(map[common.VarUUId]*proposalInstance, len(ballots)),
-		pending:         make([]*proposalInstance, 0, len(ballots)),
-		finished:        false,
+		proposerManager:    pm,
+		instanceRMId:       instanceRMId,
+		acceptors:          acceptors,
+		activeRMIds:        activeRMIds,
+		fInc:               fInc,
+		txn:                txn,
+		txnId:              txnId,
+		submitter:          common.RMId(txn.Submitter()),
+		submitterBootCount: txn.SubmitterBootCount(),
+		skipPhase1:         skipPhase1,
+		instances:          make(map[common.VarUUId]*proposalInstance, len(ballots)),
+		pending:            make([]*proposalInstance, 0, len(ballots)),
+		finished:           false,
 	}
 	for _, ballot := range ballots {
 		pi := newProposalInstance(p, ballot)
@@ -106,7 +110,7 @@ func (p *proposal) maybeSendOneA() {
 	}
 	sender.msg = server.SegToBytes(seg)
 	server.Log(p.txnId, "Adding sender for 1A")
-	p.proposerManager.ConnectionManager.AddSender(sender)
+	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
 func (p *proposal) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
@@ -152,7 +156,7 @@ func (p *proposal) maybeSendTwoA() {
 	}
 	sender.msg = server.SegToBytes(seg)
 	server.Log(p.txnId, "Adding sender for 2A")
-	p.proposerManager.ConnectionManager.AddSender(sender)
+	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
 func (p *proposal) TwoBFailuresReceived(sender common.RMId, failures *msgs.TwoBTxnVotesFailures) {
@@ -459,7 +463,7 @@ func (s *proposalSender) finished() {
 	if !s.done {
 		s.done = true
 		server.Log("Removing proposal sender")
-		s.proposerManager.ConnectionManager.RemoveSenderSync(s)
+		s.proposerManager.RemoveServerConnectionSubscriber(s)
 	}
 }
 
@@ -474,6 +478,9 @@ func (s *proposalSender) ConnectedRMs(conns map[common.RMId]Connection) {
 			s.ConnectionLost(rmId, conns)
 		}
 	}
+	if conn, found := conns[s.proposal.submitter]; !found || conn.BootCount() != s.submitterBootCount {
+		s.ConnectionLost(s.proposal.submitter, conns)
+	}
 }
 
 func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]Connection) {
@@ -481,21 +488,64 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 		return
 	}
 
+	if lost == s.proposal.submitter {
+		// There's a chance that only we received this txn, so we need
+		// to abort for all other active RMs.
+		s.proposal.proposerManager.Exe.Enqueue(func() {
+			// Only start a new proposal if we're not finished - there's
+			// a race otherwise: the final 2b could be on its way to us
+			// at the same time as we notice the failure.
+			if s.proposal.finished {
+				return
+			}
+			allocs := s.proposal.txn.Allocations()
+			for idx, l := 0, allocs.Len(); idx < l; idx++ {
+				alloc := allocs.At(idx)
+				rmId := common.RMId(alloc.RmId())
+				if alloc.Active() == 0 {
+					break
+				} else if rmId == s.proposal.proposerManager.RMId {
+					continue
+				} else {
+					found := false
+					// slightly horrible N^2, but not on critical path. Ok for now.
+					for _, alreadyAborted := range s.proposal.abortInstances {
+						if found = alreadyAborted == rmId; found {
+							break
+						}
+					}
+					if found {
+						break
+					}
+					ballots := MakeAbortBallots(s.proposal.txn, &alloc)
+					server.Log(s.proposal.txnId, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
+					s.proposal.abortInstances = append(s.proposal.abortInstances, rmId)
+					s.proposal.proposerManager.NewPaxosProposals(
+						s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, rmId, false)
+				}
+			}
+		})
+		return
+	}
+
 	alloc := AllocForRMId(s.proposal.txn, lost)
 	if alloc == nil || alloc.Active() == 0 {
 		return
 	}
-	ballots := MakeAbortBallots(s.proposal.txn, alloc)
-	server.Log(s.proposal.txnId, "Trying to abort for", lost, "Found actions:", len(ballots))
 	s.proposal.proposerManager.Exe.Enqueue(func() {
-		// Only start a new proposal if we're not finished - there's
-		// a race otherwise: the final 2b could be on its way to us
-		// at the same time as we notice the failure.
-		if !s.proposal.finished {
-			s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
-			s.proposal.proposerManager.NewPaxosProposals(
-				s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
+		if s.proposal.finished { // see above equiv
+			return
 		}
+		for _, alreadyAborted := range s.proposal.abortInstances {
+			if alreadyAborted == lost {
+				return // already done!
+			}
+		}
+		ballots := MakeAbortBallots(s.proposal.txn, alloc)
+		server.Log(s.proposal.txnId, "Trying to abort for", lost, "Found actions:", len(ballots))
+		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
+		s.proposal.proposerManager.NewPaxosProposals(
+			s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
 	})
 }
 

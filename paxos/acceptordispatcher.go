@@ -5,8 +5,8 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"log"
@@ -18,15 +18,15 @@ type AcceptorDispatcher struct {
 	acceptormanagers  []*AcceptorManager
 }
 
-func NewAcceptorDispatcher(cm ConnectionManager, count uint8, server *mdbs.MDBServer) *AcceptorDispatcher {
+func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
 		acceptormanagers: make([]*AcceptorManager, count),
 	}
 	ad.Dispatcher.Init(count)
 	for idx, exe := range ad.Executors {
-		ad.acceptormanagers[idx] = NewAcceptorManager(exe, cm, server)
+		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db)
 	}
-	ad.loadFromDisk(server)
+	ad.loadFromDisk(db)
 	return ad
 }
 
@@ -61,34 +61,42 @@ func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (ad *AcceptorDispatcher) loadFromDisk(server *mdbs.MDBServer) {
-	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) (interface{}, error) {
-		return rtxn.WithCursor(db.DB.BallotOutcomes, func(cursor *mdb.Cursor) (interface{}, error) {
+func (ad *AcceptorDispatcher) loadFromDisk(db *db.Databases) {
+	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, _ := rtxn.WithCursor(db.BallotOutcomes, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.
-			count := 0
+			acceptorStates := make(map[*common.TxnId][]byte)
 			txnIdData, acceptorState, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; txnIdData, acceptorState, err = cursor.Get(nil, nil, mdb.NEXT) {
-				count++
 				txnId := common.MakeTxnId(txnIdData)
-				acceptorStateCopy := acceptorState
-				ad.withAcceptorManager(txnId, func(am *AcceptorManager) {
-					am.loadFromData(txnId, acceptorStateCopy)
-				})
+				acceptorStates[txnId] = acceptorState
 			}
 			if err == mdb.NotFound {
 				// fine, we just fell off the end as expected.
-				return count, nil
+				return acceptorStates
 			} else {
-				return count, err
+				cursor.Error(err)
+				return nil
 			}
 		})
+		return res
 	}).ResultError()
-	if err == nil {
-		log.Printf("Loaded %v acceptors from disk\n", res.(int))
-	} else {
-		log.Println("AcceptorDispatcher error loading from disk:", err)
+	if err != nil {
+		panic(fmt.Sprintf("AcceptorDispatcher error loading from disk: %v", err))
+	} else if res != nil {
+		acceptorStates := res.(map[*common.TxnId][]byte)
+		for txnId, acceptorState := range acceptorStates {
+			acceptorStateCopy := acceptorState
+			txnIdCopy := txnId
+			ad.withAcceptorManager(txnIdCopy, func(am *AcceptorManager) {
+				if err := am.loadFromData(txnIdCopy, acceptorStateCopy); err != nil {
+					log.Printf("AcceptorDispatcher error loading %v from disk: %v\n", txnIdCopy, err)
+				}
+			})
+		}
+		log.Printf("Loaded %v acceptors from disk\n", len(acceptorStates))
 	}
 }
 

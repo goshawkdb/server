@@ -2,6 +2,7 @@ package consistenthash
 
 import (
 	"goshawkdb.io/common"
+	"goshawkdb.io/server"
 	"math/rand"
 	"testing"
 )
@@ -158,8 +159,8 @@ func TestCombination2Perm(t *testing.T) {
 func TestCombinationDisabled(t *testing.T) {
 	permA, permB := []common.RMId{hashcodes[0], hashcodes[1]}, []common.RMId{hashcodes[1], hashcodes[0]}
 
-	disabled := make(map[common.RMId]common.EmptyStruct)
-	disabled[hashcodes[0]] = common.EmptyStructVal
+	disabled := make(map[common.RMId]server.EmptyStruct)
+	disabled[hashcodes[0]] = server.EmptyStructVal
 	_, _, err := chooseComb(2, disabled, permA, permB)
 	if err != TooManyDisabledHashCodes {
 		t.Errorf("Expecting err to be TooManyDisabledHashCodes, but was actually %v", err)
@@ -177,7 +178,7 @@ func TestCombinationDisabled(t *testing.T) {
 	}
 
 	delete(disabled, hashcodes[0])
-	disabled[hashcodes[1]] = common.EmptyStructVal
+	disabled[hashcodes[1]] = server.EmptyStructVal
 	inc, exe, err = chooseComb(1, disabled, permA, permB)
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +191,7 @@ func TestCombinationDisabled(t *testing.T) {
 	}
 
 	delete(disabled, hashcodes[1])
-	disabled[hashcodes[0]] = common.EmptyStructVal
+	disabled[hashcodes[0]] = server.EmptyStructVal
 	permA = append(permA, hashcodes[2])
 	permB = append(permB, hashcodes[2])
 	inc, exe, err = chooseComb(1, disabled, permA, permB)
@@ -205,7 +206,7 @@ func TestCombinationDisabled(t *testing.T) {
 	}
 
 	delete(disabled, hashcodes[0])
-	disabled[hashcodes[2]] = common.EmptyStructVal
+	disabled[hashcodes[2]] = server.EmptyStructVal
 	inc, exe, err = chooseComb(1, disabled, permA, permB)
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +219,7 @@ func TestCombinationDisabled(t *testing.T) {
 	}
 
 	delete(disabled, hashcodes[2])
-	disabled[hashcodes[1]] = common.EmptyStructVal
+	disabled[hashcodes[1]] = server.EmptyStructVal
 	inc, exe, err = chooseComb(2, disabled, permA, permB)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +232,7 @@ func TestCombinationDisabled(t *testing.T) {
 		t.Errorf("Expecting exclusion to be %v, but was actually %v", []common.RMId{hashcodes[1]}, exe)
 	}
 
-	disabled[hashcodes[2]] = common.EmptyStructVal
+	disabled[hashcodes[2]] = server.EmptyStructVal
 	inc, exe, err = chooseComb(1, disabled, permA, permB)
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +248,28 @@ func TestCombinationDisabled(t *testing.T) {
 	if err != TooManyDisabledHashCodes {
 		t.Fatal(err)
 	}
+}
+
+func isPermutationOf(perm, hashcodes []common.RMId) bool {
+	if len(perm) != len(hashcodes) {
+		return false
+	}
+	freq := make(map[common.RMId]int)
+	for _, hc := range perm {
+		if count := freq[hc]; count == 0 {
+			freq[hc] = 1
+		} else {
+			return false
+		}
+	}
+	for _, hc := range hashcodes {
+		if _, found := freq[hc]; found {
+			delete(freq, hc)
+		} else {
+			return false
+		}
+	}
+	return len(freq) == 0
 }
 
 func BenchmarkPicker_4PermsOf4_8HC_DL4(b *testing.B) {
@@ -300,7 +323,7 @@ func randPerm(lim, length int) []common.RMId {
 	return result
 }
 
-func chooseComb(desiredLen int, disabled map[common.RMId]common.EmptyStruct, perms ...[]common.RMId) ([]common.RMId, []common.RMId, error) {
+func chooseComb(desiredLen int, disabled map[common.RMId]server.EmptyStruct, perms ...[]common.RMId) ([]common.RMId, []common.RMId, error) {
 	cp := NewCombinationPicker(desiredLen, disabled)
 	for _, perm := range perms {
 		cp.AddPermutation(perm)

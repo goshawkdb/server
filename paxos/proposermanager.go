@@ -7,8 +7,9 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
@@ -26,37 +27,75 @@ const ( //                  txnId  rmId
 type instanceIdPrefix [instanceIdPrefixLen]byte
 
 type ProposerManager struct {
-	RMId              common.RMId
-	VarDispatcher     *eng.VarDispatcher
-	Exe               *dispatcher.Executor
-	ConnectionManager ConnectionManager
-	Disk              *mdbs.MDBServer
-	proposals         map[instanceIdPrefix]*proposal
-	proposers         map[common.TxnId]*Proposer
+	ServerConnectionPublisher
+	RMId          common.RMId
+	VarDispatcher *eng.VarDispatcher
+	Exe           *dispatcher.Executor
+	DB            *db.Databases
+	proposals     map[instanceIdPrefix]*proposal
+	proposers     map[common.TxnId]*Proposer
+	topology      *configuration.Topology
 }
 
-func NewProposerManager(rmId common.RMId, exe *dispatcher.Executor, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerManager {
+func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerManager {
 	pm := &ProposerManager{
-		RMId:              rmId,
-		proposals:         make(map[instanceIdPrefix]*proposal),
-		proposers:         make(map[common.TxnId]*Proposer),
-		VarDispatcher:     varDispatcher,
-		Exe:               exe,
-		ConnectionManager: cm,
-		Disk:              server,
+		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		RMId:          rmId,
+		proposals:     make(map[instanceIdPrefix]*proposal),
+		proposers:     make(map[common.TxnId]*Proposer),
+		VarDispatcher: varDispatcher,
+		Exe:           exe,
+		DB:            db,
+		topology:      nil,
 	}
+	exe.Enqueue(func() { pm.topology = cm.AddTopologySubscriber(eng.ProposerSubscriber, pm) })
 	return pm
 }
 
-func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) {
+func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error {
 	if _, found := pm.proposers[*txnId]; !found {
-		proposer := ProposerFromData(pm, txnId, data)
+		proposer, err := ProposerFromData(pm, txnId, data, pm.topology)
+		if err != nil {
+			return err
+		}
 		pm.proposers[*txnId] = proposer
 		proposer.Start()
 	}
+	return nil
 }
 
-func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
+func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	resultChan := make(chan struct{})
+	enqueued := pm.Exe.Enqueue(func() {
+		pm.topology = topology
+		for _, proposer := range pm.proposers {
+			proposer.TopologyChange(topology)
+		}
+		close(resultChan)
+		done(true)
+	})
+	if enqueued {
+		go pm.Exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-resultChan:
+			case <-terminated:
+				select {
+				case <-resultChan:
+				default:
+					done(false)
+				}
+			}
+		})
+	} else {
+		done(false)
+	}
+}
+
+func (pm *ProposerManager) ImmigrationReceived(txnId *common.TxnId, txnCap *msgs.Txn, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {
+	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txnCap, varCaps)
+}
+
+func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, txnCap *msgs.Txn) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other
 	// proposers will have created abort proposals, and consensus may
@@ -64,9 +103,40 @@ func (pm *ProposerManager) TxnReceived(txnId *common.TxnId, txnCap *msgs.Txn) {
 	// ignore this message.
 	if _, found := pm.proposers[*txnId]; !found {
 		server.Log(txnId, "Received")
-		proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter)
-		pm.proposers[*txnId] = proposer
-		proposer.Start()
+		accept := true
+		if pm.topology != nil {
+			accept = (pm.topology.Next() == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
+				// Could also do pm.topology.BarrierReached1(sender), but
+				// would need to specialise that to rolls rather than
+				// topology txns, and it's enforced on the sending side
+				// anyway. One the sender has received the next topology,
+				// it'll do the right thing and locally block until it's
+				// in barrier1.
+				(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion())
+			if accept {
+				_, found := pm.topology.RMsRemoved()[sender]
+				accept = !found
+			}
+		}
+		if accept {
+			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter, pm.topology)
+			pm.proposers[*txnId] = proposer
+			proposer.Start()
+
+		} else {
+			server.Log(txnId, "Aborting received txn due to non-matching topology.", txnCap.TopologyVersion())
+			acceptors := GetAcceptorsFromTxn(txnCap)
+			fInc := int(txnCap.FInc())
+			alloc := AllocForRMId(txnCap, pm.RMId)
+			ballots := MakeAbortBallots(txnCap, alloc)
+			pm.NewPaxosProposals(txnId, txnCap, fInc, ballots, acceptors, pm.RMId, true)
+			// ActiveLearner is right - we don't want the proposer to
+			// vote, but it should exist to collect the 2Bs that should
+			// come back.
+			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveLearner, pm.topology)
+			pm.proposers[*txnId] = proposer
+			proposer.Start()
+		}
 	}
 }
 
@@ -163,7 +233,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			ballots := MakeAbortBallots(&txnCap, alloc)
 			pm.NewPaxosProposals(txnId, &txnCap, fInc, ballots, acceptors, pm.RMId, false)
 
-			proposer := NewProposer(pm, txnId, &txnCap, ProposerActiveLearner)
+			proposer := NewProposer(pm, txnId, &txnCap, ProposerActiveLearner, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 			proposer.BallotOutcomeReceived(sender, &outcome)
@@ -172,7 +242,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
 				server.Log(txnId, "2B outcome received from", sender, "(unknown learner)")
 				// we must be a learner.
-				proposer := NewProposer(pm, txnId, &txnCap, ProposerPassiveLearner)
+				proposer := NewProposer(pm, txnId, &txnCap, ProposerPassiveLearner, pm.topology)
 				pm.proposers[*txnId] = proposer
 				proposer.Start()
 				proposer.BallotOutcomeReceived(sender, &outcome)
@@ -184,7 +254,10 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// that state/proposer. We should now immediately reply
 				// with a TLC.
 				server.Log(txnId, "Sending immediate TLC for unknown abort learner")
-				NewOneShotSender(MakeTxnLocallyCompleteMsg(txnId), pm.ConnectionManager, sender)
+				// We have no state here, and if we receive further 2Bs
+				// from the repeating sender at the acceptor then we will
+				// send further TLCs. So the use of OSS here is correct.
+				NewOneShotSender(MakeTxnLocallyCompleteMsg(txnId), pm, sender)
 			}
 		}
 

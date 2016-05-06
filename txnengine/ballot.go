@@ -3,7 +3,7 @@ package txnengine
 import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	msgs "goshawkdb.io/server/capnp"
 )
 
 type Vote msgs.Vote_Which

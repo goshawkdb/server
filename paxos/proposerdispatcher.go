@@ -5,8 +5,8 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
@@ -18,21 +18,21 @@ type ProposerDispatcher struct {
 	proposermanagers []*ProposerManager
 }
 
-func NewProposerDispatcher(count uint8, rmId common.RMId, varDispatcher *eng.VarDispatcher, cm ConnectionManager, server *mdbs.MDBServer) *ProposerDispatcher {
+func NewProposerDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
 		proposermanagers: make([]*ProposerManager, count),
 	}
 	pd.Dispatcher.Init(count)
 	for idx, exe := range pd.Executors {
-		pd.proposermanagers[idx] = NewProposerManager(rmId, exe, varDispatcher, cm, server)
+		pd.proposermanagers[idx] = NewProposerManager(exe, rmId, cm, db, varDispatcher)
 	}
-	pd.loadFromDisk(server)
+	pd.loadFromDisk(db)
 	return pd
 }
 
 func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *msgs.Txn) {
 	txnId := common.MakeTxnId(txn.Id())
-	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(txnId, txn) })
+	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txnId, txn) })
 }
 
 func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
@@ -63,6 +63,18 @@ func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnSubmissionAbortReceived(sender, txnId) })
 }
 
+func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, stateChange eng.TxnLocalStateChange) {
+	elemsList := migration.Elems()
+	elemsCount := elemsList.Len()
+	for idx := 0; idx < elemsCount; idx++ {
+		elem := elemsList.At(idx)
+		txnCap := elem.Txn()
+		txnId := common.MakeTxnId(txnCap.Id())
+		varCaps := elem.Vars()
+		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txnId, &txnCap, &varCaps, stateChange) })
+	}
+}
+
 func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Proposers")
 	for idx, executor := range pd.Executors {
@@ -74,34 +86,42 @@ func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (pd *ProposerDispatcher) loadFromDisk(server *mdbs.MDBServer) {
-	res, err := server.ReadonlyTransaction(func(rtxn *mdbs.RTxn) (interface{}, error) {
-		return rtxn.WithCursor(db.DB.Proposers, func(cursor *mdb.Cursor) (interface{}, error) {
+func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
+	res, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		res, _ := rtxn.WithCursor(db.Proposers, func(cursor *mdbs.Cursor) interface{} {
 			// cursor.Get returns a copy of the data. So it's fine for us
 			// to store and process this later - it's not about to be
 			// overwritten on disk.
-			count := 0
+			proposerStates := make(map[*common.TxnId][]byte)
 			txnIdData, proposerState, err := cursor.Get(nil, nil, mdb.FIRST)
 			for ; err == nil; txnIdData, proposerState, err = cursor.Get(nil, nil, mdb.NEXT) {
-				count++
 				txnId := common.MakeTxnId(txnIdData)
-				proposerStateCopy := proposerState
-				pd.withProposerManager(txnId, func(pm *ProposerManager) {
-					pm.loadFromData(txnId, proposerStateCopy)
-				})
+				proposerStates[txnId] = proposerState
 			}
 			if err == mdb.NotFound {
 				// fine, we just fell off the end as expected.
-				return count, nil
+				return proposerStates
 			} else {
-				return count, err
+				cursor.Error(err)
+				return nil
 			}
 		})
+		return res
 	}).ResultError()
-	if err == nil {
-		log.Printf("Loaded %v proposers from disk\n", res.(int))
-	} else {
-		log.Println("ProposerDispatcher error loading from disk:", err)
+	if err != nil {
+		panic(fmt.Sprintf("ProposerDispatcher error loading from disk: %v", err))
+	} else if res != nil {
+		proposerStates := res.(map[*common.TxnId][]byte)
+		for txnId, proposerState := range proposerStates {
+			proposerStateCopy := proposerState
+			txnIdCopy := txnId
+			pd.withProposerManager(txnIdCopy, func(pm *ProposerManager) {
+				if err := pm.loadFromData(txnIdCopy, proposerStateCopy); err != nil {
+					log.Printf("ProposerDispatcher error loading %v from disk: %v\n", txnIdCopy, err)
+				}
+			})
+		}
+		log.Printf("Loaded %v proposers from disk\n", len(proposerStates))
 	}
 }
 

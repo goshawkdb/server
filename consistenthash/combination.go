@@ -15,13 +15,13 @@ added permutation are included in the result. It may not be optimal,
 but it's more important to be fast that to find the absolute minimum
 solution.
 
-The gist of the approach is to assume that every RMId of every perm is
-in the result to start with. We then sort the result by frequency of
-each RMId and then walk through starting at the rarest. For each RMId,
-if we can remove it from the result without taking any of the
-permutations that include this RMId below the desiredLength (i.e. the
-number of elements of the permutation that appear in the result), then
-we do so.
+The gist of the approach is to assume that every RMId of every
+permutation is in the result to start with. We then sort the result by
+frequency of each RMId and then walk through starting at the
+rarest. For each RMId, if we can remove it from the result without
+taking any of the permutations that include this RMId below the
+desiredLength (i.e. the number of elements of the permutation that
+appear in the result), then we do so.
 
 OverProvision represents the number of RMIds of a permutation included
 in the result above the desiredLength.
@@ -51,10 +51,11 @@ type CombinationPicker struct {
 	desiredLen          int
 	rmIdToOverProvision map[common.RMId]*[]*int
 	disabledHashCodes   map[common.RMId]bool
-	excluded            []common.RMId
+	excluded            common.RMIds
 	errored             bool
 }
 
+// Here, you want desiredLen to be FInc
 func NewCombinationPicker(desiredLen int, disabledHashCodes map[common.RMId]server.EmptyStruct) *CombinationPicker {
 	dhc := make(map[common.RMId]bool, len(disabledHashCodes))
 	for hc := range disabledHashCodes {
@@ -68,7 +69,7 @@ func NewCombinationPicker(desiredLen int, disabledHashCodes map[common.RMId]serv
 	}
 }
 
-func (cp *CombinationPicker) AddPermutation(perm []common.RMId) {
+func (cp *CombinationPicker) AddPermutation(perm common.RMIds) {
 	op := len(perm) - cp.desiredLen
 	for _, rmId := range perm {
 		if excluded, found := cp.disabledHashCodes[rmId]; found {
@@ -77,9 +78,7 @@ func (cp *CombinationPicker) AddPermutation(perm []common.RMId) {
 				cp.excluded = append(cp.excluded, rmId)
 				cp.disabledHashCodes[rmId] = true
 			}
-			continue
-		}
-		if listPtr, found := cp.rmIdToOverProvision[rmId]; found {
+		} else if listPtr, found := cp.rmIdToOverProvision[rmId]; found {
 			*listPtr = append(*listPtr, &op)
 		} else {
 			opL := make([]*int, 1, cp.desiredLen)
@@ -96,15 +95,17 @@ func (cp *CombinationPicker) AddPermutation(perm []common.RMId) {
 // will be zipped together to pairs when used. I.e. this is a cheap
 // way of doing a map in which we never need to do random lookups.
 type rmToOPLs struct {
-	rmIds           []common.RMId
+	rmIds           common.RMIds
 	overProvisionsL []*[]*int
 }
 
 func (cp *CombinationPicker) freqAnalysis() ([]int, map[int]*rmToOPLs) {
-	freqs := make([]int, 0, cp.desiredLen)
+	freqs := make([]int, 0, len(cp.rmIdToOverProvision))
 	freqToRMOPLs := make(map[int]*rmToOPLs)
 
 	for rmId, overProvisions := range cp.rmIdToOverProvision {
+		// This is the number of perms that have been added that contain
+		// this rmId:
 		freq := len(*overProvisions)
 		if r2opls, found := freqToRMOPLs[freq]; found {
 			r2opls.rmIds = append(r2opls.rmIds, rmId)
@@ -128,7 +129,7 @@ func (cp *CombinationPicker) freqAnalysis() ([]int, map[int]*rmToOPLs) {
 	return freqs, freqToRMOPLs
 }
 
-func (cp *CombinationPicker) Choose() ([]common.RMId, []common.RMId, error) {
+func (cp *CombinationPicker) Choose() (common.RMIds, common.RMIds, error) {
 	if cp.errored {
 		return nil, nil, TooManyDisabledHashCodes
 	}
@@ -139,6 +140,7 @@ func (cp *CombinationPicker) Choose() ([]common.RMId, []common.RMId, error) {
 
 	for _, freq := range freqs {
 		r2opls := freqToRMOPLs[freq]
+		// all these rmIds occur with the same frequency
 		rmIds := r2opls.rmIds
 		overProvisionsL := r2opls.overProvisionsL
 		for idx := 0; idx < len(rmIds); idx++ {

@@ -8,11 +8,12 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"log"
+	eng "goshawkdb.io/server/txnengine"
 )
 
 func init() {
@@ -20,21 +21,26 @@ func init() {
 }
 
 type AcceptorManager struct {
-	Disk              *mdbs.MDBServer
-	ConnectionManager ConnectionManager
-	Exe               *dispatcher.Executor
-	instances         map[instanceId]*instance
-	acceptors         map[common.TxnId]*acceptorInstances
+	ServerConnectionPublisher
+	RMId      common.RMId
+	DB        *db.Databases
+	Exe       *dispatcher.Executor
+	instances map[instanceId]*instance
+	acceptors map[common.TxnId]*acceptorInstances
+	Topology  *configuration.Topology
 }
 
-func NewAcceptorManager(exe *dispatcher.Executor, cm ConnectionManager, server *mdbs.MDBServer) *AcceptorManager {
-	return &AcceptorManager{
-		Disk:              server,
-		ConnectionManager: cm,
-		Exe:               exe,
-		instances:         make(map[instanceId]*instance),
-		acceptors:         make(map[common.TxnId]*acceptorInstances),
+func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
+	am := &AcceptorManager{
+		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		RMId:      rmId,
+		DB:        db,
+		Exe:       exe,
+		instances: make(map[instanceId]*instance),
+		acceptors: make(map[common.TxnId]*acceptorInstances),
 	}
+	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(eng.AcceptorSubscriber, am) })
+	return am
 }
 
 func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceId, vUUId *common.VarUUId) *instance {
@@ -86,11 +92,10 @@ func (am *AcceptorManager) ensureAcceptor(txnId *common.TxnId, txnCap *msgs.Txn)
   in the instance id.
 */
 
-func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) {
+func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
-		log.Println("Unable to decode acceptor state", data)
-		return
+		return err
 	}
 	state := msgs.ReadRootAcceptorState(seg)
 	txn := state.Txn()
@@ -129,6 +134,36 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) {
 	}
 
 	acc.Start()
+	return nil
+}
+
+func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	resultChan := make(chan struct{})
+	enqueued := am.Exe.Enqueue(func() {
+		am.Topology = topology
+		for _, ai := range am.acceptors {
+			if ai.acceptor != nil {
+				ai.acceptor.TopologyChanged(topology)
+			}
+		}
+		close(resultChan)
+		done(true)
+	})
+	if enqueued {
+		go am.Exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-resultChan:
+			case <-terminated:
+				select {
+				case <-resultChan:
+				default:
+					done(false)
+				}
+			}
+		})
+	} else {
+		done(false)
+	}
 }
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {
@@ -158,7 +193,8 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 		am.ensureInstance(txnId, &instId, vUUId).OneATxnVotesReceived(&proposal, &promise)
 	}
 
-	NewOneShotSender(server.SegToBytes(replySeg), am.ConnectionManager, sender)
+	// The proposal senders are repeating, so this use of OSS is fine.
+	NewOneShotSender(server.SegToBytes(replySeg), am, sender)
 }
 
 func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *common.TxnId, twoATxnVotes *msgs.TwoATxnVotes) {
@@ -207,7 +243,8 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *commo
 			failure.SetRoundNumberTooLow(uint32(inst.promiseNum >> 32))
 		}
 		server.Log(txnId, "Sending 2B failures to", sender, "; instance:", instanceRMId)
-		NewOneShotSender(server.SegToBytes(replySeg), am.ConnectionManager, sender)
+		// The proposal senders are repeating, so this use of OSS is fine.
+		NewOneShotSender(server.SegToBytes(replySeg), am, sender)
 	}
 }
 
@@ -228,7 +265,9 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(txnId[:])
 		server.Log(txnId, "Sending single TGC to", sender)
-		NewOneShotSender(server.SegToBytes(seg), am.ConnectionManager, sender)
+		// Use of OSS here is ok because this is the default action on
+		// not finding state.
+		NewOneShotSender(server.SegToBytes(seg), am, sender)
 	}
 }
 
@@ -340,7 +379,7 @@ func (i *instance) TwoATxnVotesReceived(request *msgs.TxnVoteAcceptRequest) (acc
 	if roundNumber == i.acceptedNum && i.accepted != nil {
 		// duplicate 2a. Don't issue any response.
 		return
-	} else if roundNumber == i.promiseNum || i.promiseNum == 0 {
+	} else if roundNumber >= i.promiseNum || i.promiseNum == 0 {
 		i.promiseNum = roundNumber
 		i.acceptedNum = roundNumber
 		ballot := request.Ballot()

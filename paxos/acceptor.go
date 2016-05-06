@@ -5,9 +5,9 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
-	"goshawkdb.io/server/db"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/configuration"
 	"log"
 )
 
@@ -65,6 +65,7 @@ func (a *Acceptor) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Current State: %v", a.currentState))
 	sc.Emit(fmt.Sprintf("- Outcome determined? %v", a.outcome != nil))
 	sc.Emit(fmt.Sprintf("- Pending TLC: %v", a.pendingTLC))
+	sc.Emit(fmt.Sprintf("- Received TSC: %v", a.tscReceived))
 	a.ballotAccumulator.Status(sc.Fork())
 	sc.Join()
 }
@@ -159,17 +160,18 @@ func (awtd *acceptorWriteToDisk) start() {
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	server.Log(awtd.txnId, "Writing 2B to disk...")
-	future := awtd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-		return nil, rwtxn.Put(db.DB.BallotOutcomes, awtd.txnId[:], data, 0)
+	future := awtd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Put(awtd.acceptorManager.DB.BallotOutcomes, awtd.txnId[:], data, 0)
+		return true
 	})
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.
-		if _, err := future.ResultError(); err != nil {
-			log.Printf("Error: %v Acceptor Write error: %v", awtd.txnId, err)
-			return
+		if ran, err := future.ResultError(); err != nil {
+			panic(fmt.Sprintf("Error: %v Acceptor Write error: %v", awtd.txnId, err))
+		} else if ran != nil {
+			server.Log(awtd.txnId, "Writing 2B to disk...done.")
+			awtd.acceptorManager.Exe.Enqueue(func() { awtd.writeDone(outcome, sendToAll) })
 		}
-		server.Log(awtd.txnId, "Writing 2B to disk...done.")
-		awtd.acceptorManager.Exe.Enqueue(func() { awtd.writeDone(outcome, sendToAll) })
 	}()
 }
 
@@ -198,16 +200,18 @@ type acceptorAwaitLocallyComplete struct {
 	tgcRecipients common.RMIds
 	tscReceived   bool
 	twoBSender    *twoBTxnVotesSender
+	txnSubmitter  common.RMId
 }
 
 func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *msgs.Txn) {
 	aalc.Acceptor = a
 	aalc.tlcsReceived = make(map[common.RMId]server.EmptyStruct, aalc.ballotAccumulator.Txn.Allocations().Len())
+	aalc.txnSubmitter = common.RMId(txn.Submitter())
 }
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
 	if aalc.twoBSender != nil {
-		aalc.acceptorManager.ConnectionManager.RemoveSenderSync(aalc.twoBSender)
+		aalc.acceptorManager.RemoveServerConnectionSubscriber(aalc.twoBSender)
 		aalc.twoBSender = nil
 	}
 
@@ -229,21 +233,29 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	allocs := aalc.ballotAccumulator.Txn.Allocations()
 	aalc.pendingTLC = make(map[common.RMId]server.EmptyStruct, allocs.Len())
 	aalc.tgcRecipients = make([]common.RMId, 0, allocs.Len())
-	twoBRecipients := make([]common.RMId, 0, allocs.Len())
-	aborted := (*msgs.Outcome)(aalc.outcomeOnDisk).Which() == msgs.OUTCOME_ABORT
+
+	var rmsRemoved map[common.RMId]server.EmptyStruct
+	if aalc.acceptorManager.Topology != nil {
+		rmsRemoved = aalc.acceptorManager.Topology.RMsRemoved()
+	}
+
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
 		active := alloc.Active() != 0
 		rmId := common.RMId(alloc.RmId())
+		if _, found := rmsRemoved[rmId]; found {
+			continue
+		}
 		if aalc.sendToAllOnDisk || active {
-			twoBRecipients = append(twoBRecipients, rmId)
 			if _, found := aalc.tlcsReceived[rmId]; !found {
 				aalc.pendingTLC[rmId] = server.EmptyStructVal
 			}
-		}
-		if !aborted || active {
 			aalc.tgcRecipients = append(aalc.tgcRecipients, rmId)
 		}
+	}
+
+	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
+		aalc.tscReceived = true
 	}
 
 	if len(aalc.pendingTLC) == 0 && aalc.tscReceived {
@@ -252,8 +264,8 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	} else {
 		server.Log(aalc.txnId, "Adding sender for 2B")
 		submitter := common.RMId(aalc.ballotAccumulator.Txn.Submitter())
-		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, twoBRecipients...)
-		aalc.acceptorManager.ConnectionManager.AddSender(aalc.twoBSender)
+		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, aalc.tgcRecipients...)
+		aalc.acceptorManager.AddServerConnectionSubscriber(aalc.twoBSender)
 	}
 }
 
@@ -278,6 +290,28 @@ func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(sender c
 	}
 }
 
+func (aalc *acceptorAwaitLocallyComplete) TopologyChanged(topology *configuration.Topology) {
+	if topology == nil {
+		return
+	}
+	rmsRemoved := topology.RMsRemoved()
+	if _, found := rmsRemoved[aalc.acceptorManager.RMId]; found {
+		return
+	}
+	for idx := 0; idx < len(aalc.tgcRecipients); idx++ {
+		if _, found := rmsRemoved[aalc.tgcRecipients[idx]]; found {
+			aalc.tgcRecipients = append(aalc.tgcRecipients[:idx], aalc.tgcRecipients[idx+1:]...)
+			idx--
+		}
+	}
+	for rmId := range rmsRemoved {
+		aalc.TxnLocallyCompleteReceived(rmId)
+	}
+	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
+		aalc.TxnSubmissionCompleteReceived(aalc.txnSubmitter)
+	}
+}
+
 func (aalc *acceptorAwaitLocallyComplete) maybeDelete() {
 	if aalc.currentState == aalc && aalc.tscReceived && len(aalc.pendingTLC) == 0 {
 		aalc.nextState(nil)
@@ -296,19 +330,20 @@ func (adfd *acceptorDeleteFromDisk) init(a *Acceptor, txn *msgs.Txn) {
 
 func (adfd *acceptorDeleteFromDisk) start() {
 	if adfd.twoBSender != nil {
-		adfd.acceptorManager.ConnectionManager.RemoveSenderSync(adfd.twoBSender)
+		adfd.acceptorManager.RemoveServerConnectionSubscriber(adfd.twoBSender)
 		adfd.twoBSender = nil
 	}
-	future := adfd.acceptorManager.Disk.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) (interface{}, error) {
-		return nil, rwtxn.Del(db.DB.BallotOutcomes, adfd.txnId[:], nil)
+	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		rwtxn.Del(adfd.acceptorManager.DB.BallotOutcomes, adfd.txnId[:], nil)
+		return true
 	})
 	go func() {
-		if _, err := future.ResultError(); err != nil {
-			log.Printf("Error: %v Acceptor Deletion error: %v", adfd.txnId, err)
-			return
+		if ran, err := future.ResultError(); err != nil {
+			panic(fmt.Sprintf("Error: %v Acceptor Deletion error: %v", adfd.txnId, err))
+		} else if ran != nil {
+			server.Log(adfd.txnId, "Deleted 2B from disk...done.")
+			adfd.acceptorManager.Exe.Enqueue(adfd.deletionDone)
 		}
-		server.Log(adfd.txnId, "Deleted 2B from disk...done.")
-		adfd.acceptorManager.Exe.Enqueue(adfd.deletionDone)
 	}()
 }
 
@@ -328,7 +363,9 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() {
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(adfd.txnId[:])
 		server.Log(adfd.txnId, "Sending TGC to", adfd.tgcRecipients)
-		NewOneShotSender(server.SegToBytes(seg), adfd.acceptorManager.ConnectionManager, adfd.tgcRecipients...)
+		// If this gets lost it doesn't matter - the TLC will eventually
+		// get resent and we'll then send out another TGC.
+		NewOneShotSender(server.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
 	}
 }
 

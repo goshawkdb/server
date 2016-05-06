@@ -1,20 +1,23 @@
 package network
 
 import (
-	cr "crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
-	"golang.org/x/crypto/bcrypt"
-	"golang.org/x/crypto/nacl/box"
-	"golang.org/x/crypto/nacl/secretbox"
 	"goshawkdb.io/common"
-	msgs "goshawkdb.io/common/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
+	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"math/rand"
 	"net"
@@ -23,14 +26,12 @@ import (
 )
 
 type Connection struct {
-	sync.RWMutex
-	established       bool
 	remoteHost        string
 	remoteRMId        common.RMId
 	remoteBootCount   uint32
+	remoteRootId      *common.VarUUId
 	combinedTieBreak  uint32
-	remoteTopology    *server.Topology
-	socket            *net.TCPConn
+	socket            net.Conn
 	ConnectionNumber  uint32
 	connectionManager *ConnectionManager
 	submitter         *client.ClientTxnSubmitter
@@ -48,40 +49,43 @@ type Connection struct {
 }
 
 type connectionMsg interface {
-	connectionMsgWitness()
+	witness() connectionMsg
 }
 
-type connectionMsgShutdown struct{}
+type connectionMsgBasic struct{}
 
-func (cms *connectionMsgShutdown) connectionMsgWitness() {}
+func (cmb connectionMsgBasic) witness() connectionMsg { return cmb }
 
-var connectionMsgShutdownInst = &connectionMsgShutdown{}
+type connectionMsgShutdown struct{ connectionMsgBasic }
 
 type connectionMsgSend []byte
 
-func (cms connectionMsgSend) connectionMsgWitness() {}
+func (cms connectionMsgSend) witness() connectionMsg { return cms }
 
-type connectionMsgOutcomeReceived func(*connectionRun)
-
-func (cor connectionMsgOutcomeReceived) connectionMsgWitness() {}
-
-type connectionMsgTopologyChange struct {
-	topology *server.Topology
-	servers  map[common.RMId]paxos.Connection
+type connectionMsgOutcomeReceived struct {
+	connectionMsgBasic
+	sender  common.RMId
+	txnId   *common.TxnId
+	outcome *msgs.Outcome
 }
 
-func (ctc *connectionMsgTopologyChange) connectionMsgWitness() {}
+type connectionMsgTopologyChanged struct {
+	connectionMsgBasic
+	topology   *configuration.Topology
+	resultChan chan struct{}
+}
 
-type connectionMsgStatus server.StatusConsumer
+func (cmtc *connectionMsgTopologyChanged) Done() {
+	close(cmtc.resultChan)
+}
 
-func (cms *connectionMsgStatus) connectionMsgWitness() {}
+type connectionMsgStatus struct {
+	connectionMsgBasic
+	*server.StatusConsumer
+}
 
-type connectionMsgDisableHashCodes map[common.RMId]paxos.Connection
-
-func (cmdhc connectionMsgDisableHashCodes) connectionMsgWitness() {}
-
-func (conn *Connection) Shutdown(sync bool) {
-	if conn.enqueueQuery(connectionMsgShutdownInst) && sync {
+func (conn *Connection) Shutdown(sync paxos.Blocking) {
+	if conn.enqueueQuery(connectionMsgShutdown{}) && sync == paxos.Sync {
 		conn.cellTail.Wait()
 	}
 }
@@ -91,42 +95,47 @@ func (conn *Connection) Send(msg []byte) {
 }
 
 func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
-	conn.enqueueQuery(connectionMsgOutcomeReceived(func(cr *connectionRun) {
-		cr.submitter.SubmissionOutcomeReceived(sender, txnId, outcome)
-	}))
-}
-
-func (conn *Connection) TopologyChange(topology *server.Topology, servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(&connectionMsgTopologyChange{
-		topology: topology,
-		servers:  servers,
+	conn.enqueueQuery(connectionMsgOutcomeReceived{
+		sender:  sender,
+		txnId:   txnId,
+		outcome: outcome,
 	})
 }
 
+func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	msg := &connectionMsgTopologyChanged{
+		resultChan: make(chan struct{}),
+		topology:   topology,
+	}
+	if conn.enqueueQuery(msg) {
+		go func() {
+			select {
+			case <-msg.resultChan:
+			case <-conn.cellTail.Terminated:
+			}
+			done(true) // connection drop is not a problem
+		}()
+	} else {
+		done(true)
+	}
+}
+
 func (conn *Connection) Status(sc *server.StatusConsumer) {
-	conn.enqueueQuery((*connectionMsgStatus)(sc))
+	conn.enqueueQuery(connectionMsgStatus{StatusConsumer: sc})
 }
 
-func (conn *Connection) RemoteDetails() (bool, string, common.RMId, uint32, uint32, *server.Topology) {
-	conn.RLock()
-	defer conn.RUnlock()
-	return conn.established, conn.remoteHost, conn.remoteRMId, conn.remoteBootCount, conn.combinedTieBreak, conn.remoteTopology
-}
+type connectionMsgServerConnectionsChanged map[common.RMId]paxos.Connection
 
-func (conn *Connection) IsServer() bool {
-	conn.RLock()
-	defer conn.RUnlock()
-	return conn.isServer
-}
+func (cmdhc connectionMsgServerConnectionsChanged) witness() connectionMsg { return cmdhc }
 
 func (conn *Connection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(connectionMsgDisableHashCodes(servers))
+	conn.enqueueQuery(connectionMsgServerConnectionsChanged(servers))
 }
 func (conn *Connection) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(connectionMsgDisableHashCodes(servers))
+	conn.enqueueQuery(connectionMsgServerConnectionsChanged(servers))
 }
 func (conn *Connection) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(connectionMsgDisableHashCodes(servers))
+	conn.enqueueQuery(connectionMsgServerConnectionsChanged(servers))
 }
 
 func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
@@ -138,6 +147,9 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 }
 
 func NewConnectionToDial(host string, cm *ConnectionManager) *Connection {
+	if host == "" {
+		panic("empty host")
+	}
 	conn := &Connection{
 		remoteHost:        host,
 		connectionManager: cm,
@@ -147,6 +159,8 @@ func NewConnectionToDial(host string, cm *ConnectionManager) *Connection {
 }
 
 func NewConnectionFromTCPConn(socket *net.TCPConn, cm *ConnectionManager, count uint32) *Connection {
+	socket.SetKeepAlive(true)
+	socket.SetKeepAlivePeriod(time.Second)
 	conn := &Connection{
 		socket:            socket,
 		connectionManager: cm,
@@ -178,7 +192,6 @@ func (conn *Connection) start() {
 		})
 
 	conn.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
-	conn.established = false
 
 	conn.connectionDelay.init(conn)
 	conn.connectionDial.init(conn)
@@ -197,27 +210,26 @@ func (conn *Connection) start() {
 }
 
 func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
+	conn.topology = conn.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, conn)
+	defer conn.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, conn)
+
 	var (
-		err          error
-		stateChanged bool
-		oldState     connectionStateMachineComponent
-		queryChan    <-chan connectionMsg
-		queryCell    *cc.ChanCell
+		err       error
+		oldState  connectionStateMachineComponent
+		queryChan <-chan connectionMsg
+		queryCell *cc.ChanCell
 	)
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = conn.queryChan, cell }
 	head.WithCell(chanFun)
 	terminate := false
 	for !terminate {
-		stateChanged = oldState != conn.currentState
-		if stateChanged {
+		if oldState != conn.currentState {
 			oldState = conn.currentState
 			terminate, err = conn.currentState.start()
+		} else if msg, ok := <-queryChan; ok {
+			terminate, err = conn.handleMsg(msg)
 		} else {
-			if msg, ok := <-queryChan; ok {
-				terminate, err = conn.handleMsg(msg)
-			} else {
-				head.Next(queryCell, chanFun)
-			}
+			head.Next(queryCell, chanFun)
 		}
 		terminate = terminate || err != nil
 	}
@@ -228,52 +240,50 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 
 func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error) {
 	switch msgT := msg.(type) {
-	case *connectionMsgShutdown:
+	case connectionMsgShutdown:
 		terminate = true
 		conn.currentState = nil
 	case *connectionDelay:
 		msgT.received()
 	case *connectionBeater:
 		err = conn.beat()
-	case *connectionReadError:
+	case connectionReadError:
 		conn.reader = nil
-		err = conn.connectionRun.maybeRestartConnection(msgT)
+		err = conn.connectionRun.maybeRestartConnection(msgT.error)
 	case *connectionReadMessage:
-		err = conn.handleMsgFromPeer((*msgs.Message)(msgT))
+		err = conn.handleMsgFromServer((*msgs.Message)(msgT))
+	case *connectionReadClientMessage:
+		err = conn.handleMsgFromClient((*cmsgs.ClientMessage)(msgT))
 	case connectionMsgSend:
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
 		conn.outcomeReceived(msgT)
-	case *connectionMsgTopologyChange:
-		conn.topologyChange(msgT)
-	case connectionMsgDisableHashCodes:
-		conn.disableHashCodes(msgT)
-	case *connectionMsgStatus:
-		conn.status((*server.StatusConsumer)(msgT))
+	case *connectionMsgTopologyChanged:
+		err = conn.topologyChanged(msgT)
+	case connectionMsgServerConnectionsChanged:
+		conn.serverConnectionsChanged(msgT)
+	case connectionMsgStatus:
+		conn.status(msgT.StatusConsumer)
 	default:
-		err = fmt.Errorf("Fatal to Connection: Received unexpected message: %v", msgT)
+		err = fmt.Errorf("Fatal to Connection: Received unexpected message: %#v", msgT)
 	}
 	return
 }
 
 func (conn *Connection) handleShutdown(err error) {
-	conn.Lock()
-	conn.established = false
-	conn.Unlock()
 	if err != nil {
 		log.Println(err)
 	}
 	conn.maybeStopBeater()
 	conn.maybeStopReaderAndCloseSocket()
 	if conn.isClient {
-		conn.connectionManager.ClientLost(conn.ConnectionNumber)
-		conn.connectionManager.RemoveSenderAsync(conn)
+		conn.connectionManager.ClientLost(conn.ConnectionNumber, conn)
 		if conn.submitter != nil {
 			conn.submitter.Shutdown()
 		}
 	}
 	if conn.isServer {
-		conn.connectionManager.ServerLost(conn)
+		conn.connectionManager.ServerLost(conn, conn.remoteRMId, false)
 	}
 }
 
@@ -307,7 +317,6 @@ func (conn *Connection) nextState(requestedState connectionStateMachineComponent
 func (conn *Connection) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Connection to %v (%v, %v)", conn.remoteHost, conn.remoteRMId, conn.remoteBootCount))
 	sc.Emit(fmt.Sprintf("- Current State: %v", conn.currentState))
-	sc.Emit(fmt.Sprintf("- Established? %v", conn.established))
 	sc.Emit(fmt.Sprintf("- IsServer? %v", conn.isServer))
 	sc.Emit(fmt.Sprintf("- IsClient? %v", conn.isClient))
 	if conn.submitter != nil {
@@ -319,6 +328,7 @@ func (conn *Connection) status(sc *server.StatusConsumer) {
 // Delay
 
 type connectionDelay struct {
+	connectionMsgBasic
 	*Connection
 	delay *time.Timer
 }
@@ -333,16 +343,9 @@ func (cd *connectionDelay) init(conn *Connection) {
 func (cd *connectionDelay) start() (bool, error) {
 	cd.maybeStopReaderAndCloseSocket()
 	cd.maybeStopBeater()
-	cd.Lock()
-	cd.established = false
-	cd.privateKey = nil
-	cd.sessionKey = nil
-	cd.nonce = 0
-	cd.nonceAryOut[0] = 0
-	cd.nonceAryIn[0] = 0
 	cd.isServer = false
 	cd.isClient = false
-	cd.Unlock()
+	cd.peerCerts = nil
 	if cd.delay == nil {
 		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
 		cd.delay = time.AfterFunc(delay, func() {
@@ -352,8 +355,6 @@ func (cd *connectionDelay) start() (bool, error) {
 	return false, nil
 }
 
-func (cd *connectionDelay) connectionMsgWitness() {}
-
 func (cd *connectionDelay) received() {
 	if cd.currentState == cd {
 		cd.delay = nil
@@ -361,7 +362,7 @@ func (cd *connectionDelay) received() {
 	}
 }
 
-// Connect
+// Dial
 
 type connectionDial struct {
 	*Connection
@@ -398,15 +399,9 @@ func (cc *connectionDial) start() (bool, error) {
 
 type connectionAwaitHandshake struct {
 	*Connection
-	privateKey  *[32]byte
-	sessionKey  *[32]byte
-	nonce       uint64
-	nonceAryIn  *[24]byte
-	nonceAryOut *[24]byte
-	isServer    bool
-	isClient    bool
-	outBuff     []byte
-	inBuff      []byte
+	isServer bool
+	isClient bool
+	topology *configuration.Topology
 }
 
 func (cah *connectionAwaitHandshake) connectionStateMachineComponentWitness() {}
@@ -414,56 +409,28 @@ func (cah *connectionAwaitHandshake) String() string                          { 
 
 func (cah *connectionAwaitHandshake) init(conn *Connection) {
 	cah.Connection = conn
-	nonceAryIn := [24]byte{}
-	cah.nonceAryIn = &nonceAryIn
-	nonceAryOut := [24]byte{}
-	cah.nonceAryOut = &nonceAryOut
-	cah.inBuff = make([]byte, 16)
 }
 
 func (cah *connectionAwaitHandshake) start() (bool, error) {
-	helloSeg, err := cah.makeHello()
-	if err != nil {
-		return cah.maybeRestartConnection(err)
-	}
+
+	helloSeg := cah.makeHello()
 	if err := cah.send(server.SegToBytes(helloSeg)); err != nil {
 		return cah.maybeRestartConnection(err)
 	}
-	cah.nonce = 0
 
-	if seg, err := capn.ReadFromStream(cah.socket, nil); err == nil {
-		hello := msgs.ReadRootHello(seg)
+	if seg, err := cah.readOne(); err == nil {
+		hello := cmsgs.ReadRootHello(seg)
 		if cah.verifyHello(&hello) {
-			sessionKey := [32]byte{}
-			remotePublicKey := [32]byte{}
-			copy(remotePublicKey[:], hello.PublicKey())
-			box.Precompute(&sessionKey, &remotePublicKey, cah.privateKey)
-
 			if hello.IsClient() {
-				cah.Lock()
 				cah.isClient = true
-				cah.sessionKey = &sessionKey
-				cah.Unlock()
-				cah.nonceAryIn[0] = 128
 				cah.nextState(&cah.connectionAwaitClientHandshake)
 
 			} else {
-				extendedKey := make([]byte, 64)
-				copy(extendedKey[:32], sessionKey[:])
-				copy(extendedKey[32:], cah.connectionManager.passwordHash[:])
-				sessionKey = sha256.Sum256(extendedKey)
-				cah.Lock()
 				cah.isServer = true
-				cah.sessionKey = &sessionKey
-				cah.Unlock()
-				if cah.remoteHost == "" {
-					cah.nonceAryIn[0] = 128
-				} else {
-					cah.nonceAryOut[0] = 128
-				}
 				cah.nextState(&cah.connectionAwaitServerHandshake)
 			}
 			return false, nil
+
 		} else {
 			return cah.maybeRestartConnection(fmt.Errorf("Received erroneous hello from peer"))
 		}
@@ -472,74 +439,25 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 	}
 }
 
-func (cah *connectionAwaitHandshake) makeHello() (*capn.Segment, error) {
+func (cah *connectionAwaitHandshake) makeHello() *capn.Segment {
 	seg := capn.NewBuffer(nil)
-	hello := msgs.NewRootHello(seg)
+	hello := cmsgs.NewRootHello(seg)
 	hello.SetProduct(common.ProductName)
 	hello.SetVersion(common.ProductVersion)
-	publicKey, privateKey, err := box.GenerateKey(cr.Reader)
-	if err != nil {
-		return nil, err
-	}
-	cah.privateKey = privateKey
-	hello.SetPublicKey(publicKey[:])
 	hello.SetIsClient(false)
-	return seg, nil
+	return seg
 }
 
-func (cah *connectionAwaitHandshake) send(msg []byte) (err error) {
-	if cah.sessionKey == nil {
-		_, err = cah.socket.Write(msg)
-	} else {
-		reqLen := len(msg) + secretbox.Overhead + 16
-		if cah.outBuff == nil {
-			cah.outBuff = make([]byte, 16, reqLen)
-		} else if l := len(cah.outBuff); l < reqLen {
-			cah.outBuff = make([]byte, 16, l*(1+(reqLen/l)))
-		} else {
-			cah.outBuff = cah.outBuff[:16]
-		}
-		cah.nonce++
-		binary.BigEndian.PutUint64(cah.outBuff[:8], cah.nonce)
-		binary.BigEndian.PutUint64(cah.nonceAryOut[16:], cah.nonce)
-		secretbox.Seal(cah.outBuff[16:], msg, cah.nonceAryOut, cah.sessionKey)
-		binary.BigEndian.PutUint64(cah.outBuff[8:16], uint64(reqLen-16))
-		_, err = cah.socket.Write(cah.outBuff[:reqLen])
-	}
-	return
+func (cah *connectionAwaitHandshake) send(msg []byte) error {
+	_, err := cah.socket.Write(msg)
+	return err
 }
 
-func (cah *connectionAwaitHandshake) readAndDecryptOne() (*capn.Segment, error) {
-	if cah.sessionKey == nil {
-		return capn.ReadFromStream(cah.socket, nil)
-	}
-	read, err := cah.socket.Read(cah.inBuff)
-	if err != nil {
-		return nil, err
-	} else if read < len(cah.inBuff) {
-		return nil, fmt.Errorf("Only read %v bytes, wanted %v", read, len(cah.inBuff))
-	}
-	copy(cah.nonceAryIn[16:], cah.inBuff[:8])
-	msgLen := binary.BigEndian.Uint64(cah.inBuff[8:16])
-	plainLen := msgLen - secretbox.Overhead
-	msgBuf := make([]byte, plainLen+msgLen)
-	for recvBuf := msgBuf[plainLen:]; len(recvBuf) != 0; {
-		read, err = cah.socket.Read(recvBuf)
-		if err != nil {
-			return nil, err
-		} else {
-			recvBuf = recvBuf[read:]
-		}
-	}
-	plaintext, ok := secretbox.Open(msgBuf[:0], msgBuf[plainLen:], cah.nonceAryIn, cah.sessionKey)
-	if !ok {
-		return nil, fmt.Errorf("Unable to decrypt message")
-	}
-	seg, _, err := capn.ReadFromMemoryZeroCopy(plaintext)
-	return seg, err
+func (cah *connectionAwaitHandshake) readOne() (*capn.Segment, error) {
+	return capn.ReadFromStream(cah.socket, nil)
 }
 
-func (cah *connectionAwaitHandshake) verifyHello(hello *msgs.Hello) bool {
+func (cah *connectionAwaitHandshake) verifyHello(hello *cmsgs.Hello) bool {
 	return hello.Product() == common.ProductName &&
 		hello.Version() == common.ProductVersion
 }
@@ -555,32 +473,24 @@ func (cah *connectionAwaitHandshake) maybeRestartConnection(err error) (bool, er
 	}
 }
 
-func (cah *connectionAwaitServerHandshake) makeHelloFromServer(topology *server.Topology) *capn.Segment {
-	seg := capn.NewBuffer(nil)
-	hello := msgs.NewRootHelloFromServer(seg)
-	localHost := cah.connectionManager.LocalHost()
-	hello.SetLocalHost(localHost)
-	namespace := make([]byte, common.KeyLen-8)
-	binary.BigEndian.PutUint32(namespace[0:4], cah.ConnectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], cah.connectionManager.BootCount)
-	binary.BigEndian.PutUint32(namespace[8:], uint32(cah.connectionManager.RMId))
-	hello.SetNamespace(namespace)
-	if cah.isServer {
-		tieBreak := cah.rng.Uint32()
-		cah.Lock()
-		cah.combinedTieBreak = tieBreak
-		cah.Unlock()
-		hello.SetTieBreak(tieBreak)
-		hello.SetTopologyDBVersion(topology.DBVersion[:])
-		hello.SetTopology(topology.AddToSegAutoRoot(seg))
+func (cah *connectionAwaitHandshake) commonTLSConfig() *tls.Config {
+	nodeCertPrivKeyPair := cah.connectionManager.NodeCertificatePrivateKeyPair
+	roots := x509.NewCertPool()
+	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{
+			tls.Certificate{
+				Certificate: [][]byte{nodeCertPrivKeyPair.Certificate},
+				PrivateKey:  nodeCertPrivKeyPair.PrivateKey,
+			},
+		},
+		CipherSuites:             []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+		MinVersion:               tls.VersionTLS12,
+		PreferServerCipherSuites: true,
+		ClientCAs:                roots,
+		RootCAs:                  roots,
 	}
-	if topology.RootVarUUId != nil {
-		varIdPos := msgs.NewVarIdPos(seg)
-		hello.SetRoot(varIdPos)
-		varIdPos.SetId(topology.RootVarUUId[:])
-		varIdPos.SetPositions((capn.UInt8List)(*topology.RootPositions))
-	}
-	return seg
 }
 
 // Await Server Handshake
@@ -597,24 +507,68 @@ func (cash *connectionAwaitServerHandshake) init(conn *Connection) {
 }
 
 func (cash *connectionAwaitServerHandshake) start() (bool, error) {
-	topology := cash.connectionManager.Topology()
-	helloFromServer := cash.makeHelloFromServer(topology)
+	// TLS seems to require us to pick one end as the client and one
+	// end as the server even though in a server-server connection we
+	// really don't care which is which.
+	config := cash.commonTLSConfig()
+	if cash.remoteHost == "" {
+		// We came from the listener, so we're going to act as the server.
+		config.ClientAuth = tls.RequireAndVerifyClientCert
+		cash.socket = tls.Server(cash.socket, config)
+
+	} else {
+		config.InsecureSkipVerify = true
+		socket := tls.Client(cash.socket, config)
+		cash.socket = socket
+
+		// This is nuts: as a server, we can demand the client cert and
+		// verify that without any concept of a client name. But as the
+		// client, if we don't have a server name, then we have to do
+		// the verification ourself. Why is TLS asymmetric?!
+
+		if err := socket.Handshake(); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
+
+		opts := x509.VerifyOptions{
+			Roots:         config.RootCAs,
+			DNSName:       "", // disable server name checking
+			Intermediates: x509.NewCertPool(),
+		}
+		certs := socket.ConnectionState().PeerCertificates
+		for i, cert := range certs {
+			if i == 0 {
+				continue
+			}
+			opts.Intermediates.AddCert(cert)
+		}
+		if _, err := certs[0].Verify(opts); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
+	}
+
+	helloFromServer := cash.makeHelloServerFromServer(cash.topology)
 	if err := cash.send(server.SegToBytes(helloFromServer)); err != nil {
 		return cash.connectionAwaitHandshake.maybeRestartConnection(err)
 	}
 
-	if seg, err := cash.readAndDecryptOne(); err == nil {
-		hello := msgs.ReadRootHelloFromServer(seg)
-		if verified, remoteTopology := cash.verifyTopology(topology, &hello); verified {
-			cash.Lock()
-			cash.established = true
+	if seg, err := cash.readOne(); err == nil {
+		hello := msgs.ReadRootHelloServerFromServer(seg)
+		if cash.verifyTopology(cash.topology, &hello) {
 			cash.remoteHost = hello.LocalHost()
-			ns := hello.Namespace()
-			cash.remoteBootCount = binary.BigEndian.Uint32(ns[4:8])
-			cash.remoteRMId = common.RMId(binary.BigEndian.Uint32(ns[8:12]))
+			cash.remoteRMId = common.RMId(hello.RmId())
+
+			if _, found := cash.topology.RMsRemoved()[cash.remoteRMId]; found {
+				return false, cash.serverError(
+					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
+			}
+
+			rootId := hello.RootId()
+			if len(rootId) == common.KeyLen {
+				cash.remoteRootId = common.MakeVarUUId(rootId)
+			}
+			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
-			cash.remoteTopology = remoteTopology
-			cash.Unlock()
 			cash.nextState(nil)
 			return false, nil
 		} else {
@@ -625,18 +579,34 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 }
 
-func (cash *connectionAwaitServerHandshake) verifyTopology(topology *server.Topology, remote *msgs.HelloFromServer) (bool, *server.Topology) {
-	remoteTopologyDBVersion := common.MakeTxnId(remote.TopologyDBVersion())
-	remoteTopologyCap := remote.Topology()
-	remoteRoot := remote.Root()
-	remoteTopology := server.TopologyFromCap(remoteTopologyDBVersion, &remoteRoot, &remoteTopologyCap)
-	return topology.Configuration.Equal(remoteTopology.Configuration), remoteTopology
+func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *msgs.HelloServerFromServer) bool {
+	return topology.ClusterId == remote.ClusterId()
+}
+
+func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *configuration.Topology) *capn.Segment {
+	seg := capn.NewBuffer(nil)
+	hello := msgs.NewRootHelloServerFromServer(seg)
+	localHost := cash.connectionManager.LocalHost()
+	hello.SetLocalHost(localHost)
+	hello.SetRmId(uint32(cash.connectionManager.RMId))
+	hello.SetBootCount(cash.connectionManager.BootCount)
+	tieBreak := cash.rng.Uint32()
+	cash.combinedTieBreak = tieBreak
+	hello.SetTieBreak(tieBreak)
+	hello.SetClusterId(topology.ClusterId)
+	if topology.Root.VarUUId == nil {
+		hello.SetRootId([]byte{})
+	} else {
+		hello.SetRootId(topology.Root.VarUUId[:])
+	}
+	return seg
 }
 
 // Await Client Handshake
 
 type connectionAwaitClientHandshake struct {
 	*Connection
+	peerCerts []*x509.Certificate
 }
 
 func (cach *connectionAwaitClientHandshake) connectionStateMachineComponentWitness() {}
@@ -647,44 +617,71 @@ func (cach *connectionAwaitClientHandshake) init(conn *Connection) {
 }
 
 func (cach *connectionAwaitClientHandshake) start() (bool, error) {
-	if seg, err := cach.readAndDecryptOne(); err == nil {
-		hello := msgs.ReadRootHelloFromClient(seg)
-		topology := cach.connectionManager.Topology()
-
-		un := hello.Username()
-		if pw, found := topology.Accounts[un]; !found {
-			return false, fmt.Errorf("Unknown user '%s'", un)
-		} else if err = bcrypt.CompareHashAndPassword([]byte(pw), hello.Password()); err != nil {
-			return false, fmt.Errorf("Incorrect password for '%s': %v", un, err)
-		} else {
-			log.Printf("User '%s' authenticated", un)
-		}
-
-		helloFromServer := cach.makeHelloFromServer(topology)
-		if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
-			return cach.connectionAwaitHandshake.maybeRestartConnection(err)
-		}
-		cach.Lock()
-		cach.established = true
-		cach.remoteHost = cach.socket.RemoteAddr().String()
-		cach.Unlock()
-		cach.nextState(nil)
-		return false, nil
-
-	} else {
-		return cach.connectionAwaitHandshake.maybeRestartConnection(err)
+	config := cach.commonTLSConfig()
+	config.ClientAuth = tls.RequireAnyClientCert
+	socket := tls.Server(cach.socket, config)
+	cach.socket = socket
+	if err := socket.Handshake(); err != nil {
+		return false, err
 	}
+
+	if cach.topology.Root.VarUUId == nil {
+		return false, errors.New("Root not yet known")
+	}
+
+	peerCerts := socket.ConnectionState().PeerCertificates
+	if authenticated, hashsum := cach.verifyPeerCerts(cach.topology, peerCerts); authenticated {
+		cach.peerCerts = peerCerts
+		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
+	} else {
+		return false, errors.New("Client connection rejected: No client certificate known")
+	}
+
+	helloFromServer := cach.makeHelloClientFromServer(cach.topology)
+	if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
+		return false, err
+	}
+	cach.remoteHost = cach.socket.RemoteAddr().String()
+	cach.nextState(nil)
+	return false, nil
+}
+
+func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte) {
+	fingerprints := topology.Fingerprints()
+	for _, cert := range peerCerts {
+		hashsum = sha256.Sum256(cert.Raw)
+		if _, found := fingerprints[hashsum]; found {
+			return true, hashsum
+		}
+	}
+	return false, hashsum
+}
+
+func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
+	seg := capn.NewBuffer(nil)
+	hello := cmsgs.NewRootHelloClientFromServer(seg)
+	namespace := make([]byte, common.KeyLen-8)
+	binary.BigEndian.PutUint32(namespace[0:4], cach.ConnectionNumber)
+	binary.BigEndian.PutUint32(namespace[4:8], cach.connectionManager.BootCount)
+	binary.BigEndian.PutUint32(namespace[8:], uint32(cach.connectionManager.RMId))
+	hello.SetNamespace(namespace)
+	if topology.Root.VarUUId != nil {
+		hello.SetRootId(topology.Root.VarUUId[:])
+	}
+	return seg
 }
 
 // Run
 
 type connectionRun struct {
 	*Connection
-	beater       *connectionBeater
-	reader       *connectionReader
-	mustSendBeat bool
-	missingBeats int
-	beatBytes    []byte
+	beater        *connectionBeater
+	reader        *connectionReader
+	mustSendBeat  bool
+	missingBeats  int
+	beatBytes     []byte
+	restart       bool
+	submitterIdle *connectionMsgTopologyChanged
 }
 
 func (cr *connectionRun) connectionStateMachineComponentWitness() {}
@@ -694,29 +691,42 @@ func (cr *connectionRun) init(conn *Connection) {
 	cr.Connection = conn
 }
 
-func (cr *connectionRun) outcomeReceived(f func(*connectionRun)) {
+func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 	if cr.currentState != cr {
 		return
 	}
-	f(cr)
+	cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
+	if cr.submitterIdle != nil && cr.submitter.IsIdle() {
+		si := cr.submitterIdle
+		cr.submitterIdle = nil
+		server.Log("Connection", cr.Connection, "outcomeReceived", si, "(submitterIdle)")
+		si.Done()
+	}
 }
 
 func (cr *connectionRun) start() (bool, error) {
 	log.Printf("Connection established to %v (%v)\n", cr.remoteHost, cr.remoteRMId)
 
+	cr.restart = true
+
 	seg := capn.NewBuffer(nil)
-	message := msgs.NewRootMessage(seg)
-	message.SetHeartbeat()
+	if cr.isClient {
+		message := cmsgs.NewRootClientMessage(seg)
+		message.SetHeartbeat()
+	} else {
+		message := msgs.NewRootMessage(seg)
+		message.SetHeartbeat()
+	}
 	cr.beatBytes = server.SegToBytes(seg)
 
 	if cr.isServer {
-		cr.connectionManager.ServerEstablished(cr.Connection)
+		cr.connectionManager.ServerEstablished(cr.Connection, cr.remoteHost, cr.remoteRMId, cr.remoteBootCount, cr.combinedTieBreak, cr.remoteRootId)
 	}
 	if cr.isClient {
-		topology, servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
-		cr.connectionManager.AddSender(cr.Connection)
-		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount, topology, cr.connectionManager)
-		cr.submitter.TopologyChange(nil, servers)
+		servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
+		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount, cr.connectionManager)
+		cr.submitter.TopologyChanged(cr.topology)
+		cr.submitter.ServerConnectionsChanged(servers)
 	}
 	cr.mustSendBeat = true
 	cr.missingBeats = 0
@@ -725,26 +735,95 @@ func (cr *connectionRun) start() (bool, error) {
 	go cr.beater.beat()
 
 	cr.reader = newConnectionReader(cr.Connection)
-	go cr.reader.read()
+	if cr.isClient {
+		go cr.reader.readClient()
+	} else {
+		go cr.reader.readServer()
+	}
 
 	return false, nil
 }
 
-func (cr *connectionRun) topologyChange(tChange *connectionMsgTopologyChange) {
-	if cr.currentState != cr || !cr.isClient {
-		return
+func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
+	if si := cr.submitterIdle; si != nil {
+		cr.submitterIdle = nil
+		server.Log("Connection", cr.Connection, "topologyChanged:", tc, "clearing old:", si)
+		si.Done()
 	}
-	cr.submitter.TopologyChange(tChange.topology, tChange.servers)
+	topology := tc.topology
+	cr.topology = topology
+	if cr.currentState != cr {
+		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(not in cr)")
+		tc.Done()
+		return nil
+	}
+	if cr.isClient {
+		if topology != nil {
+			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client unauthed)")
+				tc.Done()
+				return errors.New("Client connection closed: No client certificate known")
+			}
+		}
+		cr.submitter.TopologyChanged(topology)
+		if cr.submitter.IsIdle() {
+			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter is idle)")
+			tc.Done()
+		} else {
+			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter not idle)")
+			cr.submitterIdle = tc
+		}
+	}
+	if cr.isServer {
+		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(isServer)")
+		tc.Done()
+		if topology != nil {
+			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
+				cr.restart = false
+			}
+		}
+	}
+	return nil
 }
 
-func (cr *connectionRun) disableHashCodes(servers map[common.RMId]paxos.Connection) {
-	if cr.currentState != cr || !cr.isClient {
-		return
+func (cr *connectionRun) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) {
+	if cr.submitter != nil {
+		cr.submitter.ServerConnectionsChanged(servers)
 	}
-	cr.submitter.TopologyChange(nil, servers)
 }
 
-func (cr *connectionRun) handleMsgFromPeer(msg *msgs.Message) error {
+func (cr *connectionRun) handleMsgFromClient(msg *cmsgs.ClientMessage) error {
+	if cr.currentState != cr {
+		// probably just draining the queue from the reader after a restart
+		return nil
+	}
+	cr.missingBeats = 0
+	switch which := msg.Which(); which {
+	case cmsgs.CLIENTMESSAGE_HEARTBEAT:
+		// do nothing
+	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
+		ctxn := msg.ClientTxnSubmission()
+		origTxnId := common.MakeTxnId(ctxn.Id())
+		cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) {
+			switch {
+			case err != nil:
+				cr.clientTxnError(&ctxn, err, origTxnId)
+			case clientOutcome == nil: // shutdown
+				return
+			default:
+				seg := capn.NewBuffer(nil)
+				msg := cmsgs.NewRootClientMessage(seg)
+				msg.SetClientTxnOutcome(*clientOutcome)
+				cr.sendMessage(server.SegToBytes(msg.Segment))
+			}
+		})
+	default:
+		return cr.maybeRestartConnection(fmt.Errorf("Unexpected message type received from client: %v", which))
+	}
+	return nil
+}
+
+func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
 	if cr.currentState != cr {
 		// probably just draining the queue from the reader after a restart
 		return nil
@@ -753,32 +832,22 @@ func (cr *connectionRun) handleMsgFromPeer(msg *msgs.Message) error {
 	switch which := msg.Which(); which {
 	case msgs.MESSAGE_HEARTBEAT:
 		// do nothing
-	case msgs.MESSAGE_CLIENTTXNSUBMISSION:
-		ctxn := msg.ClientTxnSubmission()
-		origTxnId := common.MakeTxnId(ctxn.Id())
-		cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *msgs.ClientTxnOutcome, err error) {
-			switch {
-			case err != nil:
-				cr.clientTxnError(&ctxn, err, origTxnId)
-			case clientOutcome == nil: // shutdown
-				return
-			default:
-				seg := capn.NewBuffer(nil)
-				msg := msgs.NewRootMessage(seg)
-				msg.SetClientTxnOutcome(*clientOutcome)
-				cr.sendMessage(server.SegToBytes(msg.Segment))
-			}
-		})
+	case msgs.MESSAGE_CONNECTIONERROR:
+		return fmt.Errorf("Error received from %v: \"%s\"", cr.remoteRMId, msg.ConnectionError())
+	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
+		configCap := msg.TopologyChangeRequest()
+		config := configuration.ConfigurationFromCap(&configCap)
+		cr.connectionManager.RequestConfigurationChange(config)
 	default:
-		cr.connectionManager.Dispatchers.DispatchMessage(cr.remoteRMId, which, msg)
+		cr.connectionManager.DispatchMessage(cr.remoteRMId, which, msg)
 	}
 	return nil
 }
 
-func (cr *connectionRun) clientTxnError(ctxn *msgs.ClientTxn, err error, origTxnId *common.TxnId) error {
+func (cr *connectionRun) clientTxnError(ctxn *cmsgs.ClientTxn, err error, origTxnId *common.TxnId) error {
 	seg := capn.NewBuffer(nil)
-	msg := msgs.NewRootMessage(seg)
-	outcome := msgs.NewClientTxnOutcome(seg)
+	msg := cmsgs.NewRootClientMessage(seg)
+	outcome := cmsgs.NewClientTxnOutcome(seg)
 	msg.SetClientTxnOutcome(outcome)
 	if origTxnId == nil {
 		outcome.SetId(ctxn.Id())
@@ -790,6 +859,14 @@ func (cr *connectionRun) clientTxnError(ctxn *msgs.ClientTxn, err error, origTxn
 	return cr.sendMessage(server.SegToBytes(seg))
 }
 
+func (cr *connectionRun) serverError(err error) error {
+	seg := capn.NewBuffer(nil)
+	msg := msgs.NewRootMessage(seg)
+	msg.SetConnectionError(err.Error())
+	cr.sendMessage(server.SegToBytes(seg))
+	return err
+}
+
 func (cr *connectionRun) maybeRestartConnection(err error) error {
 	switch {
 	case err == nil || cr.currentState != cr:
@@ -797,13 +874,17 @@ func (cr *connectionRun) maybeRestartConnection(err error) error {
 
 	case cr.isServer:
 		log.Printf("Error on server connection to %v: %v", cr.remoteRMId, err)
-		cr.nextState(&cr.connectionDelay)
-		cr.connectionManager.ServerLost(cr.Connection)
-		return nil
+		cr.connectionManager.ServerLost(cr.Connection, cr.remoteRMId, cr.restart)
+		if cr.restart {
+			cr.nextState(&cr.connectionDelay)
+			return nil
+		} else {
+			return err
+		}
 
 	case cr.isClient:
 		log.Printf("Error on client connection to %v: %v", cr.remoteHost, err)
-		cr.connectionManager.ClientLost(cr.ConnectionNumber)
+		cr.connectionManager.ClientLost(cr.ConnectionNumber, cr.Connection)
 		return err
 
 	default:
@@ -861,9 +942,9 @@ func (cr *connectionRun) maybeStopReaderAndCloseSocket() {
 		}
 		cr.reader.terminated.Wait()
 		cr.reader = nil
-		cr.socket = nil
+	}
 
-	} else if cr.socket != nil {
+	if cr.socket != nil {
 		if err := cr.socket.Close(); err != nil {
 			log.Println(err)
 		}
@@ -874,6 +955,7 @@ func (cr *connectionRun) maybeStopReaderAndCloseSocket() {
 // Beater
 
 type connectionBeater struct {
+	connectionMsgBasic
 	*Connection
 	terminate  chan struct{}
 	terminated *sync.WaitGroup
@@ -909,8 +991,6 @@ func (cb *connectionBeater) beat() {
 	}
 }
 
-func (cb *connectionBeater) connectionMsgWitness() {}
-
 // Reader
 
 type connectionReader struct {
@@ -929,20 +1009,33 @@ func newConnectionReader(conn *Connection) *connectionReader {
 	}
 }
 
-func (cr *connectionReader) read() {
+func (cr *connectionReader) readServer() {
+	cr.read(func(seg *capn.Segment) bool {
+		msg := msgs.ReadRootMessage(seg)
+		return cr.enqueueQuery((*connectionReadMessage)(&msg))
+	})
+}
+
+func (cr *connectionReader) readClient() {
+	cr.read(func(seg *capn.Segment) bool {
+		msg := cmsgs.ReadRootClientMessage(seg)
+		return cr.enqueueQuery((*connectionReadClientMessage)(&msg))
+	})
+}
+
+func (cr *connectionReader) read(fun func(*capn.Segment) bool) {
 	defer cr.terminated.Done()
 	for {
 		select {
 		case <-cr.terminate:
 			return
 		default:
-			if seg, err := cr.readAndDecryptOne(); err == nil {
-				msg := msgs.ReadRootMessage(seg)
-				if !cr.enqueueQuery((*connectionReadMessage)(&msg)) {
+			if seg, err := cr.readOne(); err == nil {
+				if !fun(seg) {
 					return
 				}
 			} else {
-				cr.enqueueQuery(&connectionReadError{err})
+				cr.enqueueQuery(connectionReadError{error: err})
 				return
 			}
 		}
@@ -951,10 +1044,13 @@ func (cr *connectionReader) read() {
 
 type connectionReadMessage msgs.Message
 
-func (crm *connectionReadMessage) connectionMsgWitness() {}
+func (crm *connectionReadMessage) witness() connectionMsg { return crm }
+
+type connectionReadClientMessage cmsgs.ClientMessage
+
+func (crcm *connectionReadClientMessage) witness() connectionMsg { return crcm }
 
 type connectionReadError struct {
+	connectionMsgBasic
 	error
 }
-
-func (cre *connectionReadError) connectionMsgWitness() {}
