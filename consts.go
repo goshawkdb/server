@@ -5,7 +5,7 @@ import (
 )
 
 const (
-	ServerVersion                 = "dev"
+	ServerVersion                 = "0.2"
 	MDBInitialSize                = 1048576
 	TwoToTheSixtyThree            = 9223372036854775808
 	SubmissionInitialAttempts     = 5
