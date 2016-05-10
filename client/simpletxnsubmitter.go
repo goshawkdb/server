@@ -88,17 +88,18 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	txnId := common.MakeTxnId(txnCap.Id())
 	server.Log(txnId, "Submitting txn")
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
-	var removeSenderCh chan server.EmptyStruct
+	var removeSenderCh chan chan server.EmptyStruct
 	if delay == 0 {
 		sts.connPub.AddServerConnectionSubscriber(txnSender)
 	} else {
-		removeSenderCh = make(chan server.EmptyStruct)
+		removeSenderCh = make(chan chan server.EmptyStruct)
 		go func() {
 			// fmt.Printf("%v ", delay)
 			time.Sleep(delay)
 			sts.connPub.AddServerConnectionSubscriber(txnSender)
-			<-removeSenderCh
+			doneChan := <-removeSenderCh
 			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
+			close(doneChan)
 		}()
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
@@ -109,7 +110,9 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 		if delay == 0 {
 			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		} else {
-			close(removeSenderCh)
+			txnSenderRemovedChan := make(chan server.EmptyStruct)
+			removeSenderCh <- txnSenderRemovedChan
+			<-txnSenderRemovedChan
 		}
 		// OSS is safe here - see above.
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
