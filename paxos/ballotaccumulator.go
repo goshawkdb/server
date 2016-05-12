@@ -279,9 +279,9 @@ func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
 	case cur.Vote == eng.Commit && new.Vote == eng.Commit:
 		cur.Clock.MergeInMax(new.Clock)
 
-	case cur.Vote == eng.AbortDeadlock && len(cur.Clock.Clock) == 0:
+	case cur.Vote == eng.AbortDeadlock && cur.Clock.Len == 0:
 		// Do nothing - ignore the new ballot
-	case new.Vote == eng.AbortDeadlock && len(new.Clock.Clock) == 0:
+	case new.Vote == eng.AbortDeadlock && new.Clock.Len == 0:
 		// This has been created by abort proposer. This trumps everything.
 		cur.Vote = eng.AbortDeadlock
 		cur.Clock = new.Clock
@@ -298,7 +298,7 @@ func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
 		cur.Clock.MergeInMax(new.Clock)
 
 	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortBadRead &&
-		new.Clock.Clock[*vb.vUUId] < cur.Clock.Clock[*vb.vUUId]:
+		new.Clock.At(vb.vUUId) < cur.Clock.At(vb.vUUId):
 		// The new Deadlock is strictly in the past of the current
 		// BadRead, so we stay on the badread.
 		cur.Clock.MergeInMax(new.Clock)
@@ -313,7 +313,7 @@ func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
 	case cur.Vote == eng.AbortBadRead: // && new.Vote == eng.AbortBadRead
 		cur.Clock.MergeInMax(new.Clock)
 
-	case new.Clock.Clock[*vb.vUUId] > cur.Clock.Clock[*vb.vUUId]:
+	case new.Clock.At(vb.vUUId) > cur.Clock.At(vb.vUUId):
 		// && cur.Vote == AbortDeadlock && new.Vote == AbortBadRead. The
 		// new BadRead is strictly in the future of the cur Deadlock, so
 		// we should switch to the BadRead.
@@ -374,16 +374,16 @@ func (br badReads) combine(rmBal *rmBallot) {
 		vUUId := common.MakeVarUUId(action.VarId())
 
 		if bra, found := br[*vUUId]; found {
-			bra.combine(&action, rmBal, txnId, clock.Clock[*vUUId])
+			bra.combine(&action, rmBal, txnId, clock.At(vUUId))
 		} else if action.Which() == msgs.ACTION_READ {
 			br[*vUUId] = &badReadAction{
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
 				txnId:     common.MakeTxnId(action.Read().Version()),
-				clockElem: clock.Clock[*vUUId] - 1,
+				clockElem: clock.At(vUUId) - 1,
 				action:    &action,
 			}
-			if clock.Clock[*vUUId] == 0 {
+			if clock.At(vUUId) == 0 {
 				panic(fmt.Sprintf("Just did 0 - 1 in int64 (%v, %v) (%v)", vUUId, clock, txnId))
 			}
 		} else {
@@ -391,7 +391,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
 				txnId:     txnId,
-				clockElem: clock.Clock[*vUUId],
+				clockElem: clock.At(vUUId),
 				action:    &action,
 			}
 		}
@@ -518,7 +518,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 				panic(fmt.Sprintf("Unexpected action type (%v) for badread of %v at %v",
 					action.Which(), action.VarId(), txnId))
 			}
-			clock.SetVarIdMax(*bra.vUUId, bra.clockElem)
+			clock.SetVarIdMax(bra.vUUId, bra.clockElem)
 		}
 		update.SetClock(clock.AddToSeg(seg))
 	}
