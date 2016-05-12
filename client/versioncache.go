@@ -57,8 +57,8 @@ func (vc versionCache) UpdateFromAbort(updates *msgs.Update_List) map[*msgs.Upda
 			case msgs.ACTION_MISSING:
 				if c, found := vc[*vUUId]; found {
 					cmp := c.txnId.Compare(txnId)
-					if clockElem > c.clockElem && cmp == common.EQ {
-						panic(fmt.Sprintf("Clock version increased on missing for %v@%v (%v > %v)", vUUId, txnId, clockElem, c.clockElem))
+					if cmp == common.EQ && clockElem != c.clockElem {
+						panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
 					}
 					if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 						delete(vc, *vUUId)
@@ -69,8 +69,8 @@ func (vc versionCache) UpdateFromAbort(updates *msgs.Update_List) map[*msgs.Upda
 			case msgs.ACTION_WRITE:
 				if c, found := vc[*vUUId]; found {
 					cmp := c.txnId.Compare(txnId)
-					if clockElem > c.clockElem && cmp == common.EQ {
-						panic(fmt.Sprintf("Clock version increased on write for %v@%v (%v > %v)", vUUId, txnId, clockElem, c.clockElem))
+					if cmp == common.EQ && clockElem != c.clockElem {
+						panic(fmt.Sprintf("Clock version changed on write for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
 					}
 					if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 						c.txnId = txnId
