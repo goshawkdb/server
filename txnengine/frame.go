@@ -550,7 +550,7 @@ func (fo *frameOpen) calculateReadVoteClock() {
 		})
 		fo.readVoteClock = clock
 		if fo.frameWritesClock.At(fo.v.UUId) == Deleted {
-			panic(fmt.Sprintf("%v no write to self!", fo.frame))
+			panic(fmt.Sprintf("%v no write to self! %v", fo.frame, fo.frameWritesClock))
 		}
 	}
 }
