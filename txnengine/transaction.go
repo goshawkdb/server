@@ -536,6 +536,10 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	switch outcome.Which() {
 	case msgs.OUTCOME_COMMIT:
 		tro.outcomeClock = VectorClockFromCap(outcome.Commit())
+		/*
+			excess := tro.outcomeClock.Len - tro.TxnCap.Actions().Len()
+			fmt.Printf("%v ", excess)
+		*/
 	default:
 		tro.aborted = true
 	}

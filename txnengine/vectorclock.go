@@ -4,7 +4,6 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 )
 
@@ -17,7 +16,6 @@ type VectorClock struct {
 	initial map[common.VarUUId]uint64
 	adds    map[common.VarUUId]uint64
 	changes map[common.VarUUId]uint64
-	deletes map[common.VarUUId]server.EmptyStruct
 	Len     int
 }
 
@@ -42,7 +40,7 @@ func NewVectorClock() *VectorClock {
 }
 
 func (vcA *VectorClock) Clone() *VectorClock {
-	adds, changes, deletes := vcA.adds, vcA.changes, vcA.deletes
+	adds, changes := vcA.adds, vcA.changes
 	if len(adds) > 0 {
 		adds = make(map[common.VarUUId]uint64, len(adds))
 		for k, v := range vcA.adds {
@@ -55,18 +53,11 @@ func (vcA *VectorClock) Clone() *VectorClock {
 			changes[k] = v
 		}
 	}
-	if len(deletes) > 0 {
-		deletes = make(map[common.VarUUId]server.EmptyStruct, len(deletes))
-		for k := range vcA.deletes {
-			deletes[k] = server.EmptyStructVal
-		}
-	}
 	return &VectorClock{
 		cap:     vcA.cap,
 		initial: vcA.initial,
 		adds:    adds,
 		changes: changes,
-		deletes: deletes,
 		Len:     vcA.Len,
 	}
 }
@@ -77,13 +68,19 @@ func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
 			return false
 		}
 	}
+	chCount := len(vc.changes)
 	for k, v := range vc.initial {
-		if ch, found := vc.changes[k]; found {
-			if !it(&k, ch) {
+		if chCount == 0 {
+			if !it(&k, v) {
 				return false
 			}
-		} else if _, found := vc.deletes[k]; found {
-			continue
+		} else if ch, found := vc.changes[k]; found {
+			chCount--
+			if ch != Deleted {
+				if !it(&k, ch) {
+					return false
+				}
+			}
 		} else if !it(&k, v) {
 			return false
 		}
@@ -92,7 +89,7 @@ func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
 }
 
 func (vc *VectorClock) String() string {
-	str := fmt.Sprintf("VC:(%v) initial %v; changes %v; deletes %v; adds %v", vc.Len, vc.initial, vc.changes, vc.deletes, vc.adds)
+	str := fmt.Sprintf("VC:(%v)", vc.Len)
 	vc.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
 		str += fmt.Sprintf(" %v:%v", vUUId, v)
 		return true
@@ -103,34 +100,30 @@ func (vc *VectorClock) String() string {
 func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 	if value, found := vc.adds[*vUUId]; found {
 		return value
-	}
-	if value, found := vc.changes[*vUUId]; found {
+	} else if value, found := vc.changes[*vUUId]; found {
 		return value
-	}
-	if _, found := vc.deletes[*vUUId]; found {
-		return Deleted
-	}
-	if value, found := vc.initial[*vUUId]; found {
+	} else if value, found := vc.initial[*vUUId]; found {
 		return value
 	}
 	return Deleted
 }
 
 func (vc *VectorClock) Delete(vUUId *common.VarUUId) *VectorClock {
-	if _, found := vc.deletes[*vUUId]; found {
-		return vc
-	}
 	if _, found := vc.adds[*vUUId]; found {
 		delete(vc.adds, *vUUId)
 		vc.Len--
 		return vc
-	}
-	if _, found := vc.initial[*vUUId]; found {
-		delete(vc.changes, *vUUId)
-		if vc.deletes == nil {
-			vc.deletes = make(map[common.VarUUId]server.EmptyStruct)
+	} else if ch, found := vc.changes[*vUUId]; found {
+		if ch != Deleted {
+			vc.Len--
+			vc.changes[*vUUId] = Deleted
 		}
-		vc.deletes[*vUUId] = server.EmptyStructVal
+		return vc
+	} else if _, found := vc.initial[*vUUId]; found {
+		if vc.changes == nil {
+			vc.changes = make(map[common.VarUUId]uint64)
+		}
+		vc.changes[*vUUId] = Deleted
 		vc.Len--
 	}
 	return vc
@@ -141,15 +134,12 @@ func (vc *VectorClock) Bump(vUUId *common.VarUUId, inc uint64) *VectorClock {
 		vc.adds[*vUUId] = old + inc
 		return vc
 	} else if old, found := vc.changes[*vUUId]; found {
-		vc.changes[*vUUId] = old + inc
-		return vc
-	} else if _, found := vc.deletes[*vUUId]; found {
-		delete(vc.deletes, *vUUId)
-		vc.Len++
-		if vc.changes == nil {
-			vc.changes = make(map[common.VarUUId]uint64)
+		if old == Deleted {
+			vc.changes[*vUUId] = inc
+			vc.Len++
+		} else {
+			vc.changes[*vUUId] = old + inc
 		}
-		vc.changes[*vUUId] = inc
 		return vc
 	} else if old, found := vc.initial[*vUUId]; found {
 		if vc.changes == nil {
@@ -177,17 +167,12 @@ func (vc *VectorClock) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool {
 	} else if old, found := vc.changes[*vUUId]; found {
 		if v > old {
 			vc.changes[*vUUId] = v
+			if old == Deleted {
+				vc.Len++
+			}
 			return true
 		}
 		return false
-	} else if _, found := vc.deletes[*vUUId]; found {
-		delete(vc.deletes, *vUUId)
-		vc.Len++
-		if vc.changes == nil {
-			vc.changes = make(map[common.VarUUId]uint64)
-		}
-		vc.changes[*vUUId] = v
-		return true
 	} else if old, found := vc.initial[*vUUId]; found {
 		if v > old {
 			if vc.changes == nil {
@@ -220,16 +205,17 @@ func (vcA *VectorClock) MergeInMax(vcB *VectorClock) bool {
 func (vcA *VectorClock) MergeInMissing(vcB *VectorClock) bool {
 	changed := false
 	vcB.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-		if _, found := vcA.deletes[*vUUId]; found {
-			delete(vcA.deletes, *vUUId)
-			vcA.Len++
-			if vcA.changes == nil {
-				vcA.changes = make(map[common.VarUUId]uint64)
+		if _, found := vcA.adds[*vUUId]; found {
+			return true
+		} else if ch, found := vcA.changes[*vUUId]; found {
+			if ch == Deleted {
+				vcA.Len++
+				vcA.changes[*vUUId] = v
+				changed = true
 			}
-			vcA.changes[*vUUId] = v
-			changed = true
-		} else if _, found := vcA.adds[*vUUId]; found {
+			return true
 		} else if _, found := vcA.initial[*vUUId]; found {
+			return true
 		} else {
 			vcA.Len++
 			if vcA.adds == nil {
@@ -237,16 +223,13 @@ func (vcA *VectorClock) MergeInMissing(vcB *VectorClock) bool {
 			}
 			vcA.adds[*vUUId] = v
 			changed = true
+			return true
 		}
-		return true
 	})
 	return changed
 }
 
 func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
-	if _, found := vc.deletes[*vUUId]; found {
-		return false
-	}
 	if old, found := vc.adds[*vUUId]; found {
 		if old <= v {
 			delete(vc.adds, *vUUId)
@@ -254,25 +237,19 @@ func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
 			return true
 		}
 		return false
-	}
-	if old, found := vc.changes[*vUUId]; found {
-		if old <= v {
-			if vc.deletes == nil {
-				vc.deletes = make(map[common.VarUUId]server.EmptyStruct)
-			}
-			vc.deletes[*vUUId] = server.EmptyStructVal
-			delete(vc.changes, *vUUId)
+	} else if old, found := vc.changes[*vUUId]; found {
+		if old != Deleted && old <= v {
+			vc.changes[*vUUId] = Deleted
 			vc.Len--
 			return true
 		}
 		return false
-	}
-	if old, found := vc.initial[*vUUId]; found {
+	} else if old, found := vc.initial[*vUUId]; found {
 		if old <= v {
-			if vc.deletes == nil {
-				vc.deletes = make(map[common.VarUUId]server.EmptyStruct)
+			if vc.changes == nil {
+				vc.changes = make(map[common.VarUUId]uint64)
 			}
-			vc.deletes[*vUUId] = server.EmptyStructVal
+			vc.changes[*vUUId] = Deleted
 			vc.Len--
 			return true
 		}
@@ -312,7 +289,7 @@ func (vc *VectorClock) AddToSeg(seg *capn.Segment) msgs.VectorClock {
 		return vcCap
 	}
 
-	if vc.cap != nil && len(vc.adds) == 0 && len(vc.changes) == 0 && len(vc.deletes) == 0 {
+	if vc.cap != nil && len(vc.adds) == 0 && len(vc.changes) == 0 {
 		return *vc.cap
 	}
 
@@ -334,7 +311,6 @@ func (vc *VectorClock) AddToSeg(seg *capn.Segment) msgs.VectorClock {
 	vc.initial = initial
 	vc.adds = nil
 	vc.changes = nil
-	vc.deletes = nil
 	vc.cap = &vcCap
 
 	return vcCap

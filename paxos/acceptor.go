@@ -405,26 +405,26 @@ func newTwoBTxnVotesSender(outcome *msgs.Outcome, txnId *common.TxnId, submitter
 }
 
 func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]Connection) {
-	if conn, found := conns[s.submitter]; found {
-		conn.Send(s.submitterMsg)
-	}
 	for _, rmId := range s.recipients {
 		if conn, found := conns[rmId]; found {
 			conn.Send(s.msg)
 		}
+	}
+	if conn, found := conns[s.submitter]; found {
+		conn.Send(s.submitterMsg)
 	}
 }
 
 func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
 
 func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
-	if s.submitter == rmId {
-		conn.Send(s.submitterMsg)
-	}
 	for _, recipient := range s.recipients {
 		if recipient == rmId {
 			conn.Send(s.msg)
 			break
 		}
+	}
+	if s.submitter == rmId {
+		conn.Send(s.submitterMsg)
 	}
 }

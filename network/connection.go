@@ -159,8 +159,10 @@ func NewConnectionToDial(host string, cm *ConnectionManager) *Connection {
 }
 
 func NewConnectionFromTCPConn(socket *net.TCPConn, cm *ConnectionManager, count uint32) *Connection {
-	socket.SetKeepAlive(true)
-	socket.SetKeepAlivePeriod(time.Second)
+	if err := common.ConfigureSocket(socket); err != nil {
+		log.Println(err)
+		return nil
+	}
 	conn := &Connection{
 		socket:            socket,
 		connectionManager: cm,
@@ -388,8 +390,11 @@ func (cc *connectionDial) start() (bool, error) {
 		cc.nextState(&cc.connectionDelay)
 		return false, nil
 	}
-	socket.SetKeepAlive(true)
-	socket.SetKeepAlivePeriod(time.Second)
+	if err := common.ConfigureSocket(socket); err != nil {
+		log.Println(err)
+		cc.nextState(&cc.connectionDelay)
+		return false, nil
+	}
 	cc.socket = socket
 	cc.nextState(nil)
 	return false, nil
@@ -449,8 +454,20 @@ func (cah *connectionAwaitHandshake) makeHello() *capn.Segment {
 }
 
 func (cah *connectionAwaitHandshake) send(msg []byte) error {
-	_, err := cah.socket.Write(msg)
-	return err
+	l := len(msg)
+	for l > 0 {
+		w, err := cah.socket.Write(msg)
+		if err != nil {
+			return err
+		}
+		if w == l {
+			return nil
+		} else {
+			msg = msg[w:]
+			l -= w
+		}
+	}
+	return nil
 }
 
 func (cah *connectionAwaitHandshake) readOne() (*capn.Segment, error) {
@@ -515,11 +532,13 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 		// We came from the listener, so we're going to act as the server.
 		config.ClientAuth = tls.RequireAndVerifyClientCert
 		cash.socket = tls.Server(cash.socket, config)
+		cash.socket.SetDeadline(time.Time{})
 
 	} else {
 		config.InsecureSkipVerify = true
 		socket := tls.Client(cash.socket, config)
 		cash.socket = socket
+		socket.SetDeadline(time.Time{})
 
 		// This is nuts: as a server, we can demand the client cert and
 		// verify that without any concept of a client name. But as the
