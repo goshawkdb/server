@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	Deleted uint64 = 0
+	deleted uint64 = 0
 )
 
 type VectorClock struct {
@@ -76,7 +76,7 @@ func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
 			}
 		} else if ch, found := vc.changes[k]; found {
 			chCount--
-			if ch != Deleted {
+			if ch != deleted {
 				if !it(&k, ch) {
 					return false
 				}
@@ -105,7 +105,7 @@ func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 	} else if value, found := vc.initial[*vUUId]; found {
 		return value
 	}
-	return Deleted
+	return deleted
 }
 
 func (vc *VectorClock) Delete(vUUId *common.VarUUId) *VectorClock {
@@ -114,16 +114,16 @@ func (vc *VectorClock) Delete(vUUId *common.VarUUId) *VectorClock {
 		vc.Len--
 		return vc
 	} else if ch, found := vc.changes[*vUUId]; found {
-		if ch != Deleted {
+		if ch != deleted {
 			vc.Len--
-			vc.changes[*vUUId] = Deleted
+			vc.changes[*vUUId] = deleted
 		}
 		return vc
 	} else if _, found := vc.initial[*vUUId]; found {
 		if vc.changes == nil {
 			vc.changes = make(map[common.VarUUId]uint64)
 		}
-		vc.changes[*vUUId] = Deleted
+		vc.changes[*vUUId] = deleted
 		vc.Len--
 	}
 	return vc
@@ -134,7 +134,7 @@ func (vc *VectorClock) Bump(vUUId *common.VarUUId, inc uint64) *VectorClock {
 		vc.adds[*vUUId] = old + inc
 		return vc
 	} else if old, found := vc.changes[*vUUId]; found {
-		if old == Deleted {
+		if old == deleted {
 			vc.changes[*vUUId] = inc
 			vc.Len++
 		} else {
@@ -167,7 +167,7 @@ func (vc *VectorClock) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool {
 	} else if old, found := vc.changes[*vUUId]; found {
 		if v > old {
 			vc.changes[*vUUId] = v
-			if old == Deleted {
+			if old == deleted {
 				vc.Len++
 			}
 			return true
@@ -208,7 +208,7 @@ func (vcA *VectorClock) MergeInMissing(vcB *VectorClock) bool {
 		if _, found := vcA.adds[*vUUId]; found {
 			return true
 		} else if ch, found := vcA.changes[*vUUId]; found {
-			if ch == Deleted {
+			if ch == deleted {
 				vcA.Len++
 				vcA.changes[*vUUId] = v
 				changed = true
@@ -238,8 +238,8 @@ func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
 		}
 		return false
 	} else if old, found := vc.changes[*vUUId]; found {
-		if old != Deleted && old <= v {
-			vc.changes[*vUUId] = Deleted
+		if old != deleted && old <= v {
+			vc.changes[*vUUId] = deleted
 			vc.Len--
 			return true
 		}
@@ -249,7 +249,7 @@ func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
 			if vc.changes == nil {
 				vc.changes = make(map[common.VarUUId]uint64)
 			}
-			vc.changes[*vUUId] = Deleted
+			vc.changes[*vUUId] = deleted
 			vc.Len--
 			return true
 		}

@@ -142,6 +142,8 @@ type frameOpen struct {
 	rwPresent          bool
 	rollScheduled      bool
 	rollActive         bool
+	rollTxn            *cmsgs.ClientTxn
+	rollTxnPos         map[common.VarUUId]*common.Positions
 }
 
 func (fo *frameOpen) init(f *frame) {
@@ -412,7 +414,7 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		// missing some TGCs - essentially we can infer TGCs by
 		// observing the outcome clocks on future txns we learn.
 		fo.readVoteClock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if action.outcomeClock.At(vUUId) == Deleted {
+			if action.outcomeClock.At(vUUId) == 0 {
 				fo.mask.SetVarIdMax(vUUId, v)
 			}
 			return true
@@ -458,7 +460,7 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 			clock = fo.readVoteClock
 		}
 		clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if action.outcomeClock.At(vUUId) == Deleted {
+			if action.outcomeClock.At(vUUId) == 0 {
 				fo.mask.SetVarIdMax(vUUId, v)
 			}
 			return true
@@ -483,7 +485,7 @@ func (fo *frameOpen) isLocked() bool {
 		if fo.frameTxnActions == nil || fo.parent == nil {
 			return false
 		}
-		rvcLen := len(fo.readVoteClock.Clock)
+		rvcLen := fo.readVoteClock.Len
 		actionsLen := fo.frameTxnActions.Len()
 		excess := rvcLen - actionsLen
 		return excess > server.FrameLockMinExcessSize && rvcLen > actionsLen*server.FrameLockMinRatio
@@ -549,7 +551,7 @@ func (fo *frameOpen) calculateReadVoteClock() {
 			return true
 		})
 		fo.readVoteClock = clock
-		if fo.frameWritesClock.At(fo.v.UUId) == Deleted {
+		if fo.frameWritesClock.At(fo.v.UUId) == 0 {
 			panic(fmt.Sprintf("%v no write to self! %v", fo.frame, fo.frameWritesClock))
 		}
 	}
@@ -720,6 +722,9 @@ func (fo *frameOpen) maybeStartRoll() {
 }
 
 func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions) {
+	if fo.rollTxn != nil {
+		return fo.rollTxn, fo.rollTxnPos
+	}
 	var origWrite *msgs.Action
 	vUUIdBytes := fo.v.UUId[:]
 	for idx, l := 0, fo.frameTxnActions.Len(); idx < l; idx++ {
@@ -771,6 +776,8 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 		posMap[*vUUId] = &pos
 		refVarList.Set(idx, vUUId[:])
 	}
+	fo.rollTxn = &ctxn
+	fo.rollTxnPos = posMap
 	return &ctxn, posMap
 }
 
