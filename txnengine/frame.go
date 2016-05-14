@@ -692,9 +692,9 @@ func (fo *frameOpen) maybeStartRoll() {
 	if fo.v.vm.RollAllowed && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
 		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollActive = true
-		ctxn, varPosMap := fo.createRollClientTxn()
 		go func() {
 			server.Log(fo.frame, "Starting roll")
+			ctxn, varPosMap := fo.createRollClientTxn()
 			outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, true)
 			ow := ""
 			if outcome != nil {

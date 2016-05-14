@@ -372,18 +372,19 @@ func (br badReads) combine(rmBal *rmBallot) {
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		vUUId := common.MakeVarUUId(action.VarId())
+		clockElem := clock.At(vUUId)
 
 		if bra, found := br[*vUUId]; found {
-			bra.combine(&action, rmBal, txnId, clock.At(vUUId))
+			bra.combine(&action, rmBal, txnId, clockElem)
 		} else if action.Which() == msgs.ACTION_READ {
 			br[*vUUId] = &badReadAction{
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
 				txnId:     common.MakeTxnId(action.Read().Version()),
-				clockElem: clock.At(vUUId) - 1,
+				clockElem: clockElem - 1,
 				action:    &action,
 			}
-			if clock.At(vUUId) == 0 {
+			if clockElem == 0 {
 				panic(fmt.Sprintf("Just did 0 - 1 in int64 (%v, %v) (%v)", vUUId, clock, txnId))
 			}
 		} else {
@@ -391,7 +392,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
 				txnId:     txnId,
-				clockElem: clock.At(vUUId),
+				clockElem: clockElem,
 				action:    &action,
 			}
 		}
