@@ -53,7 +53,6 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		delay = time.Duration(0)
 	}
 	start := time.Now()
-	retryCount := 0
 
 	var cont TxnCompletionConsumer
 	cont = func(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
@@ -73,7 +72,6 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			cts.addCreatesToCache(outcome)
 			cts.txnLive = false
 			cts.initialDelay = delay >> 1
-			fmt.Printf("¬%v ", retryCount)
 			continuation(&clientOutcome, nil)
 			return
 
@@ -90,19 +88,17 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
 					cts.initialDelay = delay >> 1
-					fmt.Printf("¬%v ", retryCount)
 					continuation(&clientOutcome, nil)
 					return
 				}
 			}
 			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
-			retryCount++
 
 			delay = delay + time.Duration(cts.rng.Intn(int(elapsed)))
 			if delay > server.SubmissionMaxSubmitDelay {
 				delay = server.SubmissionMaxSubmitDelay + time.Duration(cts.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
 			}
-			fmt.Printf("%v|%v ", retryCount, delay)
+			//fmt.Printf("%v ", delay)
 
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
 			curTxnIdNum += 1 + uint64(cts.rng.Intn(8))
@@ -114,7 +110,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	}
 
 	cts.txnLive = true
-	fmt.Printf("%v|%v ", retryCount, delay)
+	// fmt.Printf("%v ", delay)
 	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
 }
 

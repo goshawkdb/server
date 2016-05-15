@@ -456,13 +456,12 @@ func (cah *connectionAwaitHandshake) makeHello() *capn.Segment {
 func (cah *connectionAwaitHandshake) send(msg []byte) error {
 	l := len(msg)
 	for l > 0 {
-		w, err := cah.socket.Write(msg)
-		if err != nil {
+		switch w, err := cah.socket.Write(msg); {
+		case err != nil:
 			return err
-		}
-		if w == l {
+		case w == l:
 			return nil
-		} else {
+		default:
 			msg = msg[w:]
 			l -= w
 		}
@@ -531,14 +530,19 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	if cash.remoteHost == "" {
 		// We came from the listener, so we're going to act as the server.
 		config.ClientAuth = tls.RequireAndVerifyClientCert
-		cash.socket = tls.Server(cash.socket, config)
-		cash.socket.SetDeadline(time.Time{})
+		socket := tls.Server(cash.socket, config)
+		if err := socket.SetDeadline(time.Time{}); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
+		cash.socket = socket
 
 	} else {
 		config.InsecureSkipVerify = true
 		socket := tls.Client(cash.socket, config)
+		if err := socket.SetDeadline(time.Time{}); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
 		cash.socket = socket
-		socket.SetDeadline(time.Time{})
 
 		// This is nuts: as a server, we can demand the client cert and
 		// verify that without any concept of a client name. But as the
