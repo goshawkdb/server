@@ -8,10 +8,9 @@ const (
 	ServerVersion                 = "dev"
 	MDBInitialSize                = 1048576
 	TwoToTheSixtyThree            = 9223372036854775808
-	SubmissionInitialAttempts     = 5
 	SubmissionInitialBackoff      = 2 * time.Microsecond
 	SubmissionMaxSubmitDelay      = 2 * time.Second
-	VarIdleTimeoutMin             = 50 * time.Millisecond
+	VarIdleTimeoutMin             = 500 * time.Millisecond
 	VarIdleTimeoutRange           = 250
 	FrameLockMinExcessSize        = 100
 	FrameLockMinRatio             = 2

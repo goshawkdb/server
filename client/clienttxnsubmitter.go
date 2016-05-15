@@ -18,6 +18,7 @@ type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
 	versionCache versionCache
 	txnLive      bool
+	initialDelay time.Duration
 }
 
 func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
@@ -25,6 +26,7 @@ func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.Connecti
 		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		versionCache:       NewVersionCache(),
 		txnLive:            false,
+		initialDelay:       time.Duration(0),
 	}
 }
 
@@ -46,8 +48,11 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 
 	curTxnId := common.MakeTxnId(ctxnCap.Id())
 
-	delay := time.Duration(0)
-	retryCount := 0
+	delay := cts.initialDelay
+	if delay < time.Millisecond {
+		delay = time.Duration(0)
+	}
+	start := time.Now()
 
 	var cont TxnCompletionConsumer
 	cont = func(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
@@ -56,6 +61,9 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			continuation(nil, err)
 			return
 		}
+		end := time.Now()
+		elapsed := end.Sub(start)
+		start = end
 		switch outcome.Which() {
 		case msgs.OUTCOME_COMMIT:
 			cts.versionCache.UpdateFromCommit(txnId, outcome)
@@ -63,6 +71,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			clientOutcome.SetCommit()
 			cts.addCreatesToCache(outcome)
 			cts.txnLive = false
+			cts.initialDelay = delay >> 1
 			continuation(&clientOutcome, nil)
 			return
 
@@ -78,21 +87,18 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetFinalId(txnId[:])
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
+					cts.initialDelay = delay >> 1
 					continuation(&clientOutcome, nil)
 					return
 				}
 			}
 			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
-			retryCount++
-			switch {
-			case retryCount == server.SubmissionInitialAttempts:
-				delay = server.SubmissionInitialBackoff
-			case retryCount > server.SubmissionInitialAttempts:
-				delay = delay + time.Duration(cts.rng.Intn(int(delay)))
-				if delay > server.SubmissionMaxSubmitDelay {
-					delay = time.Duration(cts.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
-				}
+
+			delay = delay + time.Duration(cts.rng.Intn(int(elapsed)))
+			if delay > server.SubmissionMaxSubmitDelay {
+				delay = server.SubmissionMaxSubmitDelay + time.Duration(cts.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
 			}
+			//fmt.Printf("%v ", delay)
 
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
 			curTxnIdNum += 1 + uint64(cts.rng.Intn(8))
@@ -104,7 +110,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	}
 
 	cts.txnLive = true
-	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, false)
+	// fmt.Printf("%v ", delay)
+	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
 }
 
 func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {

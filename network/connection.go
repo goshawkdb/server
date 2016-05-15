@@ -159,8 +159,10 @@ func NewConnectionToDial(host string, cm *ConnectionManager) *Connection {
 }
 
 func NewConnectionFromTCPConn(socket *net.TCPConn, cm *ConnectionManager, count uint32) *Connection {
-	socket.SetKeepAlive(true)
-	socket.SetKeepAlivePeriod(time.Second)
+	if err := common.ConfigureSocket(socket); err != nil {
+		log.Println(err)
+		return nil
+	}
 	conn := &Connection{
 		socket:            socket,
 		connectionManager: cm,
@@ -388,8 +390,11 @@ func (cc *connectionDial) start() (bool, error) {
 		cc.nextState(&cc.connectionDelay)
 		return false, nil
 	}
-	socket.SetKeepAlive(true)
-	socket.SetKeepAlivePeriod(time.Second)
+	if err := common.ConfigureSocket(socket); err != nil {
+		log.Println(err)
+		cc.nextState(&cc.connectionDelay)
+		return false, nil
+	}
 	cc.socket = socket
 	cc.nextState(nil)
 	return false, nil
@@ -449,8 +454,19 @@ func (cah *connectionAwaitHandshake) makeHello() *capn.Segment {
 }
 
 func (cah *connectionAwaitHandshake) send(msg []byte) error {
-	_, err := cah.socket.Write(msg)
-	return err
+	l := len(msg)
+	for l > 0 {
+		switch w, err := cah.socket.Write(msg); {
+		case err != nil:
+			return err
+		case w == l:
+			return nil
+		default:
+			msg = msg[w:]
+			l -= w
+		}
+	}
+	return nil
 }
 
 func (cah *connectionAwaitHandshake) readOne() (*capn.Segment, error) {
@@ -514,11 +530,18 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	if cash.remoteHost == "" {
 		// We came from the listener, so we're going to act as the server.
 		config.ClientAuth = tls.RequireAndVerifyClientCert
-		cash.socket = tls.Server(cash.socket, config)
+		socket := tls.Server(cash.socket, config)
+		if err := socket.SetDeadline(time.Time{}); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
+		cash.socket = socket
 
 	} else {
 		config.InsecureSkipVerify = true
 		socket := tls.Client(cash.socket, config)
+		if err := socket.SetDeadline(time.Time{}); err != nil {
+			return cash.connectionAwaitHandshake.maybeRestartConnection(err)
+		}
 		cash.socket = socket
 
 		// This is nuts: as a server, we can demand the client cert and

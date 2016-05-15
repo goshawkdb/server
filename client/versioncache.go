@@ -27,11 +27,11 @@ func (vc versionCache) UpdateFromCommit(txnId *common.TxnId, outcome *msgs.Outco
 			vUUId := common.MakeVarUUId(action.VarId())
 			if c, found := vc[*vUUId]; found {
 				c.txnId = txnId
-				c.clockElem = clock.Clock[*vUUId]
+				c.clockElem = clock.At(vUUId)
 			} else {
 				vc[*vUUId] = &cached{
 					txnId:     txnId,
-					clockElem: clock.Clock[*vUUId],
+					clockElem: clock.At(vUUId),
 				}
 			}
 		}
@@ -51,7 +51,7 @@ func (vc versionCache) UpdateFromAbort(updates *msgs.Update_List) map[*msgs.Upda
 		for idy, m := 0, actions.Len(); idy < m; idy++ {
 			action := actions.At(idy)
 			vUUId := common.MakeVarUUId(action.VarId())
-			clockElem := clock.Clock[*vUUId]
+			clockElem := clock.At(vUUId)
 
 			switch action.Which() {
 			case msgs.ACTION_MISSING:

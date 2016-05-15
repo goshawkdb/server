@@ -72,8 +72,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
 	v := newVar(uuid, exe, db, vm)
 
-	clock := NewVectorClock().Bump(*v.UUId, 0)
-	written := NewVectorClock().Bump(*v.UUId, 0)
+	clock := NewVectorClock().Bump(v.UUId, 1)
+	written := NewVectorClock().Bump(v.UUId, 1)
 	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
 
 	seg := capn.NewBuffer(nil)
