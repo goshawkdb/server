@@ -1,7 +1,6 @@
 package network
 
 import (
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -417,7 +416,6 @@ func (cah *connectionAwaitHandshake) init(conn *Connection) {
 }
 
 func (cah *connectionAwaitHandshake) start() (bool, error) {
-
 	helloSeg := cah.makeHello()
 	if err := cah.send(server.SegToBytes(helloSeg)); err != nil {
 		return cah.maybeRestartConnection(err)
@@ -653,7 +651,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	}
 
 	peerCerts := socket.ConnectionState().PeerCertificates
-	if authenticated, hashsum := cach.verifyPeerCerts(cach.topology, peerCerts); authenticated {
+	if authenticated, hashsum := cach.topology.VerifyPeerCerts(peerCerts); authenticated {
 		cach.peerCerts = peerCerts
 		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
 	} else {
@@ -667,17 +665,6 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	cach.remoteHost = cach.socket.RemoteAddr().String()
 	cach.nextState(nil)
 	return false, nil
-}
-
-func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte) {
-	fingerprints := topology.Fingerprints()
-	for _, cert := range peerCerts {
-		hashsum = sha256.Sum256(cert.Raw)
-		if _, found := fingerprints[hashsum]; found {
-			return true, hashsum
-		}
-	}
-	return false, hashsum
 }
 
 func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
@@ -782,7 +769,7 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	}
 	if cr.isClient {
 		if topology != nil {
-			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+			if authenticated, _ := topology.VerifyPeerCerts(cr.peerCerts); !authenticated {
 				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client unauthed)")
 				tc.Done()
 				return errors.New("Client connection closed: No client certificate known")

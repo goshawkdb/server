@@ -2,6 +2,7 @@ package configuration
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -314,6 +315,16 @@ func (config *Configuration) String() string {
 
 func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
 	return config.fingerprints
+}
+
+func (config *Configuration) VerifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte) {
+	for _, cert := range peerCerts {
+		hashsum = sha256.Sum256(cert.Raw)
+		if _, found := config.fingerprints[hashsum]; found {
+			return true, hashsum
+		}
+	}
+	return false, hashsum
 }
 
 func (config *Configuration) NextBarrierReached1(rmId common.RMId) bool {

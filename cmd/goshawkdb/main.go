@@ -13,6 +13,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
+	"goshawkdb.io/server/network/websocket"
 	"goshawkdb.io/server/paxos"
 	"io/ioutil"
 	"log"
@@ -44,7 +45,7 @@ func main() {
 
 func newServer() (*server, error) {
 	var configFile, dataDir, certFile string
-	var port int
+	var port, wssPort int
 	var version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
@@ -54,6 +55,7 @@ func newServer() (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
+	flag.IntVar(&wssPort, "wssPort", 0, "Port to server wss on (default of 0 disables wss")
 	flag.Parse()
 
 	if version {
@@ -109,7 +111,11 @@ func newServer() (*server, error) {
 	}
 
 	if !(0 < port && port < 65536) {
-		return nil, fmt.Errorf("Supplied port is illegal (%v). Port must be > 0 and < 65536", port)
+		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
+	}
+
+	if !(0 <= wssPort && wssPort < 65536 && wssPort != port) {
+		return nil, fmt.Errorf("Supplied wss port is illegal (%d). Port must be >= 0 and < 65536 and not equal to %d", wssPort, port)
 	}
 
 	s := &server{
@@ -117,6 +123,7 @@ func newServer() (*server, error) {
 		certificate:  certificate,
 		dataDir:      dataDir,
 		port:         uint16(port),
+		wssPort:      uint16(wssPort),
 		onShutdown:   []func(){},
 		shutdownChan: make(chan goshawk.EmptyStruct),
 	}
@@ -136,6 +143,7 @@ type server struct {
 	certificate       []byte
 	dataDir           string
 	port              uint16
+	wssPort           uint16
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
@@ -185,6 +193,10 @@ func (s *server) start() {
 	listener, err := network.NewListener(s.port, cm)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
+
+	if s.wssPort != 0 {
+		websocket.StartListener(s.wssPort, cm)
+	}
 
 	defer s.shutdown(nil)
 	<-s.shutdownChan
