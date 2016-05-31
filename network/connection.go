@@ -252,10 +252,10 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 	case connectionReadError:
 		conn.reader = nil
 		err = conn.connectionRun.maybeRestartConnection(msgT.error)
-	case *connectionReadMessage:
-		err = conn.handleMsgFromServer((*msgs.Message)(msgT))
-	case *connectionReadClientMessage:
-		err = conn.handleMsgFromClient((*cmsgs.ClientMessage)(msgT))
+	case connectionReadMessage:
+		err = conn.handleMsgFromServer((msgs.Message)(msgT))
+	case connectionReadClientMessage:
+		err = conn.handleMsgFromClient((cmsgs.ClientMessage)(msgT))
 	case connectionMsgSend:
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
@@ -815,7 +815,7 @@ func (cr *connectionRun) serverConnectionsChanged(servers map[common.RMId]paxos.
 	}
 }
 
-func (cr *connectionRun) handleMsgFromClient(msg *cmsgs.ClientMessage) error {
+func (cr *connectionRun) handleMsgFromClient(msg cmsgs.ClientMessage) error {
 	if cr.currentState != cr {
 		// probably just draining the queue from the reader after a restart
 		return nil
@@ -846,7 +846,7 @@ func (cr *connectionRun) handleMsgFromClient(msg *cmsgs.ClientMessage) error {
 	return nil
 }
 
-func (cr *connectionRun) handleMsgFromServer(msg *msgs.Message) error {
+func (cr *connectionRun) handleMsgFromServer(msg msgs.Message) error {
 	if cr.currentState != cr {
 		// probably just draining the queue from the reader after a restart
 		return nil
@@ -958,19 +958,11 @@ func (cr *connectionRun) maybeStopBeater() {
 func (cr *connectionRun) maybeStopReaderAndCloseSocket() {
 	if cr.reader != nil {
 		close(cr.reader.terminate)
-		if cr.socket != nil {
-			if err := cr.socket.Close(); err != nil {
-				log.Println(err)
-			}
-		}
 		cr.reader.terminated.Wait()
 		cr.reader = nil
 	}
-
 	if cr.socket != nil {
-		if err := cr.socket.Close(); err != nil {
-			log.Println(err)
-		}
+		cr.socket.Close()
 		cr.socket = nil
 	}
 }
@@ -1035,14 +1027,14 @@ func newConnectionReader(conn *Connection) *connectionReader {
 func (cr *connectionReader) readServer() {
 	cr.read(func(seg *capn.Segment) bool {
 		msg := msgs.ReadRootMessage(seg)
-		return cr.enqueueQuery((*connectionReadMessage)(&msg))
+		return cr.enqueueQuery(connectionReadMessage(msg))
 	})
 }
 
 func (cr *connectionReader) readClient() {
 	cr.read(func(seg *capn.Segment) bool {
 		msg := cmsgs.ReadRootClientMessage(seg)
-		return cr.enqueueQuery((*connectionReadClientMessage)(&msg))
+		return cr.enqueueQuery(connectionReadClientMessage(msg))
 	})
 }
 
@@ -1067,11 +1059,11 @@ func (cr *connectionReader) read(fun func(*capn.Segment) bool) {
 
 type connectionReadMessage msgs.Message
 
-func (crm *connectionReadMessage) witness() connectionMsg { return crm }
+func (crm connectionReadMessage) witness() connectionMsg { return crm }
 
 type connectionReadClientMessage cmsgs.ClientMessage
 
-func (crcm *connectionReadClientMessage) witness() connectionMsg { return crcm }
+func (crcm connectionReadClientMessage) witness() connectionMsg { return crcm }
 
 type connectionReadError struct {
 	connectionMsgBasic

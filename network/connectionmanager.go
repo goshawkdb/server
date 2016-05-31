@@ -52,7 +52,7 @@ type topologySubscribers struct {
 	subscribers []map[eng.TopologySubscriber]server.EmptyStruct
 }
 
-func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg *msgs.Message) {
+func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg msgs.Message) {
 	d := cm.Dispatchers
 	switch msgType {
 	case msgs.MESSAGE_TXNSUBMISSION:
@@ -670,7 +670,7 @@ func (cm *ConnectionManager) Send(b []byte) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
 	server.CheckFatal(err)
 	msg := msgs.ReadRootMessage(seg)
-	cm.DispatchMessage(cm.RMId, msg.Which(), &msg)
+	cm.DispatchMessage(cm.RMId, msg.Which(), msg)
 }
 
 // serverConnSubscribers
