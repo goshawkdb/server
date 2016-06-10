@@ -5,6 +5,8 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xbbc717d787db5c5f;
 
+using Common = import "../../common/capnp/capabilities.capnp";
+
 struct Configuration {
   clusterId          @0: Text;
   version            @1: UInt32;
@@ -14,7 +16,7 @@ struct Configuration {
   noSync             @5: Bool;
   rms                @6: List(UInt32);
   rmsRemoved         @7: List(UInt32);
-  fingerprints       @8: List(Data);
+  fingerprints       @8: List(Fingerprint);
   union {
     transitioningTo :group {
       configuration   @9: Configuration;
@@ -29,6 +31,16 @@ struct Configuration {
     }
     stable           @18: Void;
   }
+}
+
+struct Fingerprint {
+  sha256 @0: Data;
+  roots  @1: List(Root);
+}
+
+struct Root {
+  name         @0: Text;
+  capabilities @1: Common.Capabilities;
 }
 
 struct ConditionPair {

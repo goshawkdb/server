@@ -8,11 +8,13 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	commsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 )
 
@@ -23,11 +25,21 @@ type Configuration struct {
 	F                             uint8
 	MaxRMCount                    uint16
 	NoSync                        bool
-	ClientCertificateFingerprints []string
+	ClientCertificateFingerprints map[string]map[string]*RootCapabilities
+	roots                         []string
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
-	fingerprints                  map[[sha256.Size]byte]server.EmptyStruct
+	fingerprints                  map[[sha256.Size]byte]map[string]*common.Capabilities
 	nextConfiguration             *NextConfiguration
+}
+
+type RootCapabilities struct {
+	ValueRead           bool
+	ValueWrite          bool
+	ReferencesReadAll   bool
+	ReferencesReadOnly  []uint32
+	ReferencesWriteAll  bool
+	ReferencesWriteOnly []uint32
 }
 
 type NextConfiguration struct {
@@ -176,20 +188,86 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 	if len(config.ClientCertificateFingerprints) == 0 {
 		return nil, errors.New("No ClientCertificateFingerprints defined")
 	} else {
-		fingerprints := make(map[[sha256.Size]byte]server.EmptyStruct, len(config.ClientCertificateFingerprints))
-		for _, fingerprint := range config.ClientCertificateFingerprints {
+		rootsMap := make(map[string]uint32)
+		rootsName := []string{}
+		fingerprints := make(map[[sha256.Size]byte]map[string]*common.Capabilities, len(config.ClientCertificateFingerprints))
+		for fingerprint, rootsCapabilities := range config.ClientCertificateFingerprints {
 			fingerprintBytes, err := hex.DecodeString(fingerprint)
 			if err != nil {
 				return nil, err
 			} else if l := len(fingerprintBytes); l != sha256.Size {
 				return nil, fmt.Errorf("Invalid fingerprint: expected %v bytes, and found %v", sha256.Size, l)
 			}
+			if len(rootsCapabilities) == 0 {
+				return nil, fmt.Errorf("No roots configured for client fingerprint %v; at least 1 needed", fingerprint)
+			}
+			roots := make(map[string]*common.Capabilities, len(rootsCapabilities))
+			for name, rootCapabilities := range rootsCapabilities {
+				if _, found := rootsMap[name]; !found {
+					rootsMap[name] = 0
+					rootsName = append(rootsName, name)
+				}
+				SortUInt32(rootCapabilities.ReferencesReadOnly).Sort()
+				SortUInt32(rootCapabilities.ReferencesWriteOnly).Sort()
+				if rootCapabilities.ReferencesReadAll && len(rootCapabilities.ReferencesReadOnly) != 0 {
+					return nil, fmt.Errorf("ReferencesReadAll and ReferencesReadOnly must be mutually exclusive for client fingerprint %v, root %s", fingerprint, name)
+				}
+				if rootCapabilities.ReferencesWriteAll && len(rootCapabilities.ReferencesWriteOnly) != 0 {
+					return nil, fmt.Errorf("ReferencesWriteAll and ReferencesWriteOnly must be mutually exclusive for client fingerprint %v, root %s", fingerprint, name)
+				}
+				old := uint32(0)
+				for idx, index := range rootCapabilities.ReferencesReadOnly {
+					if index == old && idx > 0 {
+						return nil, fmt.Errorf("Client fingerprint %v, root %s: Duplicate read only reference index %v",
+							fingerprint, name, index)
+					}
+					old = index
+				}
+				old = uint32(0)
+				for idx, index := range rootCapabilities.ReferencesWriteOnly {
+					if index == old && idx > 0 {
+						return nil, fmt.Errorf("Client fingerprint %v, root %s: Duplicate write only reference index %v",
+							fingerprint, name, index)
+					}
+					old = index
+				}
+				if !rootCapabilities.ValueRead && !rootCapabilities.ValueWrite &&
+					!rootCapabilities.ReferencesReadAll && !rootCapabilities.ReferencesWriteAll &&
+					len(rootCapabilities.ReferencesReadOnly) == 0 && len(rootCapabilities.ReferencesWriteOnly) == 0 {
+					return nil, fmt.Errorf("Client fingerprint %v, root %s: no capabilities have been granted.",
+						fingerprint, name)
+				}
+				cap := &common.Capabilities{}
+				switch {
+				case rootCapabilities.ValueRead && rootCapabilities.ValueWrite:
+					cap.Value = common.ReadWrite
+				case rootCapabilities.ValueRead:
+					cap.Value = common.Read
+				case rootCapabilities.ValueWrite:
+					cap.Value = common.Write
+				default:
+					cap.Value = common.None
+				}
+				if rootCapabilities.ReferencesReadAll {
+					cap.References.Read.All = true
+				} else {
+					cap.References.Read.Only = rootCapabilities.ReferencesReadOnly
+				}
+				if rootCapabilities.ReferencesWriteAll {
+					cap.References.Write.All = true
+				} else {
+					cap.References.Write.Only = rootCapabilities.ReferencesWriteOnly
+				}
+				roots[name] = cap
+			}
 			ary := [sha256.Size]byte{}
 			copy(ary[:], fingerprintBytes)
-			fingerprints[ary] = server.EmptyStructVal
+			fingerprints[ary] = roots
 		}
 		config.fingerprints = fingerprints
 		config.ClientCertificateFingerprints = nil
+		sort.Strings(rootsName)
+		config.roots = rootsName
 	}
 	return &config, err
 }
@@ -217,11 +295,41 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	}
 
 	fingerprints := config.Fingerprints()
-	fingerprintsMap := make(map[[sha256.Size]byte]server.EmptyStruct, fingerprints.Len())
+	fingerprintsMap := make(map[[sha256.Size]byte]map[string]*common.Capabilities, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
+		fingerprint := fingerprints.At(idx)
 		ary := [sha256.Size]byte{}
-		copy(ary[:], fingerprints.At(idx))
-		fingerprintsMap[ary] = server.EmptyStructVal
+		copy(ary[:], fingerprint.Sha256())
+		rootsCap := fingerprint.Roots()
+		roots := make(map[string]*common.Capabilities, rootsCap.Len())
+		for idy, m := 0, rootsCap.Len(); idy < m; idy++ {
+			rootCap := rootsCap.At(idy)
+			capsCap := rootCap.Capabilities()
+			cap := &common.Capabilities{}
+			switch capsCap.Value() {
+			case commsgs.VALUECAPABILITY_READ:
+				cap.Value = common.Read
+			case commsgs.VALUECAPABILITY_WRITE:
+				cap.Value = common.Write
+			case commsgs.VALUECAPABILITY_READWRITE:
+				cap.Value = common.ReadWrite
+			default:
+				cap.Value = common.None
+			}
+			refsCap := capsCap.References()
+			if refsReadCap := refsCap.Read(); refsReadCap.Which() == commsgs.CAPABILITIESREFERENCESREAD_ALL {
+				cap.References.Read.All = true
+			} else {
+				cap.References.Read.Only = refsReadCap.Only().ToArray()
+			}
+			if refsWriteCap := refsCap.Write(); refsWriteCap.Which() == commsgs.CAPABILITIESREFERENCESWRITE_ALL {
+				cap.References.Write.All = true
+			} else {
+				cap.References.Write.Only = refsWriteCap.Only().ToArray()
+			}
+			roots[rootCap.Name()] = cap
+		}
+		fingerprintsMap[ary] = roots
 	}
 	c.fingerprints = fingerprintsMap
 
@@ -299,20 +407,26 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			return false
 		}
 	}
-	for fingerprint := range b.fingerprints {
-		if _, found := a.fingerprints[fingerprint]; !found {
+	for fingerprint, aRoots := range a.fingerprints {
+		if bRoots, found := b.fingerprints[fingerprint]; !found || len(aRoots) != len(bRoots) {
 			return false
+		} else {
+			for name, aRootCaps := range aRoots {
+				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
+					return false
+				}
+			}
 		}
 	}
 	return a.nextConfiguration.Equal(b.nextConfiguration)
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v}",
-		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved)
+	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, ClientCertificates: %v}",
+		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.fingerprints)
 }
 
-func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
+func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*common.Capabilities {
 	return config.fingerprints
 }
 
@@ -370,15 +484,17 @@ func (config *Configuration) Clone() *Configuration {
 		F:          config.F,
 		MaxRMCount: config.MaxRMCount,
 		NoSync:     config.NoSync,
-		ClientCertificateFingerprints: make([]string, len(config.ClientCertificateFingerprints)),
+		ClientCertificateFingerprints: make(map[string]map[string]*RootCapabilities, len(config.ClientCertificateFingerprints)),
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
-		fingerprints:      make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
+		fingerprints:      make(map[[sha256.Size]byte]map[string]*common.Capabilities, len(config.fingerprints)),
 		nextConfiguration: config.nextConfiguration.Clone(),
 	}
 
 	copy(clone.Hosts, config.Hosts)
-	copy(clone.ClientCertificateFingerprints, config.ClientCertificateFingerprints)
+	for k, v := range config.ClientCertificateFingerprints {
+		clone.ClientCertificateFingerprints[k] = v
+	}
 	copy(clone.rms, config.rms)
 	for k, v := range config.rmsRemoved {
 		clone.rmsRemoved[k] = v
@@ -419,13 +535,56 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 	}
 
 	fingerprintsMap := config.fingerprints
-	fingerprints := seg.NewDataList(len(fingerprintsMap))
-	cap.SetFingerprints(fingerprints)
+	fingerprintsCap := msgs.NewFingerprintList(seg, len(fingerprintsMap))
 	idx = 0
-	for fingerprint := range fingerprintsMap {
-		fingerprints.Set(idx, fingerprint[:])
+	for fingerprint, roots := range fingerprintsMap {
+		fingerprintCap := msgs.NewFingerprint(seg)
+		fingerprintCap.SetSha256(fingerprint[:])
+		rootsCap := msgs.NewRootList(seg, len(roots))
+		idy := 0
+		for name, capabilities := range roots {
+			rootCap := msgs.NewRoot(seg)
+			rootCap.SetName(name)
+			capsCap := commsgs.NewCapabilities(seg)
+			switch capabilities.Value {
+			case common.Read:
+				capsCap.SetValue(commsgs.VALUECAPABILITY_READ)
+			case common.Write:
+				capsCap.SetValue(commsgs.VALUECAPABILITY_WRITE)
+			case common.ReadWrite:
+				capsCap.SetValue(commsgs.VALUECAPABILITY_READWRITE)
+			default:
+				capsCap.SetValue(commsgs.VALUECAPABILITY_NONE)
+			}
+			readRefsCap := capsCap.References().Read()
+			if capabilities.References.Read.All {
+				readRefsCap.SetAll()
+			} else {
+				onlyList := seg.NewUInt32List(len(capabilities.References.Read.Only))
+				for idz, index := range capabilities.References.Read.Only {
+					onlyList.Set(idz, index)
+				}
+				readRefsCap.SetOnly(onlyList)
+			}
+			writeRefsCap := capsCap.References().Write()
+			if capabilities.References.Write.All {
+				writeRefsCap.SetAll()
+			} else {
+				onlyList := seg.NewUInt32List(len(capabilities.References.Write.Only))
+				for idz, index := range capabilities.References.Write.Only {
+					onlyList.Set(idz, index)
+				}
+				writeRefsCap.SetOnly(onlyList)
+			}
+			rootCap.SetCapabilities(capsCap)
+			rootsCap.Set(idy, rootCap)
+			idy++
+		}
+		fingerprintCap.SetRoots(rootsCap)
+		fingerprintsCap.Set(idx, fingerprintCap)
 		idx++
 	}
+	cap.SetFingerprints(fingerprintsCap)
 
 	if config.nextConfiguration == nil {
 		cap.SetStable()
@@ -820,3 +979,10 @@ func (g *Generator) AddToSeg(seg *capn.Segment) msgs.Condition {
 	condCap.SetGenerator(genCap)
 	return condCap
 }
+
+type SortUInt32 []uint32
+
+func (nums SortUInt32) Sort()              { sort.Sort(nums) }
+func (nums SortUInt32) Len() int           { return len(nums) }
+func (nums SortUInt32) Less(i, j int) bool { return nums[i] < nums[j] }
+func (nums SortUInt32) Swap(i, j int)      { nums[i], nums[j] = nums[j], nums[i] }

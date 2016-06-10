@@ -6,6 +6,7 @@ $Go.import("goshawkdb.io/server/capnp");
 @0xc3ce226b914ee1eb;
 
 using VC = import "vectorclock.capnp";
+using Common = import "../../common/capnp/capabilities.capnp";
 
 struct Var {
   id              @0: Data;
@@ -16,6 +17,7 @@ struct Var {
 }
 
 struct VarIdPos {
-  id        @0: Data;
-  positions @1: List(UInt8);
+  id           @0: Data;
+  positions    @1: List(UInt8);
+  capabilities @2: Common.Capabilities;
 }

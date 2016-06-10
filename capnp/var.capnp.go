@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	C "github.com/glycerine/go-capnproto"
+	"goshawkdb.io/common/capnp"
 	"io"
 )
 
@@ -288,14 +289,18 @@ func (s Var_List) Set(i int, item Var) { C.PointerList(s).Set(i, C.Object(item))
 
 type VarIdPos C.Struct
 
-func NewVarIdPos(s *C.Segment) VarIdPos       { return VarIdPos(s.NewStruct(0, 2)) }
-func NewRootVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewRootStruct(0, 2)) }
-func AutoNewVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewStructAR(0, 2)) }
+func NewVarIdPos(s *C.Segment) VarIdPos       { return VarIdPos(s.NewStruct(0, 3)) }
+func NewRootVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewRootStruct(0, 3)) }
+func AutoNewVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewStructAR(0, 3)) }
 func ReadRootVarIdPos(s *C.Segment) VarIdPos  { return VarIdPos(s.Root(0).ToStruct()) }
 func (s VarIdPos) Id() []byte                 { return C.Struct(s).GetObject(0).ToData() }
 func (s VarIdPos) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s VarIdPos) Positions() C.UInt8List     { return C.UInt8List(C.Struct(s).GetObject(1)) }
 func (s VarIdPos) SetPositions(v C.UInt8List) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s VarIdPos) Capabilities() capnp.Capabilities {
+	return capnp.Capabilities(C.Struct(s).GetObject(2).ToStruct())
+}
+func (s VarIdPos) SetCapabilities(v capnp.Capabilities) { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s VarIdPos) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -353,6 +358,21 @@ func (s VarIdPos) WriteJSON(w io.Writer) error {
 			}
 			err = b.WriteByte(']')
 		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"capabilities\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Capabilities()
+		err = s.WriteJSON(b)
 		if err != nil {
 			return err
 		}
@@ -430,6 +450,21 @@ func (s VarIdPos) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("capabilities = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Capabilities()
+		err = s.WriteCapLit(b)
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -446,7 +481,7 @@ func (s VarIdPos) MarshalCapLit() ([]byte, error) {
 type VarIdPos_List C.PointerList
 
 func NewVarIdPosList(s *C.Segment, sz int) VarIdPos_List {
-	return VarIdPos_List(s.NewCompositeList(0, 2, sz))
+	return VarIdPos_List(s.NewCompositeList(0, 3, sz))
 }
 func (s VarIdPos_List) Len() int          { return C.PointerList(s).Len() }
 func (s VarIdPos_List) At(i int) VarIdPos { return VarIdPos(C.PointerList(s).At(i).ToStruct()) }

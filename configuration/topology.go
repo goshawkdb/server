@@ -34,7 +34,7 @@ func BlankTopology(clusterId string) *Topology {
 			F:          0,
 			MaxRMCount: 0,
 			NoSync:     false,
-			ClientCertificateFingerprints: []string{},
+			ClientCertificateFingerprints: nil,
 			rms:               []common.RMId{},
 			fingerprints:      nil,
 			nextConfiguration: nil,
