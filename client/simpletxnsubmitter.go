@@ -166,6 +166,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 }
 
 func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {
+	server.Log("STS Topology Changed", topology)
 	if topology == nil || topology.RMs().NonEmptyLen() < int(topology.TwoFInc) {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.

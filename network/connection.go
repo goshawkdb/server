@@ -75,8 +75,12 @@ type connectionMsgTopologyChanged struct {
 	resultChan chan struct{}
 }
 
-func (cmtc *connectionMsgTopologyChanged) Done() {
-	close(cmtc.resultChan)
+func (cmtc *connectionMsgTopologyChanged) maybeClose() {
+	select {
+	case <-cmtc.resultChan:
+	default:
+		close(cmtc.resultChan)
+	}
 }
 
 type connectionMsgStatus struct {
@@ -744,7 +748,7 @@ func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 		si := cr.submitterIdle
 		cr.submitterIdle = nil
 		server.Log("Connection", cr.Connection, "outcomeReceived", si, "(submitterIdle)")
-		si.Done()
+		si.maybeClose()
 	}
 }
 
@@ -792,39 +796,39 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	if si := cr.submitterIdle; si != nil {
 		cr.submitterIdle = nil
 		server.Log("Connection", cr.Connection, "topologyChanged:", tc, "clearing old:", si)
-		si.Done()
+		si.maybeClose()
 	}
 	topology := tc.topology
 	cr.topology = topology
 	if cr.currentState != cr {
 		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(not in cr)")
-		tc.Done()
+		tc.maybeClose()
 		return nil
 	}
 	if cr.isClient {
 		if topology != nil {
 			if authenticated, _, roots := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
 				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client unauthed)")
-				tc.Done()
+				tc.maybeClose()
 				return errors.New("Client connection closed: No client certificate known")
 			} else if len(roots) == len(cr.roots) {
 				for name, capabilitiesOld := range cr.roots {
 					if capabilitiesNew, found := roots[name]; !found || !capabilitiesNew.Equal(capabilitiesOld) {
 						server.Log("Connection", cr.Connection, "topologyChanged", tc, "(roots changed)")
-						tc.Done()
+						tc.maybeClose()
 						return errors.New("Client connection closed: roots have changed")
 					}
 				}
 			} else {
 				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(roots changed)")
-				tc.Done()
+				tc.maybeClose()
 				return errors.New("Client connection closed: roots have changed")
 			}
 		}
 		cr.submitter.TopologyChanged(topology)
 		if cr.submitter.IsIdle() {
 			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter is idle)")
-			tc.Done()
+			tc.maybeClose()
 		} else {
 			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter not idle)")
 			cr.submitterIdle = tc
@@ -832,7 +836,7 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	}
 	if cr.isServer {
 		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(isServer)")
-		tc.Done()
+		tc.maybeClose()
 		if topology != nil {
 			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
 				cr.restart = false
