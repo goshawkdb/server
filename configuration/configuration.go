@@ -12,10 +12,12 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
+	"math/rand"
 	"net"
 	"os"
 	"sort"
 	"strconv"
+	"time"
 )
 
 type Configuration struct {
@@ -26,6 +28,7 @@ type Configuration struct {
 	MaxRMCount                    uint16
 	NoSync                        bool
 	ClientCertificateFingerprints map[string]map[string]*RootCapabilities
+	clusterUUId                   uint64
 	roots                         []string
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
@@ -274,12 +277,13 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 
 func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	c := &Configuration{
-		ClusterId:  config.ClusterId(),
-		Version:    config.Version(),
-		Hosts:      config.Hosts().ToArray(),
-		F:          config.F(),
-		MaxRMCount: config.MaxRMCount(),
-		NoSync:     config.NoSync(),
+		ClusterId:   config.ClusterId(),
+		clusterUUId: config.ClusterUUId(),
+		Version:     config.Version(),
+		Hosts:       config.Hosts().ToArray(),
+		F:           config.F(),
+		MaxRMCount:  config.MaxRMCount(),
+		NoSync:      config.NoSync(),
 	}
 
 	rms := config.Rms()
@@ -389,7 +393,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
+	if !(a.ClusterId == b.ClusterId && a.clusterUUId == b.clusterUUId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
 		return false
 	}
 	for idx, aHost := range a.Hosts {
@@ -422,12 +426,31 @@ func (a *Configuration) Equal(b *Configuration) bool {
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, ClientCertificates: %v}",
-		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.fingerprints)
+	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, ClientCertificates: %v}",
+		config.ClusterId, config.clusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.fingerprints)
+}
+
+func (config *Configuration) ClusterUUId() uint64 {
+	return config.clusterUUId
+}
+
+func (config *Configuration) SetClusterUUId() {
+	if config.clusterUUId == 0 {
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		r := uint64(rng.Int63())
+		for r == 0 {
+			r = uint64(rng.Int63())
+		}
+		config.clusterUUId = r
+	}
 }
 
 func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*common.Capabilities {
 	return config.fingerprints
+}
+
+func (config *Configuration) RootNames() []string {
+	return config.roots
 }
 
 func (config *Configuration) NextBarrierReached1(rmId common.RMId) bool {
@@ -478,12 +501,13 @@ func (config *Configuration) SetRMsRemoved(removed map[common.RMId]server.EmptyS
 
 func (config *Configuration) Clone() *Configuration {
 	clone := &Configuration{
-		ClusterId:  config.ClusterId,
-		Version:    config.Version,
-		Hosts:      make([]string, len(config.Hosts)),
-		F:          config.F,
-		MaxRMCount: config.MaxRMCount,
-		NoSync:     config.NoSync,
+		ClusterId:   config.ClusterId,
+		clusterUUId: config.clusterUUId,
+		Version:     config.Version,
+		Hosts:       make([]string, len(config.Hosts)),
+		F:           config.F,
+		MaxRMCount:  config.MaxRMCount,
+		NoSync:      config.NoSync,
 		ClientCertificateFingerprints: make(map[string]map[string]*RootCapabilities, len(config.ClientCertificateFingerprints)),
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
@@ -508,6 +532,7 @@ func (config *Configuration) Clone() *Configuration {
 func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configuration {
 	cap := msgs.AutoNewConfiguration(seg)
 	cap.SetClusterId(config.ClusterId)
+	cap.SetClusterUUId(config.clusterUUId)
 	cap.SetVersion(config.Version)
 
 	hosts := seg.NewTextList(len(config.Hosts))
@@ -545,38 +570,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		for name, capabilities := range roots {
 			rootCap := msgs.NewRoot(seg)
 			rootCap.SetName(name)
-			capsCap := commsgs.NewCapabilities(seg)
-			switch capabilities.Value {
-			case common.Read:
-				capsCap.SetValue(commsgs.VALUECAPABILITY_READ)
-			case common.Write:
-				capsCap.SetValue(commsgs.VALUECAPABILITY_WRITE)
-			case common.ReadWrite:
-				capsCap.SetValue(commsgs.VALUECAPABILITY_READWRITE)
-			default:
-				capsCap.SetValue(commsgs.VALUECAPABILITY_NONE)
-			}
-			readRefsCap := capsCap.References().Read()
-			if capabilities.References.Read.All {
-				readRefsCap.SetAll()
-			} else {
-				onlyList := seg.NewUInt32List(len(capabilities.References.Read.Only))
-				for idz, index := range capabilities.References.Read.Only {
-					onlyList.Set(idz, index)
-				}
-				readRefsCap.SetOnly(onlyList)
-			}
-			writeRefsCap := capsCap.References().Write()
-			if capabilities.References.Write.All {
-				writeRefsCap.SetAll()
-			} else {
-				onlyList := seg.NewUInt32List(len(capabilities.References.Write.Only))
-				for idz, index := range capabilities.References.Write.Only {
-					onlyList.Set(idz, index)
-				}
-				writeRefsCap.SetOnly(onlyList)
-			}
-			rootCap.SetCapabilities(capsCap)
+			rootCap.SetCapabilities(capabilities.AddToSeg(seg))
 			rootsCap.Set(idy, rootCap)
 			idy++
 		}

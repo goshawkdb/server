@@ -134,7 +134,7 @@ type connectionManagerMsgServerEstablished struct {
 	rmId        common.RMId
 	bootCount   uint32
 	tieBreak    uint32
-	rootId      *common.VarUUId
+	clusterUUId uint64
 }
 
 type connectionManagerMsgServerLost struct {
@@ -207,7 +207,7 @@ func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []s
 	})
 }
 
-func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, rootId *common.VarUUId) {
+func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, clusterUUId uint64) {
 	cm.enqueueQuery(&connectionManagerMsgServerEstablished{
 		Connection:  conn,
 		send:        conn.Send,
@@ -216,7 +216,7 @@ func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rm
 		rmId:        rmId,
 		bootCount:   bootCount,
 		tieBreak:    tieBreak,
-		rootId:      rootId,
+		clusterUUId: clusterUUId,
 	})
 }
 
@@ -598,11 +598,11 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callb
 	cm.topology = topology
 	cm.topologySubscribers.TopologyChanged(topology, callbacks)
 	cd := cm.rmToServer[cm.RMId]
-	if topology.Root.VarUUId.Compare(cd.rootId) != common.EQ {
+	if clusterUUId := topology.ClusterUUId(); cd.clusterUUId == 0 && clusterUUId != 0 {
 		delete(cm.rmToServer, cd.rmId)
 		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cd = cd.clone()
-		cd.rootId = topology.Root.VarUUId
+		cd.clusterUUId = clusterUUId
 		cm.rmToServer[cm.RMId] = cd
 		cm.servers[cd.host] = cd
 		cm.serverConnSubscribers.ServerConnEstablished(cd)
@@ -758,8 +758,8 @@ func (cd *connectionManagerMsgServerEstablished) TieBreak() uint32 {
 	return cd.tieBreak
 }
 
-func (cd *connectionManagerMsgServerEstablished) RootId() *common.VarUUId {
-	return cd.rootId
+func (cd *connectionManagerMsgServerEstablished) ClusterUUId() uint64 {
+	return cd.clusterUUId
 }
 
 func (cd *connectionManagerMsgServerEstablished) Send(msg []byte) {
@@ -781,6 +781,6 @@ func (cd *connectionManagerMsgServerEstablished) clone() *connectionManagerMsgSe
 		rmId:        cd.rmId,
 		bootCount:   cd.bootCount,
 		tieBreak:    cd.tieBreak,
-		rootId:      cd.rootId,
+		clusterUUId: cd.clusterUUId,
 	}
 }

@@ -20,24 +20,26 @@ const (
 	CONFIGURATION_STABLE          Configuration_Which = 1
 )
 
-func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(16, 13)) }
-func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(16, 13)) }
-func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(16, 13)) }
+func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(24, 13)) }
+func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(24, 13)) }
+func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(24, 13)) }
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
-func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(8)) }
+func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(16)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
 func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
 func (s Configuration) SetClusterId(v string)          { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
-func (s Configuration) Version() uint32                { return C.Struct(s).Get32(0) }
-func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(0, v) }
+func (s Configuration) ClusterUUId() uint64            { return C.Struct(s).Get64(0) }
+func (s Configuration) SetClusterUUId(v uint64)        { C.Struct(s).Set64(0, v) }
+func (s Configuration) Version() uint32                { return C.Struct(s).Get32(8) }
+func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(8, v) }
 func (s Configuration) Hosts() C.TextList              { return C.TextList(C.Struct(s).GetObject(1)) }
 func (s Configuration) SetHosts(v C.TextList)          { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Configuration) F() uint8                       { return C.Struct(s).Get8(4) }
-func (s Configuration) SetF(v uint8)                   { C.Struct(s).Set8(4, v) }
-func (s Configuration) MaxRMCount() uint16             { return C.Struct(s).Get16(6) }
-func (s Configuration) SetMaxRMCount(v uint16)         { C.Struct(s).Set16(6, v) }
-func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(40) }
-func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(40, v) }
+func (s Configuration) F() uint8                       { return C.Struct(s).Get8(12) }
+func (s Configuration) SetF(v uint8)                   { C.Struct(s).Set8(12, v) }
+func (s Configuration) MaxRMCount() uint16             { return C.Struct(s).Get16(14) }
+func (s Configuration) SetMaxRMCount(v uint16)         { C.Struct(s).Set16(14, v) }
+func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(104) }
+func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(104, v) }
 func (s Configuration) Rms() C.UInt32List              { return C.UInt32List(C.Struct(s).GetObject(2)) }
 func (s Configuration) SetRms(v C.UInt32List)          { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s Configuration) RmsRemoved() C.UInt32List       { return C.UInt32List(C.Struct(s).GetObject(3)) }
@@ -49,7 +51,7 @@ func (s Configuration) SetFingerprints(v Fingerprint_List) { C.Struct(s).SetObje
 func (s Configuration) TransitioningTo() ConfigurationTransitioningTo {
 	return ConfigurationTransitioningTo(s)
 }
-func (s Configuration) SetTransitioningTo() { C.Struct(s).Set16(8, 0) }
+func (s Configuration) SetTransitioningTo() { C.Struct(s).Set16(16, 0) }
 func (s ConfigurationTransitioningTo) Configuration() Configuration {
 	return Configuration(C.Struct(s).GetObject(5).ToStruct())
 }
@@ -78,8 +80,8 @@ func (s ConfigurationTransitioningTo) LostRMIds() C.UInt32List {
 func (s ConfigurationTransitioningTo) SetLostRMIds(v C.UInt32List) {
 	C.Struct(s).SetObject(9, C.Object(v))
 }
-func (s ConfigurationTransitioningTo) InstalledOnNew() bool     { return C.Struct(s).Get1(41) }
-func (s ConfigurationTransitioningTo) SetInstalledOnNew(v bool) { C.Struct(s).Set1(41, v) }
+func (s ConfigurationTransitioningTo) InstalledOnNew() bool     { return C.Struct(s).Get1(105) }
+func (s ConfigurationTransitioningTo) SetInstalledOnNew(v bool) { C.Struct(s).Set1(105, v) }
 func (s ConfigurationTransitioningTo) BarrierReached1() C.UInt32List {
 	return C.UInt32List(C.Struct(s).GetObject(10))
 }
@@ -98,7 +100,7 @@ func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
 func (s ConfigurationTransitioningTo) SetPending(v ConditionPair_List) {
 	C.Struct(s).SetObject(12, C.Object(v))
 }
-func (s Configuration) SetStable() { C.Struct(s).Set16(8, 1) }
+func (s Configuration) SetStable() { C.Struct(s).Set16(16, 1) }
 func (s Configuration) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -114,6 +116,25 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.ClusterId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"clusterUUId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ClusterUUId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -696,6 +717,25 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	_, err = b.WriteString("clusterUUId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ClusterUUId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
 	_, err = b.WriteString("version = ")
 	if err != nil {
 		return err
@@ -1241,7 +1281,7 @@ func (s Configuration) MarshalCapLit() ([]byte, error) {
 type Configuration_List C.PointerList
 
 func NewConfigurationList(s *C.Segment, sz int) Configuration_List {
-	return Configuration_List(s.NewCompositeList(16, 13, sz))
+	return Configuration_List(s.NewCompositeList(24, 13, sz))
 }
 func (s Configuration_List) Len() int { return C.PointerList(s).Len() }
 func (s Configuration_List) At(i int) Configuration {

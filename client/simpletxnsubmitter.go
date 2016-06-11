@@ -174,8 +174,10 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 	sts.topology = topology
 	sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
 	sts.hashCache.SetResolver(sts.resolver)
-	if topology.Root.VarUUId != nil {
-		sts.hashCache.AddPosition(topology.Root.VarUUId, topology.Root.Positions)
+	if topology.Roots != nil {
+		for _, root := range topology.Roots {
+			sts.hashCache.AddPosition(root.VarUUId, root.Positions)
+		}
 	}
 	sts.calculateDisabledHashcodes()
 }

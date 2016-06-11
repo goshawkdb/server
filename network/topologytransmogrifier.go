@@ -178,12 +178,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 		v.AddWriteSubscriber(configuration.VersionOne,
 			&eng.VarWriteSubscriber{
 				Observe: func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-					var rootVarPosPtr *msgs.VarIdPos
-					if refs.Len() > 0 {
-						root := refs.At(0)
-						rootVarPosPtr = &root
-					}
-					topology, err := configuration.TopologyFromCap(txn.Id, rootVarPosPtr, value)
+					topology, err := configuration.TopologyFromCap(txn.Id, refs, value)
 					if err != nil {
 						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 					}
@@ -546,7 +541,7 @@ func (task *targetConfig) tick() error {
 		log.Println("Topology: Ensuring local topology.")
 		task.task = &ensureLocalTopology{task}
 
-	case task.active.Version == 0:
+	case task.active.ClusterUUId() == 0:
 		log.Printf("Topology: Attempting to join cluster with configuration: %v", task.config)
 		task.task = &joinCluster{targetConfig: task}
 
@@ -643,13 +638,13 @@ func (task *targetConfig) partitionByActiveConnection(rmIdLists ...common.RMIds)
 	return active, passive
 }
 
-func (task *targetConfig) verifyRoots(rootId *common.VarUUId, remoteHosts []string) (bool, error) {
+func (task *targetConfig) verifyClusterUUIds(clusterUUId uint64, remoteHosts []string) (bool, error) {
 	for _, host := range remoteHosts {
 		if cd, found := task.hostToConnection[host]; found {
-			switch remoteRootId := cd.RootId(); {
-			case remoteRootId == nil:
+			switch remoteClusterUUId := cd.ClusterUUId(); {
+			case remoteClusterUUId == 0:
 				// they're joining
-			case rootId.Compare(remoteRootId) == common.EQ:
+			case clusterUUId == remoteClusterUUId:
 				// all good
 			default:
 				return false, errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting topology change.")
@@ -752,7 +747,7 @@ type joinCluster struct {
 }
 
 func (task *joinCluster) tick() error {
-	if task.active.Version != 0 {
+	if task.active.ClusterUUId() != 0 {
 		return task.completed()
 	}
 
@@ -778,7 +773,7 @@ func (task *joinCluster) tick() error {
 	task.shareGoalWithAll()
 
 	rmIds := make([]common.RMId, 0, len(task.config.Hosts))
-	var rootId *common.VarUUId
+	clusterUUId := uint64(0)
 	for _, host := range task.config.Hosts {
 		cd, found := task.hostToConnection[host]
 		if !found {
@@ -787,12 +782,12 @@ func (task *joinCluster) tick() error {
 			return nil
 		}
 		rmIds = append(rmIds, cd.RMId())
-		switch theirRootId := cd.RootId(); {
-		case theirRootId == nil:
+		switch theirClusterUUId := cd.ClusterUUId(); {
+		case theirClusterUUId == 0:
 			// they're joining too
-		case rootId == nil:
-			rootId = theirRootId
-		case rootId.Compare(theirRootId) == common.EQ:
+		case clusterUUId == 0:
+			clusterUUId = theirClusterUUId
+		case clusterUUId == theirClusterUUId:
 			// all good
 		default:
 			return task.fatal(
@@ -800,7 +795,7 @@ func (task *joinCluster) tick() error {
 		}
 	}
 
-	if allJoining := rootId == nil; allJoining {
+	if allJoining := clusterUUId == 0; allJoining {
 		// Note that the order of RMIds here matches the order of hosts.
 		return task.allJoining(rmIds)
 
@@ -818,6 +813,7 @@ func (task *joinCluster) tick() error {
 func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	targetTopology := configuration.NewTopology(task.active.DBVersion, nil, task.config.Configuration)
 	targetTopology.SetRMs(allRMIds)
+	targetTopology.SetClusterUUId()
 
 	// NB: activeWithNext never gets installed to the DB itself.
 	activeWithNext := task.active.Clone()
@@ -831,14 +827,14 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// txn's topology version is acceptable to our proposers.
 	task.installTopology(activeWithNext, nil)
 
-	switch resubmit, err := task.attemptCreateRoot(targetTopology); {
+	switch resubmit, err := task.attemptCreateRoots(targetTopology); {
 	case err != nil:
 		return task.fatal(err)
 	case resubmit:
 		server.Log("Topology: Root creation needs resubmit")
 		task.enqueueTick(task)
 		return nil
-	case targetTopology.Root.VarUUId == nil:
+	case targetTopology.Roots == nil:
 		// We failed; likely we need to wait for connections to change
 		server.Log("Topology: Root creation failed")
 		return nil
@@ -852,10 +848,10 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 	// sure that all peers are empty and moving to the same topology
 	// is to have all peers as active.
 
-	// If we got this far then attemptCreateRoot will have modified
+	// If we got this far then attemptCreateRoots will have modified
 	// targetTopology to include the updated root. We should install
 	// this to the connectionManager.
-	activeWithNext.Root = targetTopology.Root
+	activeWithNext.Roots = targetTopology.Roots
 	task.installTopology(activeWithNext, nil)
 
 	result, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
@@ -974,7 +970,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// the -1 is because allRemoteHosts will not include localHost
 	hostsAddedList := allRemoteHosts[len(hostsOld)-1:]
-	allAddedFound, err := task.verifyRoots(task.active.Root.VarUUId, hostsAddedList)
+	allAddedFound, err := task.verifyClusterUUIds(task.active.ClusterUUId(), hostsAddedList)
 	if err != nil {
 		return nil, task.error(err)
 	} else if !allAddedFound {
@@ -1603,11 +1599,14 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 		rw := action.Readwrite()
 		rw.SetVersion(read.DBVersion[:])
 		rw.SetValue(write.Serialize())
-		refs := msgs.NewVarIdPosList(seg, 1)
+		roots := write.Roots
+		refs := msgs.NewVarIdPosList(seg, len(roots))
+		for idx, root := range roots {
+			varIdPos := refs.At(idx)
+			varIdPos.SetId(root.VarUUId[:])
+			varIdPos.SetPositions((capn.UInt8List)(*root.Positions))
+		}
 		rw.SetReferences(refs)
-		varIdPos := refs.At(0)
-		varIdPos.SetId(write.Root.VarUUId[:])
-		varIdPos.SetPositions((capn.UInt8List)(*write.Root.Positions))
 	}
 
 	allocs := msgs.NewAllocationList(seg, len(active)+len(passive))
@@ -1686,12 +1685,8 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave non-write action")
 		}
 		write := updateAction.Write()
-		var rootPtr *msgs.VarIdPos
-		if refs := write.References(); refs.Len() == 1 {
-			root := refs.At(0)
-			rootPtr = &root
-		}
-		return configuration.TopologyFromCap(dbversion, rootPtr, write.Value())
+		refs := write.References()
+		return configuration.TopologyFromCap(dbversion, &refs, write.Value())
 	}
 }
 
@@ -1760,23 +1755,15 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, a
 			fmt.Errorf("Internal error: update action from readwrite of topology gave non-write action!")
 	}
 	writeAction := updateAction.Write()
-	var rootVarPos *msgs.VarIdPos
-	if refs := writeAction.References(); refs.Len() == 1 {
-		root := refs.At(0)
-		rootVarPos = &root
-	} else if refs.Len() > 1 {
-		return nil, false,
-			fmt.Errorf("Internal error: update action from readwrite of topology has %v references instead of 1!",
-				refs.Len())
-	}
-	topology, err := configuration.TopologyFromCap(dbversion, rootVarPos, writeAction.Value())
+	refs := writeAction.References()
+	topology, err := configuration.TopologyFromCap(dbversion, &refs, writeAction.Value())
 	if err != nil {
 		return nil, false, err
 	}
 	return topology, false, nil
 }
 
-func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (bool, error) {
+func (task *targetConfig) attemptCreateRoots(topology *configuration.Topology) (bool, error) {
 	twoFInc, fInc, f := int(topology.TwoFInc), int(topology.FInc), int(topology.F)
 	active := make([]common.RMId, fInc)
 	passive := make([]common.RMId, f)
@@ -1791,26 +1778,34 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 	nonEmpties = nonEmpties[fInc:]
 	copy(passive, nonEmpties[:f])
 
-	server.Log("Topology: Creating Root. Actives:", active, "; Passives:", passive)
+	server.Log("Topology: Creating Roots. Actives:", active, "; Passives:", passive)
 
 	seg := capn.NewBuffer(nil)
 	txn := msgs.NewTxn(seg)
 	txn.SetSubmitter(uint32(task.connectionManager.RMId))
 	txn.SetSubmitterBootCount(task.connectionManager.BootCount)
-	actions := msgs.NewActionList(seg, 1)
-	txn.SetActions(actions)
-	action := actions.At(0)
-	vUUId := task.localConnection.NextVarUUId()
-	action.SetVarId(vUUId[:])
-	action.SetCreate()
-	create := action.Create()
-	positions := seg.NewUInt8List(int(topology.MaxRMCount))
-	create.SetPositions(positions)
-	for idx, l := 0, positions.Len(); idx < l; idx++ {
-		positions.Set(idx, uint8(idx))
+	rootNames := topology.RootNames()
+	rootNamesLen := len(rootNames)
+	roots := make([]configuration.Root, rootNamesLen)
+	actions := msgs.NewActionList(seg, rootNamesLen)
+	for idx := range rootNames {
+		action := actions.At(idx)
+		vUUId := task.localConnection.NextVarUUId()
+		action.SetVarId(vUUId[:])
+		action.SetCreate()
+		create := action.Create()
+		positions := seg.NewUInt8List(int(topology.MaxRMCount))
+		for idy, l := 0, positions.Len(); idy < l; idy++ {
+			positions.Set(idy, uint8(idy))
+		}
+		create.SetPositions(positions)
+		create.SetValue([]byte{})
+		create.SetReferences(msgs.NewVarIdPosList(seg, 0))
+		root := &roots[idx]
+		root.VarUUId = vUUId
+		root.Positions = (*common.Positions)(&positions)
 	}
-	create.SetValue([]byte{})
-	create.SetReferences(msgs.NewVarIdPosList(seg, 0))
+	txn.SetActions(actions)
 	allocs := msgs.NewAllocationList(seg, twoFInc)
 	txn.SetAllocations(allocs)
 	offset := 0
@@ -1823,9 +1818,11 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 			} else {
 				alloc.SetActive(0)
 			}
-			indices := seg.NewUInt16List(1)
+			indices := seg.NewUInt16List(rootNamesLen)
 			alloc.SetActionIndices(indices)
-			indices.Set(0, 0)
+			for idy := range rootNames {
+				indices.Set(idy, uint16(idy))
+			}
 		}
 		offset += len(rmIds)
 	}
@@ -1839,9 +1836,8 @@ func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (b
 		return false, nil
 	}
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		server.Log("Topology: Root created in", vUUId)
-		topology.Root.VarUUId = vUUId
-		topology.Root.Positions = (*common.Positions)(&positions)
+		server.Log("Topology: Roots created in", roots)
+		topology.Roots = roots
 		return false, nil
 	}
 	abort := result.Abort()
