@@ -67,11 +67,11 @@ func NewTopology(txnId *common.TxnId, rootsCap *msgs.VarIdPos_List, config *Conf
 		DBVersion:     txnId,
 	}
 	if rootsCap != nil {
-		t.Roots = make([]Root, len(config.RootNames()))
-		if rootsCap.Len() != len(t.Roots) {
-			panic(fmt.Sprintf("NewTopology expected to find %v roots by reference, but actually found %v",
-				len(t.Roots), rootsCap.Len()))
+		if rootsCap.Len() < len(config.RootNames()) {
+			panic(fmt.Sprintf("NewTopology expected to find at least %v roots by reference, but actually found %v",
+				len(config.RootNames()), rootsCap.Len()))
 		}
+		t.Roots = make([]Root, rootsCap.Len())
 		for idx := range t.Roots {
 			rootCap := rootsCap.At(idx)
 			positions := rootCap.Positions()
