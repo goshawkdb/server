@@ -666,6 +666,8 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 
 	if cach.topology.ClusterUUId() == 0 {
 		return false, errors.New("Cluster not yet formed")
+	} else if len(cach.topology.RootNames()) == 0 {
+		return false, errors.New("No roots: cluster not yet formed")
 	}
 
 	peerCerts := socket.ConnectionState().PeerCertificates

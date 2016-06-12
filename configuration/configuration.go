@@ -431,14 +431,18 @@ func (config *Configuration) ClusterUUId() uint64 {
 	return config.clusterUUId
 }
 
-func (config *Configuration) SetClusterUUId() {
+func (config *Configuration) SetClusterUUId(uuid uint64) {
 	if config.clusterUUId == 0 {
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		r := uint64(rng.Int63())
-		for r == 0 {
-			r = uint64(rng.Int63())
+		if uuid == 0 {
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			r := uint64(rng.Int63())
+			for r == 0 {
+				r = uint64(rng.Int63())
+			}
+			config.clusterUUId = r
+		} else {
+			config.clusterUUId = uuid
 		}
-		config.clusterUUId = r
 	}
 }
 

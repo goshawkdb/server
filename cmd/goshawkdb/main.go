@@ -158,9 +158,6 @@ func (s *server) start() {
 
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
-	if commandLineConfig == nil {
-		commandLineConfig = configuration.BlankTopology("").Configuration
-	}
 
 	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
 	for idx := range s.certificate {

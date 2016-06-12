@@ -266,7 +266,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	server.Log("Topology: setActive:", topology)
 	if tt.active != nil {
 		switch {
-		case tt.active.ClusterId != topology.ClusterId:
+		case tt.active.ClusterId != topology.ClusterId && tt.active.ClusterId != "":
 			return fmt.Errorf("Topology: Fatal: config with ClusterId change from '%s' to '%s'.",
 				tt.active.ClusterId, topology.ClusterId)
 
@@ -352,13 +352,19 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
 	if tt.active != nil {
+		activeClusterUUId, goalClusterUUId := tt.active.ClusterUUId(), goal.ClusterUUId()
 		switch {
 		case goal.Version == 0:
 			return // done.
 
-		case goal.ClusterId != tt.active.ClusterId:
+		case goal.ClusterId != tt.active.ClusterId && tt.active.ClusterId != "":
 			log.Printf("Topology: Illegal config: ClusterId should be '%s' instead of '%s'.",
 				tt.active.ClusterId, goal.ClusterId)
+			return
+
+		case goalClusterUUId != 0 && activeClusterUUId != 0 && goalClusterUUId != activeClusterUUId:
+			log.Printf("Topology: Illegal config: ClusterUUId should be '%v' instead of '%v'.",
+				activeClusterUUId, goalClusterUUId)
 			return
 
 		case goal.MaxRMCount != tt.active.MaxRMCount && tt.active.Version != 0:
@@ -374,6 +380,7 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
 			return
 		}
+		goal.SetClusterUUId(activeClusterUUId)
 	}
 
 	if tt.task != nil {
@@ -543,7 +550,7 @@ func (task *targetConfig) tick() error {
 		log.Println("Topology: Ensuring local topology.")
 		task.task = &ensureLocalTopology{task}
 
-	case task.active.Next() != nil && task.active.Next().ClusterUUId() == 0:
+	case task.active.ClusterId == "":
 		log.Printf("Topology: Attempting to join cluster with configuration: %v", task.config)
 		task.task = &joinCluster{targetConfig: task}
 
@@ -698,7 +705,7 @@ type ensureLocalTopology struct {
 
 func (task *ensureLocalTopology) tick() error {
 	if task.active != nil {
-		// the fact we're here means we're done - there is a topology
+		// The fact we're here means we're done - there is a topology
 		// discovered one way or another.
 		if err := task.completed(); err != nil {
 			return err
@@ -706,13 +713,6 @@ func (task *ensureLocalTopology) tick() error {
 		// However, just because we have a local config doesn't mean it
 		// actually satisfies the goal. Essentially, we're pretending
 		// that the goal is in Next().
-		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.ConnectionManagerSubscriber: func() error {
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			}})
 		task.selectGoal(task.config)
 		return nil
 	}
@@ -726,7 +726,7 @@ func (task *ensureLocalTopology) tick() error {
 		return task.fatal(err)
 	}
 
-	if topology == nil && task.config.ClusterId == "" {
+	if topology == nil && (task.config == nil || task.config.Configuration == nil || task.config.ClusterId == "") {
 		return task.fatal(errors.New("No configuration supplied and no configuration found in local store. Cannot continue."))
 
 	} else if topology == nil {
@@ -749,10 +749,13 @@ type joinCluster struct {
 }
 
 func (task *joinCluster) tick() error {
-	if !(task.active.Next() != nil && task.active.Next().ClusterUUId() == 0) {
+	if !(task.active.ClusterId == "") {
 		if err := task.completed(); err != nil {
 			return err
 		}
+		// Exactly the same logic as in ensureLocalTopology: the active
+		// probably doesn't have a Next set; even if it does, it may
+		// have no relationship to task.config.
 		task.selectGoal(task.config)
 		return nil
 	}
@@ -764,8 +767,12 @@ func (task *joinCluster) tick() error {
 		return task.fatal(err)
 	}
 
-	// must install to connectionManager before launching any connections
-	task.installTopology(task.active, nil)
+	// Set up the ClusterId so that we can actually create some connections.
+	active := task.active.Clone()
+	active.ClusterId = task.config.ClusterId
+
+	// Must install to connectionManager before launching any connections
+	task.installTopology(active, nil)
 	// we may not have the youngest topology and there could be other
 	// hosts who have connected to us who are trying to send us a more
 	// up to date topology. So we shouldn't kill off those connections.
@@ -817,13 +824,19 @@ func (task *joinCluster) tick() error {
 }
 
 func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
-	// NB: activeWithHosts never gets installed to the DB itself.
-	activeWithRMIds := task.active.Clone()
-	activeWithRMIds.Hosts = task.config.Hosts
-	activeWithRMIds.SetRMs(allRMIds)
-	activeWithRMIds.SetNext(nil)
+	// NB: active never gets installed to the DB itself.
+	config := task.config
+	config1 := configuration.BlankTopology().Configuration
+	config1.ClusterId = config.ClusterId
+	config1.Hosts = config.Hosts
+	config1.F = config.F
+	config1.MaxRMCount = config.MaxRMCount
+	config1.SetRMs(allRMIds)
 
-	return task.setActive(activeWithRMIds)
+	active := task.active.Clone()
+	active.SetConfiguration(config1)
+
+	return task.setActive(active)
 }
 
 // installTargetOld
@@ -870,7 +883,17 @@ func (task *installTargetOld) tick() error {
 
 	log.Printf("Topology: Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
 
-	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
+	resubmit, roots, err := task.attemptCreateRoots(3)
+	if err != nil {
+		return task.fatal(err)
+	}
+	if resubmit {
+		task.enqueueTick(task)
+		return nil
+	}
+	targetTopology.Roots = roots
+
+	_, resubmit, err = task.rewriteTopology(task.active, targetTopology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
@@ -1019,7 +1042,6 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	next := task.config.Configuration.Clone()
 	next.SetRMs(rmIdsNew)
 	next.Hosts = hostsNew
-	next.SetClusterUUId()
 
 	// Pointer semantics, so we need to copy into our new set
 	removed := make(map[common.RMId]server.EmptyStruct)
@@ -1648,7 +1670,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 }
 
 func (task *targetConfig) createTopologyZero(config *configuration.NextConfiguration) (*configuration.Topology, error) {
-	topology := configuration.BlankTopology(config.ClusterId)
+	topology := configuration.BlankTopology()
 	topology.SetNext(config)
 	txn := task.createTopologyTransaction(nil, topology, []common.RMId{task.connectionManager.RMId}, nil)
 	txnId := topology.DBVersion

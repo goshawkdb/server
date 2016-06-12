@@ -38,15 +38,16 @@ type Root struct {
 	Positions *common.Positions
 }
 
-func BlankTopology(clusterId string) *Topology {
+func BlankTopology() *Topology {
 	return &Topology{
 		Configuration: &Configuration{
-			ClusterId:  clusterId,
-			Version:    0,
-			Hosts:      []string{},
-			F:          0,
-			MaxRMCount: 0,
-			NoSync:     false,
+			ClusterId:   "",
+			clusterUUId: 0,
+			Version:     0,
+			Hosts:       []string{},
+			F:           0,
+			MaxRMCount:  0,
+			NoSync:      false,
 			ClientCertificateFingerprints: nil,
 			rms:               []common.RMId{},
 			fingerprints:      nil,
@@ -119,5 +120,5 @@ func (t *Topology) String() string {
 }
 
 func (t *Topology) IsBlank() bool {
-	return t == nil || t.Version == 0
+	return t == nil || t.MaxRMCount == 0 || t.RMs().NonEmptyLen() < int(t.TwoFInc)
 }

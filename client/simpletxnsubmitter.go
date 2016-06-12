@@ -167,7 +167,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 
 func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {
 	server.Log("STS Topology Changed", topology)
-	if topology == nil || topology.RMs().NonEmptyLen() < int(topology.TwoFInc) {
+	if topology.IsBlank() {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.
 		return
@@ -184,6 +184,7 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 }
 
 func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) {
+	server.Log("STS ServerConnectionsChanged", servers)
 	sts.connections = servers
 	sts.calculateDisabledHashcodes()
 }
@@ -200,10 +201,10 @@ func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() {
 			sts.disabledHashCodes[rmId] = server.EmptyStructVal
 		}
 	}
-	server.Log("TM disabled hash codes", sts.disabledHashCodes)
+	server.Log("STS disabled hash codes", sts.disabledHashCodes)
 	// need to wait until we've updated disabledHashCodes before
 	// starting up any buffered txns.
-	if sts.topology != nil && !sts.topology.IsBlank() && sts.bufferedSubmissions != nil {
+	if !sts.topology.IsBlank() && sts.bufferedSubmissions != nil {
 		funcs := sts.bufferedSubmissions
 		sts.bufferedSubmissions = nil
 		for _, fun := range funcs {
