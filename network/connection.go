@@ -645,7 +645,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 type connectionAwaitClientHandshake struct {
 	*Connection
 	peerCerts []*x509.Certificate
-	roots     map[string]*common.Capabilities
+	roots     map[string]*cmsgs.Capabilities
 }
 
 func (cach *connectionAwaitClientHandshake) connectionStateMachineComponentWitness() {}
@@ -685,7 +685,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	}
 }
 
-func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capabilities) {
+func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*cmsgs.Capabilities) {
 	fingerprints := topology.Fingerprints()
 	for _, cert := range peerCerts {
 		hashsum = sha256.Sum256(cert.Raw)
@@ -696,7 +696,7 @@ func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configurat
 	return false, hashsum, nil
 }
 
-func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology, roots map[string]*common.Capabilities) *capn.Segment {
+func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology, roots map[string]*cmsgs.Capabilities) *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
@@ -712,7 +712,7 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *
 			idy++
 			rootCap.SetName(name)
 			rootCap.SetVarId(topology.Roots[idx].VarUUId[:])
-			rootCap.SetCapabilities(capabilities.AddToSeg(seg))
+			rootCap.SetCapabilities(*capabilities)
 		}
 	}
 	hello.SetRoots(rootsCap)
@@ -812,8 +812,8 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 				tc.maybeClose()
 				return errors.New("Client connection closed: No client certificate known")
 			} else if len(roots) == len(cr.roots) {
-				for name, capabilitiesOld := range cr.roots {
-					if capabilitiesNew, found := roots[name]; !found || !capabilitiesNew.Equal(capabilitiesOld) {
+				for name, capsOld := range cr.roots {
+					if capsNew, found := roots[name]; !found || !common.EqualCapabilities(capsNew, capsOld) {
 						server.Log("Connection", cr.Connection, "topologyChanged", tc, "(roots changed)")
 						tc.maybeClose()
 						return errors.New("Client connection closed: roots have changed")

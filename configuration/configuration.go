@@ -8,7 +8,7 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	commsgs "goshawkdb.io/common/capnp"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
@@ -32,7 +32,7 @@ type Configuration struct {
 	roots                         []string
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
-	fingerprints                  map[[sha256.Size]byte]map[string]*common.Capabilities
+	fingerprints                  map[[sha256.Size]byte]map[string]*cmsgs.Capabilities
 	nextConfiguration             *NextConfiguration
 }
 
@@ -191,9 +191,10 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 	if len(config.ClientCertificateFingerprints) == 0 {
 		return nil, errors.New("No ClientCertificateFingerprints defined")
 	} else {
-		rootsMap := make(map[string]uint32)
+		rootsMap := make(map[string]server.EmptyStruct)
 		rootsName := []string{}
-		fingerprints := make(map[[sha256.Size]byte]map[string]*common.Capabilities, len(config.ClientCertificateFingerprints))
+		fingerprints := make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, len(config.ClientCertificateFingerprints))
+		seg := capn.NewBuffer(nil)
 		for fingerprint, rootsCapabilities := range config.ClientCertificateFingerprints {
 			fingerprintBytes, err := hex.DecodeString(fingerprint)
 			if err != nil {
@@ -204,10 +205,10 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 			if len(rootsCapabilities) == 0 {
 				return nil, fmt.Errorf("No roots configured for client fingerprint %v; at least 1 needed", fingerprint)
 			}
-			roots := make(map[string]*common.Capabilities, len(rootsCapabilities))
+			roots := make(map[string]*cmsgs.Capabilities, len(rootsCapabilities))
 			for name, rootCapabilities := range rootsCapabilities {
 				if _, found := rootsMap[name]; !found {
-					rootsMap[name] = 0
+					rootsMap[name] = server.EmptyStructVal
 					rootsName = append(rootsName, name)
 				}
 				SortUInt32(rootCapabilities.ReferencesReadOnly).Sort()
@@ -240,28 +241,37 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 					return nil, fmt.Errorf("Client fingerprint %v, root %s: no capabilities have been granted.",
 						fingerprint, name)
 				}
-				cap := &common.Capabilities{}
+				cap := cmsgs.NewCapabilities(seg)
 				switch {
 				case rootCapabilities.ValueRead && rootCapabilities.ValueWrite:
-					cap.Value = common.ReadWrite
+					cap.SetValue(cmsgs.VALUECAPABILITY_READWRITE)
 				case rootCapabilities.ValueRead:
-					cap.Value = common.Read
+					cap.SetValue(cmsgs.VALUECAPABILITY_READ)
 				case rootCapabilities.ValueWrite:
-					cap.Value = common.Write
+					cap.SetValue(cmsgs.VALUECAPABILITY_WRITE)
 				default:
-					cap.Value = common.None
+					cap.SetValue(cmsgs.VALUECAPABILITY_NONE)
 				}
+				capRefs := cap.References()
 				if rootCapabilities.ReferencesReadAll {
-					cap.References.Read.All = true
+					capRefs.Read().SetAll()
 				} else {
-					cap.References.Read.Only = rootCapabilities.ReferencesReadOnly
+					only := seg.NewUInt32List(len(rootCapabilities.ReferencesReadOnly))
+					for idx, index := range rootCapabilities.ReferencesReadOnly {
+						only.Set(idx, index)
+					}
+					capRefs.Read().SetOnly(only)
 				}
 				if rootCapabilities.ReferencesWriteAll {
-					cap.References.Write.All = true
+					capRefs.Write().SetAll()
 				} else {
-					cap.References.Write.Only = rootCapabilities.ReferencesWriteOnly
+					only := seg.NewUInt32List(len(rootCapabilities.ReferencesWriteOnly))
+					for idx, index := range rootCapabilities.ReferencesWriteOnly {
+						only.Set(idx, index)
+					}
+					capRefs.Write().SetOnly(only)
 				}
-				roots[name] = cap
+				roots[name] = &cap
 			}
 			ary := [sha256.Size]byte{}
 			copy(ary[:], fingerprintBytes)
@@ -298,44 +308,31 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		c.rmsRemoved[common.RMId(rmsRemoved.At(idx))] = server.EmptyStructVal
 	}
 
+	rootsName := []string{}
+	rootsMap := make(map[string]server.EmptyStruct)
 	fingerprints := config.Fingerprints()
-	fingerprintsMap := make(map[[sha256.Size]byte]map[string]*common.Capabilities, fingerprints.Len())
+	fingerprintsMap := make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
 		fingerprint := fingerprints.At(idx)
 		ary := [sha256.Size]byte{}
 		copy(ary[:], fingerprint.Sha256())
 		rootsCap := fingerprint.Roots()
-		roots := make(map[string]*common.Capabilities, rootsCap.Len())
+		roots := make(map[string]*cmsgs.Capabilities, rootsCap.Len())
 		for idy, m := 0, rootsCap.Len(); idy < m; idy++ {
 			rootCap := rootsCap.At(idy)
-			capsCap := rootCap.Capabilities()
-			cap := &common.Capabilities{}
-			switch capsCap.Value() {
-			case commsgs.VALUECAPABILITY_READ:
-				cap.Value = common.Read
-			case commsgs.VALUECAPABILITY_WRITE:
-				cap.Value = common.Write
-			case commsgs.VALUECAPABILITY_READWRITE:
-				cap.Value = common.ReadWrite
-			default:
-				cap.Value = common.None
+			name := rootCap.Name()
+			capabilities := rootCap.Capabilities()
+			roots[name] = &capabilities
+			if _, found := rootsMap[name]; !found {
+				rootsName = append(rootsName, name)
+				rootsMap[name] = server.EmptyStructVal
 			}
-			refsCap := capsCap.References()
-			if refsReadCap := refsCap.Read(); refsReadCap.Which() == commsgs.CAPABILITIESREFERENCESREAD_ALL {
-				cap.References.Read.All = true
-			} else {
-				cap.References.Read.Only = refsReadCap.Only().ToArray()
-			}
-			if refsWriteCap := refsCap.Write(); refsWriteCap.Which() == commsgs.CAPABILITIESREFERENCESWRITE_ALL {
-				cap.References.Write.All = true
-			} else {
-				cap.References.Write.Only = refsWriteCap.Only().ToArray()
-			}
-			roots[rootCap.Name()] = cap
 		}
 		fingerprintsMap[ary] = roots
 	}
 	c.fingerprints = fingerprintsMap
+	sort.Strings(rootsName)
+	c.roots = rootsName
 
 	if config.Which() == msgs.CONFIGURATION_TRANSITIONINGTO {
 		next := config.TransitioningTo()
@@ -416,7 +413,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			return false
 		} else {
 			for name, aRootCaps := range aRoots {
-				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
+				if bRootCaps, found := bRoots[name]; !found || !common.EqualCapabilities(aRootCaps, bRootCaps) {
 					return false
 				}
 			}
@@ -426,8 +423,8 @@ func (a *Configuration) Equal(b *Configuration) bool {
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, ClientCertificates: %v, %v}",
-		config.ClusterId, config.clusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.fingerprints, config.nextConfiguration)
+	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, %v}",
+		config.ClusterId, config.clusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.nextConfiguration)
 }
 
 func (config *Configuration) ClusterUUId() uint64 {
@@ -445,7 +442,7 @@ func (config *Configuration) SetClusterUUId() {
 	}
 }
 
-func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*common.Capabilities {
+func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*cmsgs.Capabilities {
 	return config.fingerprints
 }
 
@@ -508,16 +505,19 @@ func (config *Configuration) Clone() *Configuration {
 		F:           config.F,
 		MaxRMCount:  config.MaxRMCount,
 		NoSync:      config.NoSync,
-		ClientCertificateFingerprints: make(map[string]map[string]*RootCapabilities, len(config.ClientCertificateFingerprints)),
+		ClientCertificateFingerprints: nil,
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
-		fingerprints:      make(map[[sha256.Size]byte]map[string]*common.Capabilities, len(config.fingerprints)),
+		fingerprints:      make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, len(config.fingerprints)),
 		nextConfiguration: config.nextConfiguration.Clone(),
 	}
 
 	copy(clone.Hosts, config.Hosts)
-	for k, v := range config.ClientCertificateFingerprints {
-		clone.ClientCertificateFingerprints[k] = v
+	if config.ClientCertificateFingerprints != nil {
+		clone.ClientCertificateFingerprints = make(map[string]map[string]*RootCapabilities, len(config.ClientCertificateFingerprints))
+		for k, v := range config.ClientCertificateFingerprints {
+			clone.ClientCertificateFingerprints[k] = v
+		}
 	}
 	copy(clone.rms, config.rms)
 	for k, v := range config.rmsRemoved {
@@ -570,7 +570,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		for name, capabilities := range roots {
 			rootCap := msgs.NewRoot(seg)
 			rootCap.SetName(name)
-			rootCap.SetCapabilities(capabilities.AddToSeg(seg))
+			rootCap.SetCapabilities(*capabilities)
 			rootsCap.Set(idy, rootCap)
 			idy++
 		}
