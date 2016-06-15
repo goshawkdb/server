@@ -864,7 +864,7 @@ func (task *installTargetOld) tick() error {
 	// the others so they might calculate different targets and then
 	// we'd be racing.
 
-	targetTopology, err := task.calculateTargetTopology()
+	targetTopology, rootsRequired, err := task.calculateTargetTopology()
 	if err != nil || targetTopology == nil {
 		return err
 	}
@@ -881,19 +881,21 @@ func (task *installTargetOld) tick() error {
 	// add on all new (if there are any) as passives
 	passive = append(passive, targetTopology.Next().NewRMIds...)
 
-	log.Printf("Topology: Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
+	log.Printf("Topology: Calculated target topology: %v (new rootsRequired: %v, active: %v, passive: %v)", targetTopology.Next(), rootsRequired, active, passive)
 
-	resubmit, roots, err := task.attemptCreateRoots(3)
-	if err != nil {
-		return task.fatal(err)
+	if rootsRequired != 0 {
+		resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
+		if err != nil {
+			return task.fatal(err)
+		}
+		if resubmit {
+			task.enqueueTick(task)
+			return nil
+		}
+		targetTopology.Roots = append(targetTopology.Roots, roots...)
 	}
-	if resubmit {
-		task.enqueueTick(task)
-		return nil
-	}
-	targetTopology.Roots = roots
 
-	_, resubmit, err = task.rewriteTopology(task.active, targetTopology, active, passive)
+	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
@@ -906,10 +908,10 @@ func (task *installTargetOld) tick() error {
 	return nil
 }
 
-func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, error) {
+func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, int, error) {
 	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
-		return nil, task.fatal(err)
+		return nil, 0, task.fatal(err)
 	}
 
 	hostsSurvived, hostsRemoved, hostsAdded :=
@@ -951,9 +953,9 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	hostsAddedList := allRemoteHosts[len(hostsOld)-1:]
 	allAddedFound, err := task.verifyClusterUUIds(task.active.ClusterUUId(), hostsAddedList)
 	if err != nil {
-		return nil, task.error(err)
+		return nil, 0, task.error(err)
 	} else if !allAddedFound {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// map(old -> new)
@@ -971,7 +973,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	for host := range hostsAdded {
 		cd, found := task.hostToConnection[host]
 		if !found {
-			return nil, nil
+			return nil, 0, nil
 		}
 		hostsAdded[host] = cd
 		connsAdded = append(connsAdded, cd)
@@ -1060,17 +1062,39 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	}
 	conds := calculateMigrationConditions(rmIdsAdded, rmIdsLost, rmIdsSurvived, task.active.Configuration, next)
 
+	// now figure out which roots have survived and how many new ones
+	// we need to create.
+	oldNamesList := targetTopology.RootNames()
+	oldNamesCount := len(oldNamesList)
+	oldNames := make(map[string]uint32, oldNamesCount)
+	for idx, name := range oldNamesList {
+		oldNames[name] = uint32(idx)
+	}
+	newNames := next.RootNames()
+	rootsRequired := 0
+	rootIndices := make([]uint32, len(newNames))
+	for idx, name := range newNames {
+		if index, found := oldNames[name]; found {
+			rootIndices[idx] = index
+		} else {
+			rootIndices[idx] = uint32(oldNamesCount + rootsRequired)
+			rootsRequired++
+		}
+	}
+	targetTopology.Roots = targetTopology.Roots[:oldNamesCount]
+
 	targetTopology.SetNext(&configuration.NextConfiguration{
 		Configuration:  next,
 		AllHosts:       append(allRemoteHosts, localHost),
 		NewRMIds:       rmIdsAdded,
 		SurvivingRMIds: rmIdsSurvived,
 		LostRMIds:      rmIdsLost,
+		RootIndices:    rootIndices,
 		InstalledOnNew: len(rmIdsAdded) == 0,
 		Pending:        conds,
 	})
 
-	return targetTopology, nil
+	return targetTopology, rootsRequired, nil
 }
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
@@ -1521,6 +1545,13 @@ func (task *installCompletion) tick() error {
 
 	topology := task.active.Clone()
 	topology.SetConfiguration(next.Configuration)
+
+	oldRoots := task.active.Roots
+	newRoots := make([]configuration.Root, len(next.RootIndices))
+	for idx, index := range next.RootIndices {
+		newRoots[idx] = oldRoots[index]
+	}
+	topology.Roots = newRoots
 
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {

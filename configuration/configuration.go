@@ -51,6 +51,7 @@ type NextConfiguration struct {
 	NewRMIds        common.RMIds
 	SurvivingRMIds  common.RMIds
 	LostRMIds       common.RMIds
+	RootIndices     []uint32
 	InstalledOnNew  bool
 	BarrierReached1 common.RMIds
 	BarrierReached2 common.RMIds
@@ -58,8 +59,8 @@ type NextConfiguration struct {
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n BarrierReached1: %v;\n BarrierReached2: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.BarrierReached1, next.BarrierReached2, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n RootIndices: %v;\n InstalledOnNew: %v;\n BarrierReached1: %v;\n BarrierReached2: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.RootIndices, next.InstalledOnNew, next.BarrierReached1, next.BarrierReached2, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -74,6 +75,15 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 		if aHost != bAllHosts[idx] {
 			return false
 		}
+	}
+	if len(a.RootIndices) == len(b.RootIndices) {
+		for idx, aIndex := range a.RootIndices {
+			if aIndex != b.RootIndices[idx] {
+				return false
+			}
+		}
+	} else {
+		return false
 	}
 	return a.NewRMIds.Equal(b.NewRMIds) &&
 		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
@@ -102,6 +112,9 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	lostRMIds := make([]common.RMId, len(next.LostRMIds))
 	copy(lostRMIds, next.LostRMIds)
 
+	rootIndices := make([]uint32, len(next.RootIndices))
+	copy(rootIndices, next.RootIndices)
+
 	barrierReached1 := make([]common.RMId, len(next.BarrierReached1))
 	copy(barrierReached1, next.BarrierReached1)
 
@@ -127,6 +140,7 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 		NewRMIds:        newRMIds,
 		SurvivingRMIds:  survivingRMIds,
 		LostRMIds:       lostRMIds,
+		RootIndices:     rootIndices,
 		InstalledOnNew:  next.InstalledOnNew,
 		BarrierReached1: barrierReached1,
 		BarrierReached2: barrierReached2,
@@ -356,6 +370,8 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			lostRMIds[idx] = common.RMId(lostRMIdsCap.At(idx))
 		}
 
+		rootIndices := next.RootIndices().ToArray()
+
 		barrierReached1Cap := next.BarrierReached1()
 		barrierReached1 := make([]common.RMId, barrierReached1Cap.Len())
 		for idx := range barrierReached1 {
@@ -376,6 +392,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			NewRMIds:        newRMIds,
 			SurvivingRMIds:  survivingRMIds,
 			LostRMIds:       lostRMIds,
+			RootIndices:     rootIndices,
 			InstalledOnNew:  next.InstalledOnNew(),
 			BarrierReached1: barrierReached1,
 			BarrierReached2: barrierReached2,
@@ -423,8 +440,8 @@ func (a *Configuration) Equal(b *Configuration) bool {
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, %v}",
-		config.ClusterId, config.clusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.nextConfiguration)
+	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, RootNames: %v, %v}",
+		config.ClusterId, config.clusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.roots, config.nextConfiguration)
 }
 
 func (config *Configuration) ClusterUUId() uint64 {
@@ -510,6 +527,7 @@ func (config *Configuration) Clone() *Configuration {
 		MaxRMCount:  config.MaxRMCount,
 		NoSync:      config.NoSync,
 		ClientCertificateFingerprints: nil,
+		roots:             make([]string, len(config.roots)),
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
 		fingerprints:      make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, len(config.fingerprints)),
@@ -523,6 +541,7 @@ func (config *Configuration) Clone() *Configuration {
 			clone.ClientCertificateFingerprints[k] = v
 		}
 	}
+	copy(clone.roots, config.roots)
 	copy(clone.rms, config.rms)
 	for k, v := range config.rmsRemoved {
 		clone.rmsRemoved[k] = v
@@ -615,6 +634,12 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 			lostRMIdsCap.Set(idx, uint32(rmId))
 		}
 		next.SetLostRMIds(lostRMIdsCap)
+
+		rootIndicesCap := seg.NewUInt32List(len(nextConfig.RootIndices))
+		for idx, index := range nextConfig.RootIndices {
+			rootIndicesCap.Set(idx, index)
+		}
+		next.SetRootIndices(rootIndicesCap)
 
 		barrierReached1Cap := seg.NewUInt32List(len(nextConfig.BarrierReached1))
 		for idx, rmId := range nextConfig.BarrierReached1 {
