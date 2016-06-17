@@ -13,12 +13,12 @@ using Config = import "configuration.capnp";
 using Migration = import "migration.capnp";
 
 struct HelloServerFromServer {
- localHost @0: Text;
- rmId      @1: UInt32;
- bootCount @2: UInt32;
- tieBreak  @3: UInt32;
- clusterId @4: Text;
- rootId    @5: Data;
+ localHost   @0: Text;
+ rmId        @1: UInt32;
+ bootCount   @2: UInt32;
+ tieBreak    @3: UInt32;
+ clusterId   @4: Text;
+ clusterUUId @5: UInt64;
 }
 
 struct Message {

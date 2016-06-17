@@ -17,7 +17,20 @@ type Topology struct {
 	FInc      uint8
 	TwoFInc   uint16
 	DBVersion *common.TxnId
-	Root
+	Roots     Roots
+}
+
+type Roots []Root
+
+func (r Roots) String() string {
+	if r == nil || len(r) == 0 {
+		return "No Roots"
+	}
+	roots := ""
+	for _, root := range r {
+		roots += fmt.Sprintf("%v@%v|", root.VarUUId, (*capn.UInt8List)(root.Positions).ToArray())
+	}
+	return roots[:len(roots)-1]
 }
 
 type Root struct {
@@ -25,16 +38,17 @@ type Root struct {
 	Positions *common.Positions
 }
 
-func BlankTopology(clusterId string) *Topology {
+func BlankTopology() *Topology {
 	return &Topology{
 		Configuration: &Configuration{
-			ClusterId:  clusterId,
-			Version:    0,
-			Hosts:      []string{},
-			F:          0,
-			MaxRMCount: 0,
-			NoSync:     false,
-			ClientCertificateFingerprints: []string{},
+			ClusterId:   "",
+			clusterUUId: 0,
+			Version:     0,
+			Hosts:       []string{},
+			F:           0,
+			MaxRMCount:  0,
+			NoSync:      false,
+			ClientCertificateFingerprints: nil,
 			rms:               []common.RMId{},
 			fingerprints:      nil,
 			nextConfiguration: nil,
@@ -45,31 +59,40 @@ func BlankTopology(clusterId string) *Topology {
 	}
 }
 
-func NewTopology(txnId *common.TxnId, root *msgs.VarIdPos, config *Configuration) *Topology {
+func NewTopology(txnId *common.TxnId, rootsCap *msgs.VarIdPos_List, config *Configuration) *Topology {
 	t := &Topology{
 		Configuration: config,
 		FInc:          config.F + 1,
 		TwoFInc:       (2 * uint16(config.F)) + 1,
 		DBVersion:     txnId,
 	}
-	if root != nil {
-		positions := root.Positions()
-		t.Root = Root{
-			VarUUId:   common.MakeVarUUId(root.Id()),
-			Positions: (*common.Positions)(&positions),
+	if rootsCap != nil {
+		if rootsCap.Len() < len(config.RootNames()) {
+			panic(fmt.Sprintf("NewTopology expected to find at least %v roots by reference, but actually found %v",
+				len(config.RootNames()), rootsCap.Len()))
+		}
+		t.Roots = make([]Root, rootsCap.Len())
+		for idx := range t.Roots {
+			rootCap := rootsCap.At(idx)
+			positions := rootCap.Positions()
+			root := &t.Roots[idx]
+			root.VarUUId = common.MakeVarUUId(rootCap.Id())
+			root.Positions = (*common.Positions)(&positions)
 		}
 	}
 	return t
 }
 
 func (t *Topology) Clone() *Topology {
-	return &Topology{
+	c := &Topology{
 		Configuration: t.Configuration.Clone(),
 		FInc:          t.FInc,
 		TwoFInc:       t.TwoFInc,
 		DBVersion:     t.DBVersion,
-		Root:          t.Root,
+		Roots:         make([]Root, len(t.Roots)),
 	}
+	copy(c.Roots, t.Roots)
+	return c
 }
 
 func (t *Topology) SetConfiguration(config *Configuration) {
@@ -78,28 +101,24 @@ func (t *Topology) SetConfiguration(config *Configuration) {
 	t.TwoFInc = (2 * uint16(config.F)) + 1
 }
 
-func TopologyFromCap(txnId *common.TxnId, root *msgs.VarIdPos, data []byte) (*Topology, error) {
+func TopologyFromCap(txnId *common.TxnId, roots *msgs.VarIdPos_List, data []byte) (*Topology, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
 		return nil, err
 	}
 	configCap := msgs.ReadRootConfiguration(seg)
 	config := ConfigurationFromCap(&configCap)
-	return NewTopology(txnId, root, config), nil
+	return NewTopology(txnId, roots, config), nil
 }
 
 func (t *Topology) String() string {
 	if t == nil {
 		return "nil"
 	}
-	root := "unset"
-	if t.Root.VarUUId != nil {
-		root = fmt.Sprintf("%v@%v", t.Root.VarUUId, (*capn.UInt8List)(t.Root.Positions).ToArray())
-	}
-	return fmt.Sprintf("Topology{%v, F+1: %v, 2F+1: %v, DBVersion: %v, Root: %v}",
-		t.Configuration, t.FInc, t.TwoFInc, t.DBVersion, root)
+	return fmt.Sprintf("Topology{%v, F+1: %v, 2F+1: %v, DBVersion: %v, Roots: %v}",
+		t.Configuration, t.FInc, t.TwoFInc, t.DBVersion, t.Roots)
 }
 
 func (t *Topology) IsBlank() bool {
-	return t == nil || t.Version == 0
+	return t == nil || t.MaxRMCount == 0 || t.RMs().NonEmptyLen() < int(t.TwoFInc)
 }

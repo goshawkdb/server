@@ -5,30 +5,44 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xbbc717d787db5c5f;
 
+using Common = import "../../common/capnp/capabilities.capnp";
+
 struct Configuration {
   clusterId          @0: Text;
-  version            @1: UInt32;
-  hosts              @2: List(Text);
-  f                  @3: UInt8;
-  maxRMCount         @4: UInt16;
-  noSync             @5: Bool;
-  rms                @6: List(UInt32);
-  rmsRemoved         @7: List(UInt32);
-  fingerprints       @8: List(Data);
+  clusterUUId        @1: UInt64;
+  version            @2: UInt32;
+  hosts              @3: List(Text);
+  f                  @4: UInt8;
+  maxRMCount         @5: UInt16;
+  noSync             @6: Bool;
+  rms                @7: List(UInt32);
+  rmsRemoved         @8: List(UInt32);
+  fingerprints       @9: List(Fingerprint);
   union {
     transitioningTo :group {
-      configuration   @9: Configuration;
-      allHosts        @10: List(Text);
-      newRMIds        @11: List(UInt32);
-      survivingRMIds  @12: List(UInt32);
-      lostRMIds       @13: List(UInt32);
-      installedOnNew  @14: Bool;
-      barrierReached1 @15: List(UInt32);
-      barrierReached2 @16: List(UInt32);
-      pending         @17: List(ConditionPair);
+      configuration   @10: Configuration;
+      allHosts        @11: List(Text);
+      newRMIds        @12: List(UInt32);
+      survivingRMIds  @13: List(UInt32);
+      lostRMIds       @14: List(UInt32);
+      rootIndices     @15: List(UInt32);
+      installedOnNew  @16: Bool;
+      barrierReached1 @17: List(UInt32);
+      barrierReached2 @18: List(UInt32);
+      pending         @19: List(ConditionPair);
     }
-    stable           @18: Void;
+    stable           @20: Void;
   }
+}
+
+struct Fingerprint {
+  sha256 @0: Data;
+  roots  @1: List(Root);
+}
+
+struct Root {
+  name         @0: Text;
+  capabilities @1: Common.Capabilities;
 }
 
 struct ConditionPair {

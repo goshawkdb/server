@@ -29,7 +29,7 @@ type Connection struct {
 	remoteHost        string
 	remoteRMId        common.RMId
 	remoteBootCount   uint32
-	remoteRootId      *common.VarUUId
+	remoteClusterUUId uint64
 	combinedTieBreak  uint32
 	socket            net.Conn
 	ConnectionNumber  uint32
@@ -75,8 +75,12 @@ type connectionMsgTopologyChanged struct {
 	resultChan chan struct{}
 }
 
-func (cmtc *connectionMsgTopologyChanged) Done() {
-	close(cmtc.resultChan)
+func (cmtc *connectionMsgTopologyChanged) maybeClose() {
+	select {
+	case <-cmtc.resultChan:
+	default:
+		close(cmtc.resultChan)
+	}
 }
 
 type connectionMsgStatus struct {
@@ -437,7 +441,16 @@ func (cah *connectionAwaitHandshake) start() (bool, error) {
 			return false, nil
 
 		} else {
-			return cah.maybeRestartConnection(fmt.Errorf("Received erroneous hello from peer"))
+			product := hello.Product()
+			if l := len(common.ProductName); len(product) > l {
+				product = product[:l] + "..."
+			}
+			version := hello.Version()
+			if l := len(common.ProductVersion); len(version) > l {
+				version = version[:l] + "..."
+			}
+			return cah.maybeRestartConnection(fmt.Errorf("Received erroneous hello from peer: received product name '%s' (expected '%s'), product version '%s' (expected '%s')",
+				product, common.ProductName, version, common.ProductVersion))
 		}
 	} else {
 		return cah.maybeRestartConnection(err)
@@ -586,10 +599,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
 			}
 
-			rootId := hello.RootId()
-			if len(rootId) == common.KeyLen {
-				cash.remoteRootId = common.MakeVarUUId(rootId)
-			}
+			cash.remoteClusterUUId = hello.ClusterUUId()
 			cash.remoteBootCount = hello.BootCount()
 			cash.combinedTieBreak = cash.combinedTieBreak ^ hello.TieBreak()
 			cash.nextState(nil)
@@ -603,7 +613,16 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 }
 
 func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *msgs.HelloServerFromServer) bool {
-	return topology.ClusterId == remote.ClusterId()
+	if topology.ClusterId == remote.ClusterId() {
+		remoteUUId := remote.ClusterUUId()
+		localUUId := topology.ClusterUUId()
+		if remoteUUId == 0 || localUUId == 0 {
+			return true
+		} else {
+			return remoteUUId == localUUId
+		}
+	}
+	return false
 }
 
 func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *configuration.Topology) *capn.Segment {
@@ -617,11 +636,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 	cash.combinedTieBreak = tieBreak
 	hello.SetTieBreak(tieBreak)
 	hello.SetClusterId(topology.ClusterId)
-	if topology.Root.VarUUId == nil {
-		hello.SetRootId([]byte{})
-	} else {
-		hello.SetRootId(topology.Root.VarUUId[:])
-	}
+	hello.SetClusterUUId(topology.ClusterUUId())
 	return seg
 }
 
@@ -630,6 +645,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 type connectionAwaitClientHandshake struct {
 	*Connection
 	peerCerts []*x509.Certificate
+	roots     map[string]*cmsgs.Capabilities
 }
 
 func (cach *connectionAwaitClientHandshake) connectionStateMachineComponentWitness() {}
@@ -648,39 +664,41 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 		return false, err
 	}
 
-	if cach.topology.Root.VarUUId == nil {
-		return false, errors.New("Root not yet known")
+	if cach.topology.ClusterUUId() == 0 {
+		return false, errors.New("Cluster not yet formed")
+	} else if len(cach.topology.RootNames()) == 0 {
+		return false, errors.New("No roots: cluster not yet formed")
 	}
 
 	peerCerts := socket.ConnectionState().PeerCertificates
-	if authenticated, hashsum := cach.verifyPeerCerts(cach.topology, peerCerts); authenticated {
+	if authenticated, hashsum, roots := cach.verifyPeerCerts(cach.topology, peerCerts); authenticated {
 		cach.peerCerts = peerCerts
+		cach.roots = roots
 		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
+		helloFromServer := cach.makeHelloClientFromServer(cach.topology, roots)
+		if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
+			return false, err
+		}
+		cach.remoteHost = cach.socket.RemoteAddr().String()
+		cach.nextState(nil)
+		return false, nil
 	} else {
 		return false, errors.New("Client connection rejected: No client certificate known")
 	}
-
-	helloFromServer := cach.makeHelloClientFromServer(cach.topology)
-	if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
-		return false, err
-	}
-	cach.remoteHost = cach.socket.RemoteAddr().String()
-	cach.nextState(nil)
-	return false, nil
 }
 
-func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte) {
+func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*cmsgs.Capabilities) {
 	fingerprints := topology.Fingerprints()
 	for _, cert := range peerCerts {
 		hashsum = sha256.Sum256(cert.Raw)
-		if _, found := fingerprints[hashsum]; found {
-			return true, hashsum
+		if roots, found := fingerprints[hashsum]; found {
+			return true, hashsum, roots
 		}
 	}
-	return false, hashsum
+	return false, hashsum, nil
 }
 
-func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
+func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology, roots map[string]*cmsgs.Capabilities) *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
@@ -688,9 +706,18 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *
 	binary.BigEndian.PutUint32(namespace[4:8], cach.connectionManager.BootCount)
 	binary.BigEndian.PutUint32(namespace[8:], uint32(cach.connectionManager.RMId))
 	hello.SetNamespace(namespace)
-	if topology.Root.VarUUId != nil {
-		hello.SetRootId(topology.Root.VarUUId[:])
+	rootsCap := cmsgs.NewRootList(seg, len(roots))
+	idy := 0
+	for idx, name := range topology.RootNames() {
+		if capabilities, found := roots[name]; found {
+			rootCap := rootsCap.At(idy)
+			idy++
+			rootCap.SetName(name)
+			rootCap.SetVarId(topology.Roots[idx].VarUUId[:])
+			rootCap.SetCapabilities(*capabilities)
+		}
 	}
+	hello.SetRoots(rootsCap)
 	return seg
 }
 
@@ -723,7 +750,7 @@ func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
 		si := cr.submitterIdle
 		cr.submitterIdle = nil
 		server.Log("Connection", cr.Connection, "outcomeReceived", si, "(submitterIdle)")
-		si.Done()
+		si.maybeClose()
 	}
 }
 
@@ -743,7 +770,7 @@ func (cr *connectionRun) start() (bool, error) {
 	cr.beatBytes = server.SegToBytes(seg)
 
 	if cr.isServer {
-		cr.connectionManager.ServerEstablished(cr.Connection, cr.remoteHost, cr.remoteRMId, cr.remoteBootCount, cr.combinedTieBreak, cr.remoteRootId)
+		cr.connectionManager.ServerEstablished(cr.Connection, cr.remoteHost, cr.remoteRMId, cr.remoteBootCount, cr.combinedTieBreak, cr.remoteClusterUUId)
 	}
 	if cr.isClient {
 		servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
@@ -771,27 +798,39 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	if si := cr.submitterIdle; si != nil {
 		cr.submitterIdle = nil
 		server.Log("Connection", cr.Connection, "topologyChanged:", tc, "clearing old:", si)
-		si.Done()
+		si.maybeClose()
 	}
 	topology := tc.topology
 	cr.topology = topology
 	if cr.currentState != cr {
 		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(not in cr)")
-		tc.Done()
+		tc.maybeClose()
 		return nil
 	}
 	if cr.isClient {
 		if topology != nil {
-			if authenticated, _ := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+			if authenticated, _, roots := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
 				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client unauthed)")
-				tc.Done()
+				tc.maybeClose()
 				return errors.New("Client connection closed: No client certificate known")
+			} else if len(roots) == len(cr.roots) {
+				for name, capsOld := range cr.roots {
+					if capsNew, found := roots[name]; !found || !common.EqualCapabilities(capsNew, capsOld) {
+						server.Log("Connection", cr.Connection, "topologyChanged", tc, "(roots changed)")
+						tc.maybeClose()
+						return errors.New("Client connection closed: roots have changed")
+					}
+				}
+			} else {
+				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(roots changed)")
+				tc.maybeClose()
+				return errors.New("Client connection closed: roots have changed")
 			}
 		}
 		cr.submitter.TopologyChanged(topology)
 		if cr.submitter.IsIdle() {
 			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter is idle)")
-			tc.Done()
+			tc.maybeClose()
 		} else {
 			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter not idle)")
 			cr.submitterIdle = tc
@@ -799,7 +838,7 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	}
 	if cr.isServer {
 		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(isServer)")
-		tc.Done()
+		tc.maybeClose()
 		if topology != nil {
 			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
 				cr.restart = false
