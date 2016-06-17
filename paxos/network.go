@@ -39,7 +39,7 @@ type Connection interface {
 	RMId() common.RMId
 	BootCount() uint32
 	TieBreak() uint32
-	RootId() *common.VarUUId
+	ClusterUUId() uint64
 	Send(msg []byte)
 }
 
