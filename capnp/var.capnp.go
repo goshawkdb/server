@@ -288,12 +288,6 @@ func (s Var_List) ToArray() []Var {
 func (s Var_List) Set(i int, item Var) { C.PointerList(s).Set(i, C.Object(item)) }
 
 type VarIdPos C.Struct
-type VarIdPosCapabilities VarIdPos
-type VarIdPosCapabilitiesValue VarIdPos
-type VarIdPosCapabilitiesReferences VarIdPos
-type VarIdPosCapabilitiesReferencesRead VarIdPos
-type VarIdPosCapabilitiesReferencesWrite VarIdPos
-type VarIdPosCapabilitiesReferencesRead_Which uint16
 
 func NewVarIdPos(s *C.Segment) VarIdPos       { return VarIdPos(s.NewStruct(0, 3)) }
 func NewRootVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewRootStruct(0, 3)) }
