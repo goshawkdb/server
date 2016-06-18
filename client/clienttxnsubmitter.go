@@ -21,10 +21,10 @@ type ClientTxnSubmitter struct {
 	initialDelay time.Duration
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*cmsgs.Capabilities, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
-		versionCache:       NewVersionCache(),
+		versionCache:       NewVersionCache(roots),
 		txnLive:            false,
 		initialDelay:       time.Duration(0),
 	}
@@ -126,17 +126,17 @@ func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
 	}
 }
 
-func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) cmsgs.ClientUpdate_List {
+func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update]*[]*msgs.Action) cmsgs.ClientUpdate_List {
 	clientUpdates := cmsgs.NewClientUpdateList(seg, len(updates))
 	idx := 0
 	for update, actions := range updates {
 		clientUpdate := clientUpdates.At(idx)
 		idx++
 		clientUpdate.SetVersion(update.TxnId())
-		clientActions := cmsgs.NewClientActionList(seg, len(actions))
+		clientActions := cmsgs.NewClientActionList(seg, len(*actions))
 		clientUpdate.SetActions(clientActions)
 
-		for idy, action := range actions {
+		for idy, action := range *actions {
 			clientAction := clientActions.At(idy)
 			clientAction.SetVarId(action.VarId())
 			switch action.Which() {

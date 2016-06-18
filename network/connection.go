@@ -646,6 +646,7 @@ type connectionAwaitClientHandshake struct {
 	*Connection
 	peerCerts []*x509.Certificate
 	roots     map[string]*cmsgs.Capabilities
+	rootsVar  map[common.VarUUId]*cmsgs.Capabilities
 }
 
 func (cach *connectionAwaitClientHandshake) connectionStateMachineComponentWitness() {}
@@ -675,7 +676,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 		cach.peerCerts = peerCerts
 		cach.roots = roots
 		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
-		helloFromServer := cach.makeHelloClientFromServer(cach.topology, roots)
+		helloFromServer := cach.makeHelloClientFromServer(cach.topology)
 		if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
 			return false, err
 		}
@@ -698,7 +699,7 @@ func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configurat
 	return false, hashsum, nil
 }
 
-func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology, roots map[string]*cmsgs.Capabilities) *capn.Segment {
+func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
@@ -706,18 +707,22 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *
 	binary.BigEndian.PutUint32(namespace[4:8], cach.connectionManager.BootCount)
 	binary.BigEndian.PutUint32(namespace[8:], uint32(cach.connectionManager.RMId))
 	hello.SetNamespace(namespace)
-	rootsCap := cmsgs.NewRootList(seg, len(roots))
+	rootsCap := cmsgs.NewRootList(seg, len(cach.roots))
 	idy := 0
+	rootsVar := make(map[common.VarUUId]*cmsgs.Capabilities, len(cach.roots))
 	for idx, name := range topology.RootNames() {
-		if capabilities, found := roots[name]; found {
+		if capabilities, found := cach.roots[name]; found {
 			rootCap := rootsCap.At(idy)
 			idy++
+			vUUId := topology.Roots[idx].VarUUId
 			rootCap.SetName(name)
-			rootCap.SetVarId(topology.Roots[idx].VarUUId[:])
+			rootCap.SetVarId(vUUId[:])
 			rootCap.SetCapabilities(*capabilities)
+			rootsVar[*vUUId] = capabilities
 		}
 	}
 	hello.SetRoots(rootsCap)
+	cach.rootsVar = rootsVar
 	return seg
 }
 
@@ -774,7 +779,7 @@ func (cr *connectionRun) start() (bool, error) {
 	}
 	if cr.isClient {
 		servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
-		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount, cr.connectionManager)
+		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount, cr.rootsVar, cr.connectionManager)
 		cr.submitter.TopologyChanged(cr.topology)
 		cr.submitter.ServerConnectionsChanged(servers)
 	}
