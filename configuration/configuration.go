@@ -225,8 +225,8 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 					rootsMap[name] = server.EmptyStructVal
 					rootsName = append(rootsName, name)
 				}
-				SortUInt32(rootCapabilities.ReferencesReadOnly).Sort()
-				SortUInt32(rootCapabilities.ReferencesWriteOnly).Sort()
+				common.SortUInt32(rootCapabilities.ReferencesReadOnly).Sort()
+				common.SortUInt32(rootCapabilities.ReferencesWriteOnly).Sort()
 				if rootCapabilities.ReferencesReadAll && len(rootCapabilities.ReferencesReadOnly) != 0 {
 					return nil, fmt.Errorf("ReferencesReadAll and ReferencesReadOnly must be mutually exclusive for client fingerprint %v, root %s", fingerprint, name)
 				}
@@ -1002,10 +1002,3 @@ func (g *Generator) AddToSeg(seg *capn.Segment) msgs.Condition {
 	condCap.SetGenerator(genCap)
 	return condCap
 }
-
-type SortUInt32 []uint32
-
-func (nums SortUInt32) Sort()              { sort.Sort(nums) }
-func (nums SortUInt32) Len() int           { return len(nums) }
-func (nums SortUInt32) Less(i, j int) bool { return nums[i] < nums[j] }
-func (nums SortUInt32) Swap(i, j int)      { nums[i], nums[j] = nums[j], nums[i] }

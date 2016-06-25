@@ -23,16 +23,16 @@ type SimpleTxnSubmitter struct {
 	connections         map[common.RMId]paxos.Connection
 	connPub             paxos.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
-	onShutdown          map[*func(bool)]server.EmptyStruct
+	onShutdown          map[*func(bool) error]server.EmptyStruct
 	resolver            *ch.Resolver
 	hashCache           *ch.ConsistentHashCache
 	topology            *configuration.Topology
 	rng                 *rand.Rand
-	bufferedSubmissions []func()
+	bufferedSubmissions []func() error
 }
 
-type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
-type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome, error)
+type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome) error
+type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome, error) error
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -44,7 +44,7 @@ func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.Ser
 		connections:      nil,
 		connPub:          connPub,
 		outcomeConsumers: make(map[common.TxnId]txnOutcomeConsumer),
-		onShutdown:       make(map[*func(bool)]server.EmptyStruct),
+		onShutdown:       make(map[*func(bool) error]server.EmptyStruct),
 		hashCache:        cache,
 		rng:              rng,
 	}
@@ -71,12 +71,13 @@ func (sts *SimpleTxnSubmitter) EnsurePositions(varPosMap map[common.VarUUId]*com
 	}
 }
 
-func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
+func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) error {
 	if consumer, found := sts.outcomeConsumers[*txnId]; found {
-		consumer(sender, txnId, outcome)
+		return consumer(sender, txnId, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
+		return nil
 	}
 }
 
@@ -104,7 +105,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
 
-	shutdownFun := func(shutdown bool) {
+	shutdownFun := func(shutdown bool) error {
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 		if delay == 0 {
@@ -124,53 +125,59 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 				// problem with these msgs getting to the propposers.
 				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 			}
-			continuation(txnId, nil, nil)
+			return continuation(txnId, nil, nil)
+		} else {
+			return nil
 		}
 	}
 	shutdownFunPtr := &shutdownFun
 	sts.onShutdown[shutdownFunPtr] = server.EmptyStructVal
 
 	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.FInc()), acceptors)
-	consumer := func(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
+	consumer := func(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) error {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
-			shutdownFun(false)
-			continuation(txnId, outcome, nil)
+			if err := shutdownFun(false); err != nil {
+				return err
+			} else {
+				return continuation(txnId, outcome, nil)
+			}
 		}
+		return nil
 	}
 	sts.outcomeConsumers[*txnId] = consumer
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool, vc versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
-		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion) }
+		fun := func() error { return sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion, vc) }
 		if sts.bufferedSubmissions == nil {
-			sts.bufferedSubmissions = []func(){fun}
+			sts.bufferedSubmissions = []func() error{fun}
 		} else {
 			sts.bufferedSubmissions = append(sts.bufferedSubmissions, fun)
 		}
-		return
+		return nil
 	}
 	version := sts.topology.Version
 	if next := sts.topology.Next(); next != nil && useNextVersion {
 		version = next.Version
 	}
-	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version)
+	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version, vc)
 	if err != nil {
-		continuation(nil, nil, err)
-		return
+		return continuation(nil, nil, err)
 	}
 	sts.SubmitTransaction(txnCap, activeRMs, continuation, delay)
+	return nil
 }
 
-func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {
+func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) error {
 	server.Log("STS Topology Changed", topology)
 	if topology.IsBlank() {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.
-		return
+		return nil
 	}
 	sts.topology = topology
 	sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
@@ -180,18 +187,18 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 			sts.hashCache.AddPosition(root.VarUUId, root.Positions)
 		}
 	}
-	sts.calculateDisabledHashcodes()
+	return sts.calculateDisabledHashcodes()
 }
 
-func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) {
+func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
 	server.Log("STS ServerConnectionsChanged", servers)
 	sts.connections = servers
-	sts.calculateDisabledHashcodes()
+	return sts.calculateDisabledHashcodes()
 }
 
-func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() {
+func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() error {
 	if sts.topology == nil || sts.connections == nil {
-		return
+		return nil
 	}
 	sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
 	for _, rmId := range sts.topology.RMs() {
@@ -208,9 +215,12 @@ func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() {
 		funcs := sts.bufferedSubmissions
 		sts.bufferedSubmissions = nil
 		for _, fun := range funcs {
-			fun()
+			if err := fun(); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func (sts *SimpleTxnSubmitter) Shutdown() {
@@ -219,7 +229,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewTxn(outgoingSeg)
 
@@ -235,7 +245,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, 
 	txnCap.SetActions(actions)
 	picker := ch.NewCombinationPicker(int(sts.topology.FInc), sts.disabledHashCodes)
 
-	rmIdToActionIndices, err := sts.translateActions(outgoingSeg, picker, &actions, &clientActions)
+	rmIdToActionIndices, err := sts.translateActions(outgoingSeg, picker, &actions, &clientActions, vc)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -274,7 +284,7 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 	}
 }
 
-func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, error) {
+func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc versionCache) (map[common.RMId]*[]int, error) {
 
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
@@ -284,6 +294,7 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 		clientAction := clientActions.At(idx)
 		action := actions.At(idx)
 		action.SetVarId(clientAction.VarId())
+		vUUId := common.MakeVarUUId(clientAction.VarId())
 
 		var err error
 		var hashCodes []common.RMId
@@ -293,18 +304,17 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 			sts.translateRead(&action, &clientAction)
 
 		case cmsgs.CLIENTACTION_WRITE:
-			sts.translateWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
+			sts.translateWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction, vUUId, vc)
 
 		case cmsgs.CLIENTACTION_READWRITE:
-			sts.translateReadWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
+			sts.translateReadWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction, vUUId, vc)
 
 		case cmsgs.CLIENTACTION_CREATE:
 			var positions *common.Positions
-			positions, hashCodes, err = sts.translateCreate(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
+			positions, hashCodes, err = sts.translateCreate(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction, vUUId, vc)
 			if err != nil {
 				return nil, err
 			}
-			vUUId := common.MakeVarUUId(clientAction.VarId())
 			createdPositions[*vUUId] = positions
 
 		case cmsgs.CLIENTACTION_ROLL:
@@ -366,6 +376,9 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 		positions, found := createdPositions[*vUUId]
 		if !found {
 			positions = sts.hashCache.GetPositions(vUUId)
+			if !vc.EnsureSubset(vUUId, vUUIdPos.Capabilities()) {
+				return nil, fmt.Errorf("Reference created to %v attempts to extend known capabilities.", vUUId)
+			}
 		}
 		if positions == nil {
 			return nil, fmt.Errorf("Txn contains reference to unknown var %v", vUUId)
@@ -382,44 +395,37 @@ func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientAction *
 	read.SetVersion(clientRead.Version())
 }
 
-func (sts *SimpleTxnSubmitter) translateWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction, vUUId *common.VarUUId, vc versionCache) {
 	action.SetWrite()
 	clientWrite := clientAction.Write()
 	write := action.Write()
-	write.SetValue(clientWrite.Value())
+	write.SetValue(vc.ValueForWrite(vUUId, clientWrite.Value()))
 	clientReferences := clientWrite.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	write.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	write.SetReferences(copyReferences(&clientReferences, outgoingSeg, referencesInNeedOfPositions, vUUId, vc))
 }
 
-func (sts *SimpleTxnSubmitter) translateReadWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateReadWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction, vUUId *common.VarUUId, vc versionCache) {
 	action.SetReadwrite()
 	clientReadWrite := clientAction.Readwrite()
 	readWrite := action.Readwrite()
 	readWrite.SetVersion(clientReadWrite.Version())
-	readWrite.SetValue(clientReadWrite.Value())
+	readWrite.SetValue(vc.ValueForWrite(vUUId, clientReadWrite.Value()))
 	clientReferences := clientReadWrite.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	readWrite.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	readWrite.SetReferences(copyReferences(&clientReferences, outgoingSeg, referencesInNeedOfPositions, vUUId, vc))
 }
 
-func (sts *SimpleTxnSubmitter) translateCreate(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) (*common.Positions, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) translateCreate(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction, vUUId *common.VarUUId, vc versionCache) (*common.Positions, []common.RMId, error) {
 	action.SetCreate()
 	clientCreate := clientAction.Create()
 	create := action.Create()
 	create.SetValue(clientCreate.Value())
-	vUUId := common.MakeVarUUId(clientAction.VarId())
 	positions, hashCodes, err := sts.hashCache.CreatePositions(vUUId, int(sts.topology.MaxRMCount))
 	if err != nil {
 		return nil, nil, err
 	}
 	create.SetPositions((capn.UInt8List)(*positions))
 	clientReferences := clientCreate.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	create.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	create.SetReferences(copyReferences(&clientReferences, outgoingSeg, referencesInNeedOfPositions, nil, vc))
 	return positions, hashCodes, nil
 }
 
@@ -430,16 +436,135 @@ func (sts *SimpleTxnSubmitter) translateRoll(outgoingSeg *capn.Segment, referenc
 	roll.SetVersion(clientRoll.Version())
 	roll.SetValue(clientRoll.Value())
 	clientReferences := clientRoll.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	roll.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	roll.SetReferences(copyReferences(&clientReferences, outgoingSeg, referencesInNeedOfPositions, nil, nil))
 }
 
-func copyReferences(clientReferences *capn.DataList, references *msgs.VarIdPos_List, referencesInNeedOfPositions *[]*msgs.VarIdPos) {
-	for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
-		vUUIdPos := references.At(idx)
-		vUUId := clientReferences.At(idx)
-		vUUIdPos.SetId(vUUId)
-		*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
+func copyReferences(clientReferences *cmsgs.ClientVarIdPos_List, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, vc versionCache) msgs.VarIdPos_List {
+	all, mask, existingRefs := vc.ReferencesWriteMask(vUUId)
+	if all {
+		refs := msgs.NewVarIdPosList(seg, clientReferences.Len())
+		for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
+			clientRef := clientReferences.At(idx)
+			vUUIdPos := refs.At(idx)
+			vUUIdPos.SetId(clientRef.VarId())
+			vUUIdPos.SetCapabilities(translateCapabilities(seg, clientRef.Capabilities()))
+			*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
+		}
+		return refs
+	} else {
+		refs := msgs.NewVarIdPosList(seg, len(existingRefs))
+		clientRefLen := clientReferences.Len()
+		if clientRefLen > len(existingRefs) {
+			clientRefLen = len(existingRefs)
+		}
+		idx := 0
+		for ; idx < clientRefLen; idx++ {
+			vUUIdPos := refs.At(idx)
+			if len(mask) > 0 && mask[0] == uint32(idx) {
+				mask = mask[1:]
+				clientRef := clientReferences.At(idx)
+				vUUIdPos.SetId(clientRef.VarId())
+				vUUIdPos.SetCapabilities(translateCapabilities(seg, clientRef.Capabilities()))
+			} else {
+				existing := existingRefs[idx]
+				vUUIdPos.SetId(existing.Id())
+				vUUIdPos.SetCapabilities(existing.Capabilities())
+			}
+			*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
+		}
+		for ; idx < len(existingRefs); idx++ {
+			vUUIdPos := refs.At(idx)
+			existing := existingRefs[idx]
+			vUUIdPos.SetId(existing.Id())
+			vUUIdPos.SetCapabilities(existing.Capabilities())
+		}
+		return refs
 	}
+}
+
+func translateCapabilities(seg *capn.Segment, cap cmsgs.Capabilities) cmsgs.Capabilities {
+	readWhich, writeWhich := cap.References().Read().Which(), cap.References().Write().Which()
+	if readWhich == cmsgs.CAPABILITIESREFERENCESREAD_ALL &&
+		writeWhich == cmsgs.CAPABILITIESREFERENCESWRITE_ALL {
+		return cap
+	}
+	rebuild := false
+	if readWhich == cmsgs.CAPABILITIESREFERENCESREAD_ONLY {
+		only := cap.References().Read().Only().ToArray()
+		if len(only) > 1 {
+			old := only[0]
+			for _, index := range only[1:] {
+				if old >= index {
+					rebuild = true
+					break
+				}
+				old = index
+			}
+		}
+	}
+	if !rebuild && writeWhich == cmsgs.CAPABILITIESREFERENCESWRITE_ONLY {
+		only := cap.References().Write().Only().ToArray()
+		if len(only) > 1 {
+			old := only[0]
+			for _, index := range only[1:] {
+				if old >= index {
+					rebuild = true
+					break
+				}
+				old = index
+			}
+		}
+	}
+	if !rebuild {
+		return cap
+	}
+	capNew := cmsgs.NewCapabilities(seg)
+	capNew.SetValue(cap.Value())
+	readNew := capNew.References().Read()
+	if readWhich == cmsgs.CAPABILITIESREFERENCESREAD_ALL {
+		readNew.SetAll()
+	} else {
+		only := cap.References().Read().Only().ToArray()
+		common.SortUInt32(only).Sort()
+		if len(only) > 1 {
+			old := only[0]
+			for idx := 1; idx < len(only); idx++ {
+				cur := only[idx]
+				if cur == old {
+					only = append(only[:idx], only[idx+1:]...)
+					idx--
+				}
+				old = cur
+			}
+		}
+		onlyNew := seg.NewUInt32List(len(only))
+		for idx, index := range only {
+			onlyNew.Set(idx, index)
+		}
+		readNew.SetOnly(onlyNew)
+	}
+	writeNew := capNew.References().Write()
+	if writeWhich == cmsgs.CAPABILITIESREFERENCESWRITE_ALL {
+		writeNew.SetAll()
+	} else {
+		only := cap.References().Write().Only().ToArray()
+		common.SortUInt32(only).Sort()
+		if len(only) > 1 {
+			old := only[0]
+			for idx := 1; idx < len(only); idx++ {
+				cur := only[idx]
+				if cur == old {
+					only = append(only[:idx], only[idx+1:]...)
+					idx--
+				}
+				old = cur
+			}
+		}
+		onlyNew := seg.NewUInt32List(len(only))
+		for idx, index := range only {
+			onlyNew.Set(idx, index)
+		}
+		writeNew.SetOnly(onlyNew)
+	}
+	return capNew
 }

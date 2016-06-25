@@ -92,10 +92,11 @@ type localConnectionMsgRunClientTxn struct {
 	outcome     *msgs.Outcome
 }
 
-func (lcmrct *localConnectionMsgRunClientTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+func (lcmrct *localConnectionMsgRunClientTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) error {
 	lcmrct.outcome = outcome
 	lcmrct.err = err
 	lcmrct.maybeClose()
+	return nil
 }
 
 type localConnectionMsgRunTxn struct {
@@ -107,10 +108,11 @@ type localConnectionMsgRunTxn struct {
 	outcome     *msgs.Outcome
 }
 
-func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) error {
 	lcmrt.outcome = outcome
 	lcmrt.err = err
 	lcmrt.maybeClose()
+	return nil
 }
 
 func (lc *LocalConnection) NextVarUUId() *common.VarUUId {
@@ -283,16 +285,16 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 			case localConnectionMsgShutdown:
 				terminate = true
 			case *localConnectionMsgTopologyChanged:
-				lc.submitter.TopologyChanged(msgT.topology)
+				err = lc.submitter.TopologyChanged(msgT.topology)
 				msgT.maybeClose()
 			case *localConnectionMsgRunTxn:
 				lc.runTransaction(msgT)
 			case *localConnectionMsgRunClientTxn:
-				lc.runClientTransaction(msgT)
+				err = lc.runClientTransaction(msgT)
 			case localConnectionMsgOutcomeReceived:
-				lc.submitter.SubmissionOutcomeReceived(msgT.sender, msgT.txnId, msgT.outcome)
+				err = lc.submitter.SubmissionOutcomeReceived(msgT.sender, msgT.txnId, msgT.outcome)
 			case localConnectionMsgServerConnectionsChanged:
-				lc.submitter.ServerConnectionsChanged((map[common.RMId]paxos.Connection)(msgT))
+				err = lc.submitter.ServerConnectionsChanged((map[common.RMId]paxos.Connection)(msgT))
 			case localConnectionMsgStatus:
 				lc.status(msgT.StatusConsumer)
 			default:
@@ -310,7 +312,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	lc.cellTail.Terminate()
 }
 
-func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunClientTxn) {
+func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunClientTxn) error {
 	txn := txnQuery.txn
 	if txnQuery.assignTxnId {
 		txnId := lc.getNextTxnId()
@@ -320,7 +322,7 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
-	lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, true)
+	return lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, true, nil)
 }
 
 func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {

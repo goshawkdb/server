@@ -263,11 +263,11 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 	case connectionMsgSend:
 		err = conn.sendMessage(msgT)
 	case connectionMsgOutcomeReceived:
-		conn.outcomeReceived(msgT)
+		err = conn.outcomeReceived(msgT)
 	case *connectionMsgTopologyChanged:
 		err = conn.topologyChanged(msgT)
 	case connectionMsgServerConnectionsChanged:
-		conn.serverConnectionsChanged(msgT)
+		err = conn.serverConnectionsChanged(msgT)
 	case connectionMsgStatus:
 		conn.status(msgT.StatusConsumer)
 	default:
@@ -746,17 +746,18 @@ func (cr *connectionRun) init(conn *Connection) {
 	cr.Connection = conn
 }
 
-func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) {
+func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) error {
 	if cr.currentState != cr {
-		return
+		return nil
 	}
-	cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
+	err := cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
 	if cr.submitterIdle != nil && cr.submitter.IsIdle() {
 		si := cr.submitterIdle
 		cr.submitterIdle = nil
 		server.Log("Connection", cr.Connection, "outcomeReceived", si, "(submitterIdle)")
 		si.maybeClose()
 	}
+	return err
 }
 
 func (cr *connectionRun) start() (bool, error) {
@@ -832,7 +833,10 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 				return errors.New("Client connection closed: roots have changed")
 			}
 		}
-		cr.submitter.TopologyChanged(topology)
+		if err := cr.submitter.TopologyChanged(topology); err != nil {
+			tc.maybeClose()
+			return err
+		}
 		if cr.submitter.IsIdle() {
 			server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client, submitter is idle)")
 			tc.maybeClose()
@@ -853,10 +857,11 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	return nil
 }
 
-func (cr *connectionRun) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) {
+func (cr *connectionRun) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
 	if cr.submitter != nil {
-		cr.submitter.ServerConnectionsChanged(servers)
+		return cr.submitter.ServerConnectionsChanged(servers)
 	}
+	return nil
 }
 
 func (cr *connectionRun) handleMsgFromClient(msg cmsgs.ClientMessage) error {
@@ -868,26 +873,26 @@ func (cr *connectionRun) handleMsgFromClient(msg cmsgs.ClientMessage) error {
 	switch which := msg.Which(); which {
 	case cmsgs.CLIENTMESSAGE_HEARTBEAT:
 		// do nothing
+		return nil
 	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		ctxn := msg.ClientTxnSubmission()
 		origTxnId := common.MakeTxnId(ctxn.Id())
-		cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) {
+		return cr.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) error {
 			switch {
 			case err != nil:
-				cr.clientTxnError(&ctxn, err, origTxnId)
+				return cr.clientTxnError(&ctxn, err, origTxnId)
 			case clientOutcome == nil: // shutdown
-				return
+				return nil
 			default:
 				seg := capn.NewBuffer(nil)
 				msg := cmsgs.NewRootClientMessage(seg)
 				msg.SetClientTxnOutcome(*clientOutcome)
-				cr.sendMessage(server.SegToBytes(msg.Segment))
+				return cr.sendMessage(server.SegToBytes(msg.Segment))
 			}
 		})
 	default:
 		return cr.maybeRestartConnection(fmt.Errorf("Unexpected message type received from client: %v", which))
 	}
-	return nil
 }
 
 func (cr *connectionRun) handleMsgFromServer(msg msgs.Message) error {
