@@ -705,7 +705,7 @@ func (fo *frameOpen) maybeStartRoll() {
 			}
 			// fmt.Printf("r%v ", ow)
 			server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
-			if outcome == nil || outcome.Which() != msgs.OUTCOME_COMMIT {
+			if (outcome == nil && err != nil) || (outcome != nil && outcome.Which() != msgs.OUTCOME_COMMIT) {
 				fo.v.applyToVar(func() {
 					fo.rollActive = false
 					if err == AbortRollNotInPermutation {
