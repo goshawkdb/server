@@ -4,6 +4,7 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 )
 
@@ -12,57 +13,86 @@ const (
 )
 
 type VectorClock struct {
-	cap     *msgs.VectorClock
+	data    []byte
 	initial map[common.VarUUId]uint64
 	adds    map[common.VarUUId]uint64
 	changes map[common.VarUUId]uint64
-	Len     int
+	length  int
+	inited  bool
 }
 
-func VectorClockFromCap(vcCap msgs.VectorClock) *VectorClock {
-	l := vcCap.VarUuids().Len()
-	vc := &VectorClock{
-		cap:     &vcCap,
-		initial: make(map[common.VarUUId]uint64, l),
-		Len:     l,
+func VectorClockFromData(vcData []byte) *VectorClock {
+	return &VectorClock{data: vcData}
+}
+
+func NewVectorClock() *VectorClock {
+	return &VectorClock{
+		data:   []byte{},
+		inited: true,
 	}
+}
+
+func (vc *VectorClock) init() {
+	if vc == nil || vc.inited {
+		return
+	}
+	vc.inited = true
+	if len(vc.data) == 0 {
+		return
+	}
+	seg, _, err := capn.ReadFromMemoryZeroCopy(vc.data)
+	if err != nil {
+		panic(fmt.Sprintf("Error when decoding vector clock: %v", err))
+	}
+	vcCap := msgs.ReadRootVectorClock(seg)
+	l := vcCap.VarUuids().Len()
+	vc.length = l
+	vc.initial = make(map[common.VarUUId]uint64, l)
 	keys := vcCap.VarUuids()
 	values := vcCap.Values()
 	for idx, l := 0, keys.Len(); idx < l; idx++ {
 		k := common.MakeVarUUId(keys.At(idx))
 		vc.initial[*k] = values.At(idx)
 	}
-	return vc
-}
-
-func NewVectorClock() *VectorClock {
-	return &VectorClock{}
 }
 
 func (vcA *VectorClock) Clone() *VectorClock {
-	adds, changes := vcA.adds, vcA.changes
-	if len(adds) > 0 {
-		adds = make(map[common.VarUUId]uint64, len(adds))
+	if vcA == nil {
+		return nil
+	}
+	if !vcA.inited {
+		return VectorClockFromData(vcA.data)
+	}
+	vcB := &VectorClock{
+		data:    vcA.data,
+		initial: vcA.initial,
+		length:  vcA.length,
+		inited:  true,
+	}
+	if len(vcA.adds) > 0 {
+		adds := make(map[common.VarUUId]uint64, len(vcA.adds))
 		for k, v := range vcA.adds {
 			adds[k] = v
 		}
+		vcB.adds = adds
 	}
-	if len(changes) > 0 {
-		changes = make(map[common.VarUUId]uint64, len(changes))
+	if len(vcA.changes) > 0 {
+		changes := make(map[common.VarUUId]uint64, len(vcA.changes))
 		for k, v := range vcA.changes {
 			changes[k] = v
 		}
+		vcB.changes = changes
 	}
-	return &VectorClock{
-		cap:     vcA.cap,
-		initial: vcA.initial,
-		adds:    adds,
-		changes: changes,
-		Len:     vcA.Len,
-	}
+	return vcB
+}
+
+func (vc *VectorClock) Len() int {
+	vc.init()
+	return vc.length
 }
 
 func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
+	vc.init()
 	for k, v := range vc.adds {
 		if !it(&k, v) {
 			return false
@@ -89,7 +119,10 @@ func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
 }
 
 func (vc *VectorClock) String() string {
-	str := fmt.Sprintf("VC:(%v)", vc.Len)
+	if !vc.inited {
+		return "VC:(undecoded)"
+	}
+	str := fmt.Sprintf("VC:(%v)", vc.Len())
 	vc.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
 		str += fmt.Sprintf(" %v:%v", vUUId, v)
 		return true
@@ -98,6 +131,7 @@ func (vc *VectorClock) String() string {
 }
 
 func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
+	vc.init()
 	if value, found := vc.adds[*vUUId]; found {
 		return value
 	} else if value, found := vc.changes[*vUUId]; found {
@@ -109,13 +143,14 @@ func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 }
 
 func (vc *VectorClock) Delete(vUUId *common.VarUUId) *VectorClock {
+	vc.init()
 	if _, found := vc.adds[*vUUId]; found {
 		delete(vc.adds, *vUUId)
-		vc.Len--
+		vc.length--
 		return vc
 	} else if ch, found := vc.changes[*vUUId]; found {
 		if ch != deleted {
-			vc.Len--
+			vc.length--
 			vc.changes[*vUUId] = deleted
 		}
 		return vc
@@ -124,19 +159,20 @@ func (vc *VectorClock) Delete(vUUId *common.VarUUId) *VectorClock {
 			vc.changes = make(map[common.VarUUId]uint64)
 		}
 		vc.changes[*vUUId] = deleted
-		vc.Len--
+		vc.length--
 	}
 	return vc
 }
 
 func (vc *VectorClock) Bump(vUUId *common.VarUUId, inc uint64) *VectorClock {
+	vc.init()
 	if old, found := vc.adds[*vUUId]; found {
 		vc.adds[*vUUId] = old + inc
 		return vc
 	} else if old, found := vc.changes[*vUUId]; found {
 		if old == deleted {
 			vc.changes[*vUUId] = inc
-			vc.Len++
+			vc.length++
 		} else {
 			vc.changes[*vUUId] = old + inc
 		}
@@ -152,12 +188,13 @@ func (vc *VectorClock) Bump(vUUId *common.VarUUId, inc uint64) *VectorClock {
 			vc.adds = make(map[common.VarUUId]uint64)
 		}
 		vc.adds[*vUUId] = inc
-		vc.Len++
+		vc.length++
 		return vc
 	}
 }
 
 func (vc *VectorClock) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool {
+	vc.init()
 	if old, found := vc.adds[*vUUId]; found {
 		if v > old {
 			vc.adds[*vUUId] = v
@@ -168,7 +205,7 @@ func (vc *VectorClock) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool {
 		if v > old {
 			vc.changes[*vUUId] = v
 			if old == deleted {
-				vc.Len++
+				vc.length++
 			}
 			return true
 		}
@@ -187,12 +224,14 @@ func (vc *VectorClock) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool {
 			vc.adds = make(map[common.VarUUId]uint64)
 		}
 		vc.adds[*vUUId] = v
-		vc.Len++
+		vc.length++
 		return true
 	}
 }
 
 func (vcA *VectorClock) MergeInMax(vcB *VectorClock) bool {
+	vcA.init()
+	vcB.init()
 	changed := false
 	vcB.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
 		// put "|| changed" last to avoid short-circuit
@@ -203,13 +242,15 @@ func (vcA *VectorClock) MergeInMax(vcB *VectorClock) bool {
 }
 
 func (vcA *VectorClock) MergeInMissing(vcB *VectorClock) bool {
+	vcA.init()
+	vcB.init()
 	changed := false
 	vcB.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
 		if _, found := vcA.adds[*vUUId]; found {
 			return true
 		} else if ch, found := vcA.changes[*vUUId]; found {
 			if ch == deleted {
-				vcA.Len++
+				vcA.length++
 				vcA.changes[*vUUId] = v
 				changed = true
 			}
@@ -217,7 +258,7 @@ func (vcA *VectorClock) MergeInMissing(vcB *VectorClock) bool {
 		} else if _, found := vcA.initial[*vUUId]; found {
 			return true
 		} else {
-			vcA.Len++
+			vcA.length++
 			if vcA.adds == nil {
 				vcA.adds = make(map[common.VarUUId]uint64)
 			}
@@ -230,17 +271,18 @@ func (vcA *VectorClock) MergeInMissing(vcB *VectorClock) bool {
 }
 
 func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
+	vc.init()
 	if old, found := vc.adds[*vUUId]; found {
 		if old <= v {
 			delete(vc.adds, *vUUId)
-			vc.Len--
+			vc.length--
 			return true
 		}
 		return false
 	} else if old, found := vc.changes[*vUUId]; found {
 		if old != deleted && old <= v {
 			vc.changes[*vUUId] = deleted
-			vc.Len--
+			vc.length--
 			return true
 		}
 		return false
@@ -250,7 +292,7 @@ func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
 				vc.changes = make(map[common.VarUUId]uint64)
 			}
 			vc.changes[*vUUId] = deleted
-			vc.Len--
+			vc.length--
 			return true
 		}
 		return false
@@ -259,8 +301,10 @@ func (vc *VectorClock) SubtractIfMatch(vUUId *common.VarUUId, v uint64) bool {
 }
 
 func (vcA *VectorClock) LessThan(vcB *VectorClock) bool {
+	vcA.init()
+	vcB.init()
 	// 1. If A has more elems than B then A cannot be < B
-	if vcA.Len > vcB.Len {
+	if vcA.length > vcB.length {
 		return false
 	}
 	ltFound := false
@@ -278,28 +322,26 @@ func (vcA *VectorClock) LessThan(vcB *VectorClock) bool {
 	}
 	// 3. Everything in A is also in B and <= B. If A == B for
 	// everything in A, then B must be > A if len(B) > len(A)
-	return ltFound || vcB.Len > vcA.Len
+	return ltFound || vcB.length > vcA.length
 }
 
-func (vc *VectorClock) AddToSeg(seg *capn.Segment) msgs.VectorClock {
+func (vc *VectorClock) AsData() []byte {
 	if vc == nil {
-		vcCap := msgs.NewVectorClock(seg)
-		vcCap.SetVarUuids(seg.NewDataList(0))
-		vcCap.SetValues(seg.NewUInt64List(0))
-		return vcCap
+		return []byte{}
 	}
 
-	if vc.cap != nil && len(vc.adds) == 0 && len(vc.changes) == 0 {
-		return *vc.cap
+	if len(vc.adds) == 0 && len(vc.changes) == 0 {
+		return vc.data
 	}
 
-	vcCap := msgs.NewVectorClock(seg)
-	vUUIds := seg.NewDataList(vc.Len)
-	values := seg.NewUInt64List(vc.Len)
+	seg := capn.NewBuffer(nil)
+	vcCap := msgs.NewRootVectorClock(seg)
+	vUUIds := seg.NewDataList(vc.length)
+	values := seg.NewUInt64List(vc.length)
 	vcCap.SetVarUuids(vUUIds)
 	vcCap.SetValues(values)
 	idx := 0
-	initial := make(map[common.VarUUId]uint64, vc.Len)
+	initial := make(map[common.VarUUId]uint64, vc.length)
 	vc.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
 		initial[*vUUId] = v
 		vUUIds.Set(idx, vUUId[:])
@@ -311,7 +353,7 @@ func (vc *VectorClock) AddToSeg(seg *capn.Segment) msgs.VectorClock {
 	vc.initial = initial
 	vc.adds = nil
 	vc.changes = nil
-	vc.cap = &vcCap
+	vc.data = server.SegToBytes(seg)
 
-	return vcCap
+	return vc.data
 }

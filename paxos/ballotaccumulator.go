@@ -219,7 +219,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 
 	} else {
 		outcome.SetTxn(*ba.Txn)
-		outcome.SetCommit(combinedClock.AddToSeg(seg))
+		outcome.SetCommit(combinedClock.AsData())
 	}
 
 	ba.outcome = (*outcomeEqualId)(&outcome)
@@ -279,9 +279,9 @@ func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
 	case cur.Vote == eng.Commit && new.Vote == eng.Commit:
 		cur.Clock.MergeInMax(new.Clock)
 
-	case cur.Vote == eng.AbortDeadlock && cur.Clock.Len == 0:
+	case cur.Vote == eng.AbortDeadlock && cur.Clock.Len() == 0:
 		// Do nothing - ignore the new ballot
-	case new.Vote == eng.AbortDeadlock && new.Clock.Len == 0:
+	case new.Vote == eng.AbortDeadlock && new.Clock.Len() == 0:
 		// This has been created by abort proposer. This trumps everything.
 		cur.Vote = eng.AbortDeadlock
 		cur.Clock = new.Clock
@@ -521,7 +521,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 			}
 			clock.SetVarIdMax(bra.vUUId, bra.clockElem)
 		}
-		update.SetClock(clock.AddToSeg(seg))
+		update.SetClock(clock.AsData())
 	}
 
 	return updates

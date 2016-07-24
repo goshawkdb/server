@@ -5,12 +5,11 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0x960e5f709149380d;
 
-using VC = import "vectorclock.capnp";
 using Txn = import "transaction.capnp";
 
 struct Ballot {
   varId @0: Data;
-  clock @1: VC.VectorClock;
+  clock @1: Data;
   vote  @2: Vote;
 }
 

@@ -46,8 +46,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	}
 
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
-	writeTxnClock := VectorClockFromCap(varCap.WriteTxnClock())
-	writesClock := VectorClockFromCap(varCap.WritesClock())
+	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock())
+	writesClock := VectorClockFromData(varCap.WritesClock())
 	server.Log(v.UUId, "Restored", writeTxnId)
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
@@ -250,8 +250,8 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	}
 
 	varCap.SetWriteTxnId(f.frameTxnId[:])
-	varCap.SetWriteTxnClock(f.frameTxnClock.AddToSeg(varSeg))
-	varCap.SetWritesClock(f.frameWritesClock.AddToSeg(varSeg))
+	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
+	varCap.SetWritesClock(f.frameWritesClock.AsData())
 	varData := server.SegToBytes(varSeg)
 
 	txnBytes := action.TxnRootBytes()

@@ -18,8 +18,8 @@ func AutoNewBallot(s *C.Segment) Ballot  { return Ballot(s.NewStructAR(0, 3)) }
 func ReadRootBallot(s *C.Segment) Ballot { return Ballot(s.Root(0).ToStruct()) }
 func (s Ballot) VarId() []byte           { return C.Struct(s).GetObject(0).ToData() }
 func (s Ballot) SetVarId(v []byte)       { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Ballot) Clock() VectorClock      { return VectorClock(C.Struct(s).GetObject(1).ToStruct()) }
-func (s Ballot) SetClock(v VectorClock)  { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Ballot) Clock() []byte           { return C.Struct(s).GetObject(1).ToData() }
+func (s Ballot) SetClock(v []byte)       { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s Ballot) Vote() Vote              { return Vote(C.Struct(s).GetObject(2).ToStruct()) }
 func (s Ballot) SetVote(v Vote)          { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s Ballot) WriteJSON(w io.Writer) error {
@@ -56,7 +56,11 @@ func (s Ballot) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Clock()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -122,7 +126,11 @@ func (s Ballot) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Clock()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}

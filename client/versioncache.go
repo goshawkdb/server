@@ -19,7 +19,7 @@ func NewVersionCache() versionCache {
 }
 
 func (vc versionCache) UpdateFromCommit(txnId *common.TxnId, outcome *msgs.Outcome) {
-	clock := eng.VectorClockFromCap(outcome.Commit())
+	clock := eng.VectorClockFromData(outcome.Commit())
 	actions := outcome.Txn().Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -44,7 +44,7 @@ func (vc versionCache) UpdateFromAbort(updates *msgs.Update_List) map[*msgs.Upda
 	for idx, l := 0, updates.Len(); idx < l; idx++ {
 		update := updates.At(idx)
 		txnId := common.MakeTxnId(update.TxnId())
-		clock := eng.VectorClockFromCap(update.Clock())
+		clock := eng.VectorClockFromData(update.Clock())
 		actions := update.Actions()
 		validActions := make([]*msgs.Action, 0, actions.Len())
 

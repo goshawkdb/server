@@ -161,8 +161,10 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		action.writeTxnActions = &txnActions
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
-		action.outcomeClock = VectorClockFromCap(varCap.WriteTxnClock())
-		action.writesClock = VectorClockFromCap(varCap.WritesClock())
+		action.outcomeClock = VectorClockFromData(varCap.WriteTxnClock())
+		action.outcomeClock.init()
+		action.writesClock = VectorClockFromData(varCap.WritesClock())
+		action.writesClock.init()
 		actionsMap[*action.vUUId] = action
 	}
 
@@ -535,7 +537,8 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	}
 	switch outcome.Which() {
 	case msgs.OUTCOME_COMMIT:
-		tro.outcomeClock = VectorClockFromCap(outcome.Commit())
+		tro.outcomeClock = VectorClockFromData(outcome.Commit())
+		tro.outcomeClock.init()
 		/*
 			excess := tro.outcomeClock.Len - tro.TxnCap.Actions().Len()
 			fmt.Printf("%v ", excess)

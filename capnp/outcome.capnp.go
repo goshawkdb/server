@@ -35,10 +35,10 @@ func (s Outcome) Id() OutcomeId_List       { return OutcomeId_List(C.Struct(s).G
 func (s Outcome) SetId(v OutcomeId_List)   { C.Struct(s).SetObject(0, C.Object(v)) }
 func (s Outcome) Txn() Txn                 { return Txn(C.Struct(s).GetObject(1).ToStruct()) }
 func (s Outcome) SetTxn(v Txn)             { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Outcome) Commit() VectorClock      { return VectorClock(C.Struct(s).GetObject(2).ToStruct()) }
-func (s Outcome) SetCommit(v VectorClock) {
+func (s Outcome) Commit() []byte           { return C.Struct(s).GetObject(2).ToData() }
+func (s Outcome) SetCommit(v []byte) {
 	C.Struct(s).Set16(0, 0)
-	C.Struct(s).SetObject(2, C.Object(v))
+	C.Struct(s).SetObject(2, s.Segment.NewData(v))
 }
 func (s Outcome) Abort() OutcomeAbort            { return OutcomeAbort(s) }
 func (s Outcome) SetAbort()                      { C.Struct(s).Set16(0, 1) }
@@ -109,7 +109,11 @@ func (s Outcome) WriteJSON(w io.Writer) error {
 		}
 		{
 			s := s.Commit()
-			err = s.WriteJSON(b)
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
 			if err != nil {
 				return err
 			}
@@ -246,7 +250,11 @@ func (s Outcome) WriteCapLit(w io.Writer) error {
 		}
 		{
 			s := s.Commit()
-			err = s.WriteCapLit(b)
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
 			if err != nil {
 				return err
 			}
@@ -351,8 +359,8 @@ func (s Update) TxnId() []byte            { return C.Struct(s).GetObject(0).ToDa
 func (s Update) SetTxnId(v []byte)        { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s Update) Actions() Action_List     { return Action_List(C.Struct(s).GetObject(1)) }
 func (s Update) SetActions(v Action_List) { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Update) Clock() VectorClock       { return VectorClock(C.Struct(s).GetObject(2).ToStruct()) }
-func (s Update) SetClock(v VectorClock)   { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s Update) Clock() []byte            { return C.Struct(s).GetObject(2).ToData() }
+func (s Update) SetClock(v []byte)        { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
 func (s Update) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -420,7 +428,11 @@ func (s Update) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Clock()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -504,7 +516,11 @@ func (s Update) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Clock()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
