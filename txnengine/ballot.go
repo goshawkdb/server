@@ -27,31 +27,32 @@ func (v Vote) ToVoteEnum() msgs.VoteEnum {
 
 type Ballot struct {
 	VarUUId   *common.VarUUId
-	Clock     *VectorClock
+	ClockData []byte
 	Vote      Vote
 	BallotCap *msgs.Ballot
 	VoteCap   *msgs.Vote
 }
 
 func NewBallot(vUUId *common.VarUUId, vote Vote, clock *VectorClock) *Ballot {
-	if clock != nil {
-		clock.AsData() // force serialisation now and hopefully therefore fewer times
-		clock = clock.Clone()
-	}
-	return &Ballot{
+	ballot := &Ballot{
 		VarUUId:   vUUId,
-		Clock:     clock,
 		Vote:      vote,
 		BallotCap: nil,
 		VoteCap:   nil,
 	}
+	if clock == nil {
+		ballot.ClockData = []byte{}
+	} else {
+		ballot.ClockData = clock.AsData()
+	}
+	return ballot
 }
 
 func BallotFromCap(ballotCap *msgs.Ballot) *Ballot {
 	voteCap := ballotCap.Vote()
 	ballot := &Ballot{
 		VarUUId:   common.MakeVarUUId(ballotCap.VarId()),
-		Clock:     VectorClockFromData(ballotCap.Clock()),
+		ClockData: ballotCap.Clock(),
 		Vote:      Vote(voteCap.Which()),
 		BallotCap: ballotCap,
 		VoteCap:   &voteCap,
@@ -77,7 +78,7 @@ func (ballot *Ballot) CreateBadReadCap(txnId *common.TxnId, actions *msgs.Action
 func (ballot *Ballot) AddToSeg(seg *capn.Segment) msgs.Ballot {
 	ballotCap := msgs.NewBallot(seg)
 	ballotCap.SetVarId(ballot.VarUUId[:])
-	ballotCap.SetClock(ballot.Clock.AsData())
+	ballotCap.SetClock(ballot.ClockData)
 
 	if ballot.VoteCap == nil {
 		voteCap := msgs.NewVote(seg)

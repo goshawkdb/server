@@ -62,6 +62,7 @@ func NewBallotAccumulator(txnId *common.TxnId, txn *msgs.Txn) *BallotAccumulator
 type varBallot struct {
 	vUUId      *common.VarUUId
 	result     *eng.Ballot
+	clock      *eng.VectorClock
 	rmToBallot rmBallots
 	voters     int
 }
@@ -258,71 +259,74 @@ func (ba *BallotAccumulator) Status(sc *server.StatusConsumer) {
 }
 
 func (vb *varBallot) CalculateResult(br badReads, clock *eng.VectorClock) {
-	vb.result = eng.NewBallot(vb.vUUId, eng.Commit, eng.NewVectorClock())
+	vb.result = eng.NewBallot(vb.vUUId, eng.Commit, nil)
+	vb.clock = eng.NewVectorClock()
 	for _, rmBal := range vb.rmToBallot {
 		vb.combineVote(rmBal, br)
 	}
+	vb.result.ClockData = vb.clock.AsData()
 	if !vb.result.Aborted() {
-		clock.MergeInMax(vb.result.Clock)
+		clock.MergeInMax(vb.clock)
 	}
 }
 
 func (vb *varBallot) combineVote(rmBal *rmBallot, br badReads) {
 	cur := vb.result
 	new := rmBal.ballot
+	newClock := eng.VectorClockFromData(new.ClockData)
 
 	if new.Vote == eng.AbortBadRead {
-		br.combine(rmBal)
+		br.combine(rmBal, newClock)
 	}
 
 	switch {
 	case cur.Vote == eng.Commit && new.Vote == eng.Commit:
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 
-	case cur.Vote == eng.AbortDeadlock && cur.Clock.Len() == 0:
+	case cur.Vote == eng.AbortDeadlock && vb.clock.Len() == 0:
 		// Do nothing - ignore the new ballot
-	case new.Vote == eng.AbortDeadlock && new.Clock.Len() == 0:
+	case new.Vote == eng.AbortDeadlock && newClock.Len() == 0:
 		// This has been created by abort proposer. This trumps everything.
 		cur.Vote = eng.AbortDeadlock
-		cur.Clock = new.Clock
+		vb.clock = newClock
 
 	case cur.Vote == eng.Commit:
 		// new.Vote != eng.Commit otherwise we'd have hit first case.
 		cur.Vote = new.Vote
-		cur.Clock = new.Clock.Clone()
+		vb.clock = newClock.Clone()
 
 	case new.Vote == eng.Commit:
 		// But we know cur.Vote != eng.Commit. Do nothing.
 
 	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortDeadlock:
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 
 	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortBadRead &&
-		new.Clock.At(vb.vUUId) < cur.Clock.At(vb.vUUId):
+		newClock.At(vb.vUUId) < vb.clock.At(vb.vUUId):
 		// The new Deadlock is strictly in the past of the current
 		// BadRead, so we stay on the badread.
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 
 	case new.Vote == eng.AbortDeadlock && cur.Vote == eng.AbortBadRead:
 		// The new Deadlock is equal or greater than (by clock local
 		// elem) than the current Badread. We should switch to the
 		// Deadlock
 		cur.Vote = eng.AbortDeadlock
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 
 	case cur.Vote == eng.AbortBadRead: // && new.Vote == eng.AbortBadRead
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 
-	case new.Clock.At(vb.vUUId) > cur.Clock.At(vb.vUUId):
+	case newClock.At(vb.vUUId) > vb.clock.At(vb.vUUId):
 		// && cur.Vote == AbortDeadlock && new.Vote == AbortBadRead. The
 		// new BadRead is strictly in the future of the cur Deadlock, so
 		// we should switch to the BadRead.
 		cur.Vote = eng.AbortBadRead
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 
 	default:
 		// cur.Vote == AbortDeadlock && new.Vote == AbortBadRead.
-		cur.Clock.MergeInMax(new.Clock)
+		vb.clock.MergeInMax(newClock)
 	}
 }
 
@@ -363,8 +367,7 @@ func NewBadReads() badReads {
 	return make(map[common.VarUUId]*badReadAction)
 }
 
-func (br badReads) combine(rmBal *rmBallot) {
-	clock := rmBal.ballot.Clock
+func (br badReads) combine(rmBal *rmBallot, clock *eng.VectorClock) {
 	badRead := rmBal.ballot.VoteCap.AbortBadRead()
 	txnId := common.MakeTxnId(badRead.TxnId())
 	actions := badRead.TxnActions()
