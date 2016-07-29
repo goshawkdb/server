@@ -101,16 +101,14 @@ func BallotAccumulatorFromData(txnId *common.TxnId, txn *msgs.Txn, outcome *outc
 		vBallot.rmToBallot = rmBals
 		for idy, m := 0, acceptedInstances.Len(); idy < m; idy++ {
 			acceptedInstance := acceptedInstances.At(idy)
-			ballot := acceptedInstance.Ballot()
 			rmBal := &rmBallot{
 				instanceRMId: common.RMId(acceptedInstance.RmId()),
-				ballot:       eng.BallotFromCap(&ballot),
+				ballot:       eng.BallotFromData(acceptedInstance.Ballot()),
 				roundNumber:  paxosNumber(acceptedInstance.RoundNumber()),
 			}
 			rmBals[idy] = rmBal
 		}
-		result := instancesForVar.Result()
-		vBallot.result = eng.BallotFromCap(&result)
+		vBallot.result = eng.BallotFromData(instancesForVar.Result())
 	}
 
 	return ba
@@ -128,18 +126,17 @@ func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *inst
 	if vBallot.rmToBallot == nil {
 		vBallot.rmToBallot = rmBallots(make([]*rmBallot, 0, vBallot.voters))
 	}
-	ballot := eng.BallotFromCap(inst.accepted)
 	found := false
 	for idx, rBal := range vBallot.rmToBallot {
 		if found = rBal.instanceRMId == instanceRMId; found {
-			vBallot.rmToBallot[idx].ballot = ballot
+			vBallot.rmToBallot[idx].ballot = inst.accepted
 			break
 		}
 	}
 	if !found {
 		rmBal := &rmBallot{
 			instanceRMId: instanceRMId,
-			ballot:       ballot,
+			ballot:       inst.accepted,
 			roundNumber:  inst.acceptedNum,
 		}
 		vBallot.rmToBallot = append(vBallot.rmToBallot, rmBal)
@@ -237,14 +234,14 @@ func (ba *BallotAccumulator) AddInstancesToSeg(seg *capn.Segment) msgs.Instances
 		instancesForVar := instances.At(idx)
 		idx++
 		instancesForVar.SetVarId(vUUIdCopy[:])
-		instancesForVar.SetResult(vBallot.result.AddToSeg(seg))
+		instancesForVar.SetResult(vBallot.result.Data)
 		acceptedInstances := msgs.NewAcceptedInstanceList(seg, len(vBallot.rmToBallot))
 		instancesForVar.SetInstances(acceptedInstances)
 		for idy, rmBal := range vBallot.rmToBallot {
 			acceptedInstance := acceptedInstances.At(idy)
 			acceptedInstance.SetRmId(uint32(rmBal.instanceRMId))
 			acceptedInstance.SetRoundNumber(uint64(rmBal.roundNumber))
-			acceptedInstance.SetBallot(*rmBal.ballot.BallotCap)
+			acceptedInstance.SetBallot(rmBal.ballot.Data)
 		}
 	}
 	return instances
@@ -264,18 +261,18 @@ type varBallotReducer struct {
 }
 
 func (vb *varBallot) CalculateResult(br badReads, clock *eng.VectorClockMutable) {
-	result := &varBallotReducer{
+	reducer := &varBallotReducer{
 		vUUId:         vb.vUUId,
 		BallotBuilder: eng.NewBallotBuilder(vb.vUUId, eng.Commit, eng.NewVectorClock().AsMutable()),
 		badReads:      br,
 	}
 	for _, rmBal := range vb.rmToBallot {
-		result.combineVote(rmBal)
+		reducer.combineVote(rmBal)
 	}
-	if !result.Aborted() {
-		clock.MergeInMax(result.Clock)
+	if !reducer.Aborted() {
+		clock.MergeInMax(reducer.Clock)
 	}
-	vb.result = result.ToBallot()
+	vb.result = reducer.ToBallot()
 }
 
 func (cur *varBallotReducer) combineVote(rmBal *rmBallot) {

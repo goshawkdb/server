@@ -118,13 +118,13 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 		for idy, m := 0, acceptedInstances.Len(); idy < m; idy++ {
 			acceptedInstance := acceptedInstances.At(idy)
 			roundNumber := acceptedInstance.RoundNumber()
-			ballot := acceptedInstance.Ballot()
+			ballotData := acceptedInstance.Ballot()
 			instance := &instance{
 				manager:     am,
 				vUUId:       vUUId,
 				promiseNum:  paxosNumber(roundNumber),
 				acceptedNum: paxosNumber(roundNumber),
-				accepted:    &ballot,
+				accepted:    eng.BallotFromData(ballotData),
 			}
 			binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], acceptedInstance.RmId())
 			copy(instIdSlice[common.KeyLen+4:], vUUId[:])
@@ -213,10 +213,11 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *commo
 
 	for idx, l := 0, requests.Len(); idx < l; idx++ {
 		request := requests.At(idx)
-		vUUId := common.MakeVarUUId(request.Ballot().VarId())
+		ballot := eng.BallotFromData(request.Ballot())
+		vUUId := ballot.VarUUId
 		copy(instIdSlice[common.KeyLen+4:], vUUId[:])
 		inst := am.ensureInstance(txnId, &instId, vUUId)
-		accepted, rejected := inst.TwoATxnVotesReceived(&request)
+		accepted, rejected := inst.TwoATxnVotesReceived(paxosNumber(request.RoundNumber()), ballot)
 		if accepted {
 			a.BallotAccepted(instanceRMId, inst, vUUId, &txnCap)
 		} else if rejected {
@@ -353,7 +354,7 @@ type instance struct {
 	vUUId       *common.VarUUId
 	promiseNum  paxosNumber
 	acceptedNum paxosNumber
-	accepted    *msgs.Ballot
+	accepted    *eng.Ballot
 }
 
 func (i *instance) OneATxnVotesReceived(proposal *msgs.TxnVoteProposal, promise *msgs.TxnVotePromise) {
@@ -367,23 +368,21 @@ func (i *instance) OneATxnVotesReceived(proposal *msgs.TxnVoteProposal, promise 
 			promise.SetAccepted()
 			accepted := promise.Accepted()
 			accepted.SetRoundNumber(uint64(i.acceptedNum))
-			accepted.SetBallot(*i.accepted)
+			accepted.SetBallot(i.accepted.Data)
 		}
 	} else {
 		promise.SetRoundNumberTooLow(uint32(i.promiseNum >> 32))
 	}
 }
 
-func (i *instance) TwoATxnVotesReceived(request *msgs.TxnVoteAcceptRequest) (accepted bool, rejected bool) {
-	roundNumber := paxosNumber(request.RoundNumber())
+func (i *instance) TwoATxnVotesReceived(roundNumber paxosNumber, ballot *eng.Ballot) (accepted bool, rejected bool) {
 	if roundNumber == i.acceptedNum && i.accepted != nil {
 		// duplicate 2a. Don't issue any response.
 		return
 	} else if roundNumber >= i.promiseNum || i.promiseNum == 0 {
 		i.promiseNum = roundNumber
 		i.acceptedNum = roundNumber
-		ballot := request.Ballot()
-		i.accepted = &ballot
+		i.accepted = ballot
 		accepted = true
 		return
 	} else {

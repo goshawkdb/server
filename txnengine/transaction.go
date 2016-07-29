@@ -93,7 +93,7 @@ func (action *localAction) VoteDeadlock(clock *VectorClockMutable) {
 
 func (action *localAction) VoteBadRead(clock *VectorClockMutable, txnId *common.TxnId, actions *msgs.Action_List) {
 	if action.ballot == nil {
-		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadCap(txnId, actions).ToBallot()
+		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadBallot(txnId, actions)
 		action.voteCast(action.ballot, true)
 	}
 }

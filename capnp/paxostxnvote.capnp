@@ -5,7 +5,6 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xd3af64eb7d699620;
 
-using Ballot  = import "ballot.capnp";
 using Txn     = import "transaction.capnp";
 using Outcome = import "outcome.capnp";
 
@@ -50,14 +49,14 @@ struct TxnVotePromise {
     freeChoice @2: Void;
     accepted :group {
       roundNumber @3: UInt64;
-      ballot      @4: Ballot.Ballot;
+      ballot      @4: Data;
     }
     roundNumberTooLow @5: UInt32;
   }
 }
 
 struct TxnVoteAcceptRequest {
-  ballot      @0: Ballot.Ballot;
+  ballot      @0: Data;
   roundNumber @1: UInt64;
 }
 

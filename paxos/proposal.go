@@ -290,7 +290,7 @@ type proposalOneB struct {
 	*proposalInstance
 	promisesReceivedFrom []common.RMId
 	winningRound         paxosNumber
-	winningBallot        *msgs.Ballot
+	winningBallot        []byte
 }
 
 func (oneB *proposalOneB) proposalInstanceComponentWitness() {}
@@ -328,8 +328,7 @@ func (oneB *proposalOneB) oneBTxnVotesReceived(sender common.RMId, promise *msgs
 		accepted := promise.Accepted()
 		if roundNumber = paxosNumber(accepted.RoundNumber()); roundNumber > oneB.winningRound {
 			oneB.winningRound = roundNumber
-			ballot := accepted.Ballot()
-			oneB.winningBallot = &ballot
+			oneB.winningBallot = accepted.Ballot()
 		}
 	default:
 		panic(fmt.Sprintf("Unexpected promise type: %v", promise.Which()))
@@ -366,19 +365,18 @@ func (twoA *proposalTwoA) init(pi *proposalInstance) {
 func (twoA *proposalTwoA) start() {}
 
 func (twoA *proposalTwoA) addTwoAToAcceptRequest(seg *capn.Segment, acceptRequest *msgs.TxnVoteAcceptRequest, sender *proposalSender) bool {
-	var ballotPtr *msgs.Ballot
+	var ballotData []byte
 	if twoA.winningBallot == nil { // free choice from everyone
-		ballot := twoA.ballot.AddToSeg(seg)
-		ballotPtr = &ballot
+		ballotData = twoA.ballot.Data
 	} else {
-		ballotPtr = twoA.winningBallot
+		ballotData = twoA.winningBallot
 	}
-	acceptRequest.SetBallot(*ballotPtr)
+	acceptRequest.SetBallot(ballotData)
 
 	acceptRequest.SetRoundNumber(uint64(twoA.currentRoundNumber))
 	twoA.twoASender = sender
 	twoA.nextState(nil)
-	return ballotPtr.Vote().Which() != msgs.VOTE_COMMIT
+	return eng.BallotFromData(ballotData).Vote != eng.Commit
 }
 
 // twoB

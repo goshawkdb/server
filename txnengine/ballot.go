@@ -1,8 +1,10 @@
 package txnengine
 
 import (
+	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 )
 
@@ -26,36 +28,37 @@ func (v Vote) ToVoteEnum() msgs.VoteEnum {
 }
 
 type Ballot struct {
-	VarUUId   *common.VarUUId
-	Clock     *VectorClock
-	Vote      Vote
-	BallotCap *msgs.Ballot
-	VoteCap   *msgs.Vote
+	VarUUId *common.VarUUId
+	Data    []byte
+	VoteCap *msgs.Vote
+	Clock   *VectorClock
+	Vote    Vote
 }
 
 type BallotBuilder struct {
 	*Ballot
 	Clock *VectorClockMutable
-	seg   *capn.Segment
 }
 
-func BallotFromCap(ballotCap *msgs.Ballot) *Ballot {
+func BallotFromData(data []byte) *Ballot {
+	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
+	if err != nil {
+		panic(fmt.Sprintf("Error when decoding ballot: %v", err))
+	}
+	ballotCap := msgs.ReadRootBallot(seg)
 	voteCap := ballotCap.Vote()
+	vUUId := common.MakeVarUUId(ballotCap.VarId())
 	return &Ballot{
-		VarUUId:   common.MakeVarUUId(ballotCap.VarId()),
-		Clock:     VectorClockFromData(ballotCap.Clock(), false),
-		Vote:      Vote(voteCap.Which()),
-		BallotCap: ballotCap,
-		VoteCap:   &voteCap,
+		VarUUId: vUUId,
+		Data:    data,
+		VoteCap: &voteCap,
+		Clock:   VectorClockFromData(ballotCap.Clock(), false),
+		Vote:    Vote(voteCap.Which()),
 	}
 }
 
 func (ballot *Ballot) Aborted() bool {
 	return ballot.Vote != Commit
-}
-
-func (ballot *Ballot) AddToSeg(seg *capn.Segment) msgs.Ballot {
-	return *ballot.BallotCap
 }
 
 func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *VectorClockMutable) *BallotBuilder {
@@ -69,46 +72,48 @@ func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *VectorClockMutabl
 	}
 }
 
-func (ballot *BallotBuilder) CreateBadReadCap(txnId *common.TxnId, actions *msgs.Action_List) *BallotBuilder {
+func (ballot *BallotBuilder) buildSeg() (*capn.Segment, msgs.Ballot) {
 	seg := capn.NewBuffer(nil)
-	ballot.seg = seg
+	ballotCap := msgs.NewRootBallot(seg)
+	ballotCap.SetVarId(ballot.VarUUId[:])
+	clockData := ballot.Clock.AsData()
+	ballot.Ballot.Clock = VectorClockFromData(clockData, false)
+	ballotCap.SetClock(clockData)
+	return seg, ballotCap
+}
+
+func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *msgs.Action_List) *Ballot {
+	ballot.Vote = AbortBadRead
+	seg, ballotCap := ballot.buildSeg()
+
 	voteCap := msgs.NewVote(seg)
+	ballot.VoteCap = &voteCap
 	voteCap.SetAbortBadRead()
 	badReadCap := voteCap.AbortBadRead()
 	badReadCap.SetTxnId(txnId[:])
 	badReadCap.SetTxnActions(*actions)
-	ballot.VoteCap = &voteCap
-	ballot.Vote = AbortBadRead
-	return ballot
+	ballotCap.SetVote(voteCap)
+	ballot.Data = server.SegToBytes(seg)
+	return ballot.Ballot
 }
 
 func (ballot *BallotBuilder) ToBallot() *Ballot {
-	if ballot.BallotCap == nil {
-		if ballot.seg == nil {
-			ballot.seg = capn.NewBuffer(nil)
-		}
-		seg := ballot.seg
-		ballotCap := msgs.NewBallot(seg)
-		ballotCap.SetVarId(ballot.VarUUId[:])
-		clockData := ballot.Clock.AsData()
-		ballot.Ballot.Clock = VectorClockFromData(clockData, false)
-		ballotCap.SetClock(clockData)
+	seg, ballotCap := ballot.buildSeg()
 
-		if ballot.VoteCap == nil {
-			voteCap := msgs.NewVote(seg)
-			ballot.VoteCap = &voteCap
-			switch ballot.Vote {
-			case Commit:
-				voteCap.SetCommit()
-			case AbortDeadlock:
-				voteCap.SetAbortDeadlock()
-			case AbortBadRead:
-				voteCap.SetAbortBadRead()
-			}
+	if ballot.VoteCap == nil {
+		voteCap := msgs.NewVote(seg)
+		ballot.VoteCap = &voteCap
+		switch ballot.Vote {
+		case Commit:
+			voteCap.SetCommit()
+		case AbortDeadlock:
+			voteCap.SetAbortDeadlock()
+		default:
+			panic("ToBallot called for Abort Badread vote")
 		}
-
-		ballotCap.SetVote(*ballot.VoteCap)
-		ballot.BallotCap = &ballotCap
 	}
+
+	ballotCap.SetVote(*ballot.VoteCap)
+	ballot.Data = server.SegToBytes(seg)
 	return ballot.Ballot
 }

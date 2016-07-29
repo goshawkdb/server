@@ -260,8 +260,8 @@ func (s InstancesForVar) Instances() AcceptedInstance_List {
 	return AcceptedInstance_List(C.Struct(s).GetObject(1))
 }
 func (s InstancesForVar) SetInstances(v AcceptedInstance_List) { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s InstancesForVar) Result() Ballot                       { return Ballot(C.Struct(s).GetObject(2).ToStruct()) }
-func (s InstancesForVar) SetResult(v Ballot)                   { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s InstancesForVar) Result() []byte                       { return C.Struct(s).GetObject(2).ToData() }
+func (s InstancesForVar) SetResult(v []byte)                   { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
 func (s InstancesForVar) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -329,7 +329,11 @@ func (s InstancesForVar) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Result()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -413,7 +417,11 @@ func (s InstancesForVar) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Result()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -468,8 +476,8 @@ func (s AcceptedInstance) RmId() uint32            { return C.Struct(s).Get32(0)
 func (s AcceptedInstance) SetRmId(v uint32)        { C.Struct(s).Set32(0, v) }
 func (s AcceptedInstance) RoundNumber() uint64     { return C.Struct(s).Get64(8) }
 func (s AcceptedInstance) SetRoundNumber(v uint64) { C.Struct(s).Set64(8, v) }
-func (s AcceptedInstance) Ballot() Ballot          { return Ballot(C.Struct(s).GetObject(0).ToStruct()) }
-func (s AcceptedInstance) SetBallot(v Ballot)      { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s AcceptedInstance) Ballot() []byte          { return C.Struct(s).GetObject(0).ToData() }
+func (s AcceptedInstance) SetBallot(v []byte)      { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s AcceptedInstance) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -523,7 +531,11 @@ func (s AcceptedInstance) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Ballot()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -593,7 +605,11 @@ func (s AcceptedInstance) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Ballot()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
