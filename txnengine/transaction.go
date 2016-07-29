@@ -64,7 +64,7 @@ type localAction struct {
 	writeAction     *msgs.Action
 	createPositions *common.Positions
 	roll            bool
-	outcomeClock    *VectorClock
+	outcomeClock    VectorClockInterface
 	writesClock     *VectorClock
 }
 
@@ -84,24 +84,23 @@ func (action *localAction) IsImmigrant() bool {
 	return action.writesClock != nil
 }
 
-func (action *localAction) VoteDeadlock(clock *VectorClock) {
+func (action *localAction) VoteDeadlock(clock *VectorClockMutable) {
 	if action.ballot == nil {
-		action.ballot = NewBallot(action.vUUId, AbortDeadlock, clock)
+		action.ballot = NewBallotBuilder(action.vUUId, AbortDeadlock, clock).ToBallot()
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteBadRead(clock *VectorClock, txnId *common.TxnId, actions *msgs.Action_List) {
+func (action *localAction) VoteBadRead(clock *VectorClockMutable, txnId *common.TxnId, actions *msgs.Action_List) {
 	if action.ballot == nil {
-		action.ballot = NewBallot(action.vUUId, AbortBadRead, clock)
-		action.ballot.CreateBadReadCap(txnId, actions)
+		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadCap(txnId, actions).ToBallot()
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteCommit(clock *VectorClock) bool {
+func (action *localAction) VoteCommit(clock *VectorClockMutable) bool {
 	if action.ballot == nil {
-		action.ballot = NewBallot(action.vUUId, Commit, clock)
+		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock).ToBallot()
 		return !action.voteCast(action.ballot, false)
 	}
 	return false
@@ -161,10 +160,8 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		action.writeTxnActions = &txnActions
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
-		action.outcomeClock = VectorClockFromData(varCap.WriteTxnClock())
-		action.outcomeClock.init()
-		action.writesClock = VectorClockFromData(varCap.WritesClock())
-		action.writesClock.init()
+		action.outcomeClock = VectorClockFromData(varCap.WriteTxnClock(), false)
+		action.writesClock = VectorClockFromData(varCap.WritesClock(), false)
 		actionsMap[*action.vUUId] = action
 	}
 
@@ -537,8 +534,7 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	}
 	switch outcome.Which() {
 	case msgs.OUTCOME_COMMIT:
-		tro.outcomeClock = VectorClockFromData(outcome.Commit())
-		tro.outcomeClock.init()
+		tro.outcomeClock = VectorClockFromData(outcome.Commit(), true)
 		/*
 			excess := tro.outcomeClock.Len - tro.TxnCap.Actions().Len()
 			fmt.Printf("%v ", excess)

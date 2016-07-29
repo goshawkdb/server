@@ -27,45 +27,51 @@ func (v Vote) ToVoteEnum() msgs.VoteEnum {
 
 type Ballot struct {
 	VarUUId   *common.VarUUId
-	ClockData []byte
+	Clock     *VectorClock
 	Vote      Vote
 	BallotCap *msgs.Ballot
 	VoteCap   *msgs.Vote
 }
 
-func NewBallot(vUUId *common.VarUUId, vote Vote, clock *VectorClock) *Ballot {
-	ballot := &Ballot{
-		VarUUId:   vUUId,
-		Vote:      vote,
-		BallotCap: nil,
-		VoteCap:   nil,
-	}
-	if clock == nil {
-		ballot.ClockData = []byte{}
-	} else {
-		ballot.ClockData = clock.AsData()
-	}
-	return ballot
+type BallotBuilder struct {
+	*Ballot
+	Clock *VectorClockMutable
+	seg   *capn.Segment
 }
 
 func BallotFromCap(ballotCap *msgs.Ballot) *Ballot {
 	voteCap := ballotCap.Vote()
-	ballot := &Ballot{
+	return &Ballot{
 		VarUUId:   common.MakeVarUUId(ballotCap.VarId()),
-		ClockData: ballotCap.Clock(),
+		Clock:     VectorClockFromData(ballotCap.Clock(), false),
 		Vote:      Vote(voteCap.Which()),
 		BallotCap: ballotCap,
 		VoteCap:   &voteCap,
 	}
-	return ballot
 }
 
 func (ballot *Ballot) Aborted() bool {
 	return ballot.Vote != Commit
 }
 
-func (ballot *Ballot) CreateBadReadCap(txnId *common.TxnId, actions *msgs.Action_List) {
+func (ballot *Ballot) AddToSeg(seg *capn.Segment) msgs.Ballot {
+	return *ballot.BallotCap
+}
+
+func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *VectorClockMutable) *BallotBuilder {
+	ballot := &Ballot{
+		VarUUId: vUUId,
+		Vote:    vote,
+	}
+	return &BallotBuilder{
+		Ballot: ballot,
+		Clock:  clock,
+	}
+}
+
+func (ballot *BallotBuilder) CreateBadReadCap(txnId *common.TxnId, actions *msgs.Action_List) *BallotBuilder {
 	seg := capn.NewBuffer(nil)
+	ballot.seg = seg
 	voteCap := msgs.NewVote(seg)
 	voteCap.SetAbortBadRead()
 	badReadCap := voteCap.AbortBadRead()
@@ -73,27 +79,36 @@ func (ballot *Ballot) CreateBadReadCap(txnId *common.TxnId, actions *msgs.Action
 	badReadCap.SetTxnActions(*actions)
 	ballot.VoteCap = &voteCap
 	ballot.Vote = AbortBadRead
+	return ballot
 }
 
-func (ballot *Ballot) AddToSeg(seg *capn.Segment) msgs.Ballot {
-	ballotCap := msgs.NewBallot(seg)
-	ballotCap.SetVarId(ballot.VarUUId[:])
-	ballotCap.SetClock(ballot.ClockData)
-
-	if ballot.VoteCap == nil {
-		voteCap := msgs.NewVote(seg)
-		ballot.VoteCap = &voteCap
-		switch ballot.Vote {
-		case Commit:
-			voteCap.SetCommit()
-		case AbortDeadlock:
-			voteCap.SetAbortDeadlock()
-		case AbortBadRead:
-			voteCap.SetAbortBadRead()
+func (ballot *BallotBuilder) ToBallot() *Ballot {
+	if ballot.BallotCap == nil {
+		if ballot.seg == nil {
+			ballot.seg = capn.NewBuffer(nil)
 		}
-	}
+		seg := ballot.seg
+		ballotCap := msgs.NewBallot(seg)
+		ballotCap.SetVarId(ballot.VarUUId[:])
+		clockData := ballot.Clock.AsData()
+		ballot.Ballot.Clock = VectorClockFromData(clockData, false)
+		ballotCap.SetClock(clockData)
 
-	ballotCap.SetVote(*ballot.VoteCap)
-	ballot.BallotCap = &ballotCap
-	return ballotCap
+		if ballot.VoteCap == nil {
+			voteCap := msgs.NewVote(seg)
+			ballot.VoteCap = &voteCap
+			switch ballot.Vote {
+			case Commit:
+				voteCap.SetCommit()
+			case AbortDeadlock:
+				voteCap.SetAbortDeadlock()
+			case AbortBadRead:
+				voteCap.SetAbortBadRead()
+			}
+		}
+
+		ballotCap.SetVote(*ballot.VoteCap)
+		ballot.BallotCap = &ballotCap
+	}
+	return ballot.Ballot
 }

@@ -46,8 +46,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	}
 
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
-	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock())
-	writesClock := VectorClockFromData(varCap.WritesClock())
+	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
+	writesClock := VectorClockFromData(varCap.WritesClock(), true).AsMutable()
 	server.Log(v.UUId, "Restored", writeTxnId)
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
@@ -72,8 +72,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
 	v := newVar(uuid, exe, db, vm)
 
-	clock := NewVectorClock().Bump(v.UUId, 1)
-	written := NewVectorClock().Bump(v.UUId, 1)
+	clock := NewVectorClock().AsMutable().Bump(v.UUId, 1)
+	written := NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
 
 	seg := capn.NewBuffer(nil)

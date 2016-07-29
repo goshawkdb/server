@@ -381,7 +381,7 @@ func MakeAbortBallots(txn *msgs.Txn, alloc *msgs.Allocation) []*eng.Ballot {
 	for idx, l := 0, actionIndices.Len(); idx < l; idx++ {
 		action := actions.At(int(actionIndices.At(idx)))
 		vUUId := common.MakeVarUUId(action.VarId())
-		ballots[idx] = eng.NewBallot(vUUId, eng.AbortDeadlock, nil)
+		ballots[idx] = eng.NewBallotBuilder(vUUId, eng.AbortDeadlock, nil).ToBallot()
 	}
 	return ballots
 }
