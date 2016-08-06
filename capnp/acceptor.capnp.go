@@ -12,41 +12,24 @@ import (
 
 type AcceptorState C.Struct
 
-func NewAcceptorState(s *C.Segment) AcceptorState      { return AcceptorState(s.NewStruct(8, 3)) }
-func NewRootAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewRootStruct(8, 3)) }
-func AutoNewAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewStructAR(8, 3)) }
+func NewAcceptorState(s *C.Segment) AcceptorState      { return AcceptorState(s.NewStruct(8, 2)) }
+func NewRootAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewRootStruct(8, 2)) }
+func AutoNewAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewStructAR(8, 2)) }
 func ReadRootAcceptorState(s *C.Segment) AcceptorState { return AcceptorState(s.Root(0).ToStruct()) }
-func (s AcceptorState) Txn() Txn                       { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
-func (s AcceptorState) SetTxn(v Txn)                   { C.Struct(s).SetObject(0, C.Object(v)) }
-func (s AcceptorState) Outcome() Outcome               { return Outcome(C.Struct(s).GetObject(1).ToStruct()) }
-func (s AcceptorState) SetOutcome(v Outcome)           { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s AcceptorState) Outcome() Outcome               { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
+func (s AcceptorState) SetOutcome(v Outcome)           { C.Struct(s).SetObject(0, C.Object(v)) }
 func (s AcceptorState) SendToAll() bool                { return C.Struct(s).Get1(0) }
 func (s AcceptorState) SetSendToAll(v bool)            { C.Struct(s).Set1(0, v) }
 func (s AcceptorState) Instances() InstancesForVar_List {
-	return InstancesForVar_List(C.Struct(s).GetObject(2))
+	return InstancesForVar_List(C.Struct(s).GetObject(1))
 }
-func (s AcceptorState) SetInstances(v InstancesForVar_List) { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s AcceptorState) SetInstances(v InstancesForVar_List) { C.Struct(s).SetObject(1, C.Object(v)) }
 func (s AcceptorState) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
 	var buf []byte
 	_ = buf
 	err = b.WriteByte('{')
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("\"txn\":")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.Txn()
-		err = s.WriteJSON(b)
-		if err != nil {
-			return err
-		}
-	}
-	err = b.WriteByte(',')
 	if err != nil {
 		return err
 	}
@@ -134,21 +117,6 @@ func (s AcceptorState) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("txn = ")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.Txn()
-		err = s.WriteCapLit(b)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = b.WriteString(", ")
-	if err != nil {
-		return err
-	}
 	_, err = b.WriteString("outcome = ")
 	if err != nil {
 		return err
@@ -228,7 +196,7 @@ func (s AcceptorState) MarshalCapLit() ([]byte, error) {
 type AcceptorState_List C.PointerList
 
 func NewAcceptorStateList(s *C.Segment, sz int) AcceptorState_List {
-	return AcceptorState_List(s.NewCompositeList(8, 3, sz))
+	return AcceptorState_List(s.NewCompositeList(8, 2, sz))
 }
 func (s AcceptorState_List) Len() int { return C.PointerList(s).Len() }
 func (s AcceptorState_List) At(i int) AcceptorState {

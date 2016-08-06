@@ -18,9 +18,10 @@ func NewVersionCache() versionCache {
 	return make(map[common.VarUUId]*cached)
 }
 
-func (vc versionCache) UpdateFromCommit(txnId *common.TxnId, outcome *msgs.Outcome) {
+func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcome) {
+	txnId := txn.Id
 	clock := eng.VectorClockFromData(outcome.Commit(), false)
-	actions := outcome.Txn().Actions()
+	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		if action.Which() != msgs.ACTION_READ {
@@ -45,7 +46,7 @@ func (vc versionCache) UpdateFromAbort(updates *msgs.Update_List) map[*msgs.Upda
 		update := updates.At(idx)
 		txnId := common.MakeTxnId(update.TxnId())
 		clock := eng.VectorClockFromData(update.Clock(), false)
-		actions := update.Actions()
+		actions := eng.TxnActionsFromData(update.Actions(), true).Actions()
 		validActions := make([]*msgs.Action, 0, actions.Len())
 
 		for idy, m := 0, actions.Len(); idy < m; idy++ {

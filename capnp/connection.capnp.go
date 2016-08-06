@@ -359,10 +359,10 @@ func (s Message) SetConnectionError(v string) {
 	C.Struct(s).Set16(0, 1)
 	C.Struct(s).SetObject(0, s.Segment.NewText(v))
 }
-func (s Message) TxnSubmission() Txn { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
-func (s Message) SetTxnSubmission(v Txn) {
+func (s Message) TxnSubmission() []byte { return C.Struct(s).GetObject(0).ToData() }
+func (s Message) SetTxnSubmission(v []byte) {
 	C.Struct(s).Set16(0, 2)
-	C.Struct(s).SetObject(0, C.Object(v))
+	C.Struct(s).SetObject(0, s.Segment.NewData(v))
 }
 func (s Message) SubmissionOutcome() Outcome { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetSubmissionOutcome(v Outcome) {
@@ -480,7 +480,11 @@ func (s Message) WriteJSON(w io.Writer) error {
 		}
 		{
 			s := s.TxnSubmission()
-			err = s.WriteJSON(b)
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
 			if err != nil {
 				return err
 			}
@@ -698,7 +702,11 @@ func (s Message) WriteCapLit(w io.Writer) error {
 		}
 		{
 			s := s.TxnSubmission()
-			err = s.WriteCapLit(b)
+			buf, err = json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			_, err = b.Write(buf)
 			if err != nil {
 				return err
 			}

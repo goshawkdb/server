@@ -188,19 +188,19 @@ const (
 	VOTE_ABORTDEADLOCK Vote_Which = 2
 )
 
-func NewVote(s *C.Segment) Vote                        { return Vote(s.NewStruct(8, 2)) }
-func NewRootVote(s *C.Segment) Vote                    { return Vote(s.NewRootStruct(8, 2)) }
-func AutoNewVote(s *C.Segment) Vote                    { return Vote(s.NewStructAR(8, 2)) }
-func ReadRootVote(s *C.Segment) Vote                   { return Vote(s.Root(0).ToStruct()) }
-func (s Vote) Which() Vote_Which                       { return Vote_Which(C.Struct(s).Get16(0)) }
-func (s Vote) SetCommit()                              { C.Struct(s).Set16(0, 0) }
-func (s Vote) AbortBadRead() VoteAbortBadRead          { return VoteAbortBadRead(s) }
-func (s Vote) SetAbortBadRead()                        { C.Struct(s).Set16(0, 1) }
-func (s VoteAbortBadRead) TxnId() []byte               { return C.Struct(s).GetObject(0).ToData() }
-func (s VoteAbortBadRead) SetTxnId(v []byte)           { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s VoteAbortBadRead) TxnActions() Action_List     { return Action_List(C.Struct(s).GetObject(1)) }
-func (s VoteAbortBadRead) SetTxnActions(v Action_List) { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Vote) SetAbortDeadlock()                       { C.Struct(s).Set16(0, 2) }
+func NewVote(s *C.Segment) Vote                   { return Vote(s.NewStruct(8, 2)) }
+func NewRootVote(s *C.Segment) Vote               { return Vote(s.NewRootStruct(8, 2)) }
+func AutoNewVote(s *C.Segment) Vote               { return Vote(s.NewStructAR(8, 2)) }
+func ReadRootVote(s *C.Segment) Vote              { return Vote(s.Root(0).ToStruct()) }
+func (s Vote) Which() Vote_Which                  { return Vote_Which(C.Struct(s).Get16(0)) }
+func (s Vote) SetCommit()                         { C.Struct(s).Set16(0, 0) }
+func (s Vote) AbortBadRead() VoteAbortBadRead     { return VoteAbortBadRead(s) }
+func (s Vote) SetAbortBadRead()                   { C.Struct(s).Set16(0, 1) }
+func (s VoteAbortBadRead) TxnId() []byte          { return C.Struct(s).GetObject(0).ToData() }
+func (s VoteAbortBadRead) SetTxnId(v []byte)      { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s VoteAbortBadRead) TxnActions() []byte     { return C.Struct(s).GetObject(1).ToData() }
+func (s VoteAbortBadRead) SetTxnActions(v []byte) { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s Vote) SetAbortDeadlock()                  { C.Struct(s).Set16(0, 2) }
 func (s Vote) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -257,25 +257,11 @@ func (s Vote) WriteJSON(w io.Writer) error {
 			}
 			{
 				s := s.TxnActions()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteJSON(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
 				}
+				_, err = b.Write(buf)
 				if err != nil {
 					return err
 				}
@@ -365,25 +351,11 @@ func (s Vote) WriteCapLit(w io.Writer) error {
 			}
 			{
 				s := s.TxnActions()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteCapLit(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
 				}
+				_, err = b.Write(buf)
 				if err != nil {
 					return err
 				}

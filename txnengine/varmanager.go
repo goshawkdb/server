@@ -21,7 +21,6 @@ type VarManager struct {
 	active      map[common.VarUUId]*Var
 	RollAllowed bool
 	onDisk      func(bool)
-	lc          LocalConnection
 	callbacks   []func()
 	beaterLive  bool
 	exe         *dispatcher.Executor
@@ -200,7 +199,7 @@ func (vm *VarManager) ScheduleCallback(fun func()) {
 func (vm *VarManager) beat(terminate chan struct{}) {
 	if len(vm.callbacks) != 0 {
 		callbacks := vm.callbacks
-		vm.callbacks = make([]func(), 0, len(callbacks))
+		vm.callbacks = make([]func(), 0, 1+(len(callbacks)/2))
 		for _, fun := range callbacks {
 			fun()
 		}

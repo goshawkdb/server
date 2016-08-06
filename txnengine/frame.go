@@ -21,7 +21,7 @@ type frame struct {
 	child            *frame
 	v                *Var
 	frameTxnId       *common.TxnId
-	frameTxnActions  *msgs.Action_List
+	frameTxnActions  *TxnActions
 	frameTxnClock    *VectorClockMutable // the clock (including merge missing) of the frame txn
 	frameWritesClock *VectorClockMutable // max elems from all writes of all txns in parent frame
 	readVoteClock    *VectorClockMutable
@@ -33,7 +33,7 @@ type frame struct {
 	currentState frameStateMachineComponent
 }
 
-func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *msgs.Action_List, txnClock, writesClock *VectorClockMutable) *frame {
+func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions, txnClock, writesClock *VectorClockMutable) *frame {
 	f := &frame{
 		parent:           parent,
 		v:                v,
@@ -693,7 +693,7 @@ func (fo *frameOpen) maybeCreateChild() {
 func (fo *frameOpen) maybeScheduleRoll() {
 	// do not check vm.RollAllowed here.
 	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
+		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollScheduled = true
 		fo.v.vm.ScheduleCallback(func() {
 			fo.v.applyToVar(func() {
@@ -706,12 +706,12 @@ func (fo *frameOpen) maybeScheduleRoll() {
 
 func (fo *frameOpen) maybeStartRoll() {
 	if fo.v.vm.RollAllowed && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
+		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
 		fo.rollActive = true
 		go func() {
 			server.Log(fo.frame, "Starting roll")
 			ctxn, varPosMap := fo.createRollClientTxn()
-			outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, true)
+			_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap)
 			ow := ""
 			if outcome != nil {
 				ow = fmt.Sprint(outcome.Which())
@@ -743,8 +743,9 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	}
 	var origWrite *msgs.Action
 	vUUIdBytes := fo.v.UUId[:]
-	for idx, l := 0, fo.frameTxnActions.Len(); idx < l; idx++ {
-		action := fo.frameTxnActions.At(idx)
+	txnActions := fo.frameTxnActions.Actions()
+	for idx, l := 0, txnActions.Len(); idx < l; idx++ {
+		action := txnActions.At(idx)
 		if bytes.Equal(action.VarId(), vUUIdBytes) {
 			origWrite = &action
 			break

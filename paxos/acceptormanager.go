@@ -62,18 +62,19 @@ func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceI
 	}
 }
 
-func (am *AcceptorManager) ensureAcceptor(txnId *common.TxnId, txnCap *msgs.Txn) *Acceptor {
+func (am *AcceptorManager) ensureAcceptor(txn *eng.TxnReader) *Acceptor {
+	txnId := txn.Id
 	aInst, found := am.acceptors[*txnId]
 	switch {
 	case found && aInst.acceptor != nil:
 		return aInst.acceptor
 	case found:
-		a := NewAcceptor(txnId, txnCap, am)
+		a := NewAcceptor(txn, am)
 		aInst.acceptor = a
 		a.Start()
 		return a
 	default:
-		a := NewAcceptor(txnId, txnCap, am)
+		a := NewAcceptor(txn, am)
 		aInst = &acceptorInstances{acceptor: a}
 		am.acceptors[*txnId] = aInst
 		a.Start()
@@ -98,7 +99,6 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 		return err
 	}
 	state := msgs.ReadRootAcceptorState(seg)
-	txn := state.Txn()
 
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
@@ -107,7 +107,7 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	copy(instIdSlice, txnId[:])
 
 	instances := state.Instances()
-	acc := AcceptorFromData(txnId, &txn, &outcome, state.SendToAll(), &instances, am)
+	acc := AcceptorFromData(txnId, &outcome, state.SendToAll(), &instances, am)
 	aInst := &acceptorInstances{acceptor: acc}
 	am.acceptors[*txnId] = aInst
 
@@ -197,16 +197,16 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 	NewOneShotSender(server.SegToBytes(replySeg), am, sender)
 }
 
-func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *common.TxnId, twoATxnVotes *msgs.TwoATxnVotes) {
+func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.TxnReader, twoATxnVotes *msgs.TwoATxnVotes) {
 	instanceRMId := common.RMId(twoATxnVotes.RmId())
+	txnId := txn.Id
 	server.Log(txnId, "2A received from", sender, "; instance:", instanceRMId)
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
 	binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], uint32(instanceRMId))
 
-	txnCap := twoATxnVotes.Txn()
-	a := am.ensureAcceptor(txnId, &txnCap)
+	a := am.ensureAcceptor(txn)
 	requests := twoATxnVotes.AcceptRequests()
 	failureInstances := make([]*instance, 0, requests.Len())
 	failureRequests := make([]*msgs.TxnVoteAcceptRequest, 0, requests.Len())
@@ -219,7 +219,7 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txnId *commo
 		inst := am.ensureInstance(txnId, &instId, vUUId)
 		accepted, rejected := inst.TwoATxnVotesReceived(paxosNumber(request.RoundNumber()), ballot)
 		if accepted {
-			a.BallotAccepted(instanceRMId, inst, vUUId, &txnCap)
+			a.BallotAccepted(instanceRMId, inst, vUUId, txn)
 		} else if rejected {
 			failureInstances = append(failureInstances, inst)
 			failureRequests = append(failureRequests, &request)

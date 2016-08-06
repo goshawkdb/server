@@ -15,8 +15,7 @@ type proposal struct {
 	acceptors          []common.RMId
 	activeRMIds        map[common.RMId]uint32
 	fInc               int
-	txn                *msgs.Txn
-	txnId              *common.TxnId
+	txn                *eng.TxnReader
 	submitter          common.RMId
 	submitterBootCount uint32
 	skipPhase1         bool
@@ -26,8 +25,9 @@ type proposal struct {
 	finished           bool
 }
 
-func NewProposal(pm *ProposerManager, txnId *common.TxnId, txn *msgs.Txn, fInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
-	allocs := txn.Allocations()
+func NewProposal(pm *ProposerManager, txn *eng.TxnReader, fInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
+	txnCap := txn.Txn
+	allocs := txnCap.Allocations()
 	activeRMIds := make(map[common.RMId]uint32, allocs.Len())
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
@@ -45,9 +45,8 @@ func NewProposal(pm *ProposerManager, txnId *common.TxnId, txn *msgs.Txn, fInc i
 		activeRMIds:        activeRMIds,
 		fInc:               fInc,
 		txn:                txn,
-		txnId:              txnId,
-		submitter:          common.RMId(txn.Submitter()),
-		submitterBootCount: txn.SubmitterBootCount(),
+		submitter:          common.RMId(txnCap.Submitter()),
+		submitterBootCount: txnCap.SubmitterBootCount(),
 		skipPhase1:         skipPhase1,
 		instances:          make(map[common.VarUUId]*proposalInstance, len(ballots)),
 		pending:            make([]*proposalInstance, 0, len(ballots)),
@@ -100,7 +99,8 @@ func (p *proposal) maybeSendOneA() {
 	sender := newProposalSender(p, pendingPromises)
 	oneACap := msgs.NewOneATxnVotes(seg)
 	msg.SetOneATxnVotes(oneACap)
-	oneACap.SetTxnId(p.txnId[:])
+	txnId := p.txn.Id
+	oneACap.SetTxnId(txnId[:])
 	oneACap.SetRmId(uint32(p.instanceRMId))
 	proposals := msgs.NewTxnVoteProposalList(seg, len(pendingPromises))
 	oneACap.SetProposals(proposals)
@@ -109,7 +109,7 @@ func (p *proposal) maybeSendOneA() {
 		pi.addOneAToProposal(&proposal, sender)
 	}
 	sender.msg = server.SegToBytes(seg)
-	server.Log(p.txnId, "Adding sender for 1A")
+	server.Log(txnId, "Adding sender for 1A")
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -149,13 +149,12 @@ func (p *proposal) maybeSendTwoA() {
 		deflate = pi.addTwoAToAcceptRequest(seg, &acceptRequest, sender) || deflate
 	}
 	if deflate {
-		deflated := deflateTxn(p.txn, seg)
-		twoACap.SetTxn(*deflated)
+		twoACap.SetTxn(p.txn.AsDeflated().Data)
 	} else {
-		twoACap.SetTxn(*p.txn)
+		twoACap.SetTxn(p.txn.Data)
 	}
 	sender.msg = server.SegToBytes(seg)
-	server.Log(p.txnId, "Adding sender for 2A")
+	server.Log(p.txn.Id, "Adding sender for 2A")
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -179,12 +178,12 @@ func (p *proposal) FinishProposing() []common.RMId {
 	for _, pi := range p.instances {
 		if sender := pi.oneASender; sender != nil {
 			pi.oneASender = nil
-			server.Log(p.txnId, "finishing sender for 1A")
+			server.Log(p.txn.Id, "finishing sender for 1A")
 			sender.finished()
 		}
 		if sender := pi.twoASender; sender != nil {
 			pi.twoASender = nil
-			server.Log(p.txnId, pi.ballot.VarUUId, "finishing sender for 2A")
+			server.Log(p.txn.Id, pi.ballot.VarUUId, "finishing sender for 2A")
 			sender.finished()
 		}
 	}
@@ -192,7 +191,7 @@ func (p *proposal) FinishProposing() []common.RMId {
 }
 
 func (p *proposal) Status(sc *server.StatusConsumer) {
-	sc.Emit(fmt.Sprintf("Proposal for %v-%v", p.txnId, p.instanceRMId))
+	sc.Emit(fmt.Sprintf("Proposal for %v-%v", p.txn.Id, p.instanceRMId))
 	sc.Emit(fmt.Sprintf("- Acceptors: %v", p.acceptors))
 	sc.Emit(fmt.Sprintf("- Instances: %v", len(p.instances)))
 	sc.Emit(fmt.Sprintf("- Finished? %v", p.finished))
@@ -496,7 +495,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			if s.proposal.finished {
 				return
 			}
-			allocs := s.proposal.txn.Allocations()
+			allocs := s.proposal.txn.Txn.Allocations()
 			for idx, l := 0, allocs.Len(); idx < l; idx++ {
 				alloc := allocs.At(idx)
 				rmId := common.RMId(alloc.RmId())
@@ -516,17 +515,17 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 						break
 					}
 					ballots := MakeAbortBallots(s.proposal.txn, &alloc)
-					server.Log(s.proposal.txnId, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
+					server.Log(s.proposal.txn.Id, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
 					s.proposal.abortInstances = append(s.proposal.abortInstances, rmId)
 					s.proposal.proposerManager.NewPaxosProposals(
-						s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, rmId, false)
+						s.txn, s.fInc, ballots, s.proposal.acceptors, rmId, false)
 				}
 			}
 		})
 		return
 	}
 
-	alloc := AllocForRMId(s.proposal.txn, lost)
+	alloc := AllocForRMId(s.proposal.txn.Txn, lost)
 	if alloc == nil || alloc.Active() == 0 {
 		return
 	}
@@ -540,10 +539,10 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			}
 		}
 		ballots := MakeAbortBallots(s.proposal.txn, alloc)
-		server.Log(s.proposal.txnId, "Trying to abort for", lost, "Found actions:", len(ballots))
+		server.Log(s.proposal.txn.Id, "Trying to abort for", lost, "Found actions:", len(ballots))
 		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
 		s.proposal.proposerManager.NewPaxosProposals(
-			s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
+			s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
 	})
 }
 

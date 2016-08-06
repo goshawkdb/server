@@ -9,6 +9,7 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
+	eng "goshawkdb.io/server/txnengine"
 	"time"
 )
 
@@ -55,21 +56,22 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	start := time.Now()
 
 	var cont TxnCompletionConsumer
-	cont = func(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+	cont = func(txn *eng.TxnReader, outcome *msgs.Outcome, err error) {
 		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
 			continuation(nil, err)
 			return
 		}
+		txnId := txn.Id
 		end := time.Now()
 		elapsed := end.Sub(start)
 		start = end
 		switch outcome.Which() {
 		case msgs.OUTCOME_COMMIT:
-			cts.versionCache.UpdateFromCommit(txnId, outcome)
+			cts.versionCache.UpdateFromCommit(txn, outcome)
 			clientOutcome.SetFinalId(txnId[:])
 			clientOutcome.SetCommit()
-			cts.addCreatesToCache(outcome)
+			cts.addCreatesToCache(txn)
 			cts.txnLive = false
 			cts.initialDelay = delay >> 1
 			continuation(&clientOutcome, nil)
@@ -105,17 +107,17 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
 			ctxnCap.SetId(curTxnId[:])
 
-			cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
+			cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, curTxnId, cont, delay, false)
 		}
 	}
 
 	cts.txnLive = true
 	// fmt.Printf("%v ", delay)
-	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
+	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, curTxnId, cont, delay, false)
 }
 
-func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
-	actions := outcome.Txn().Actions()
+func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {
+	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		if action.Which() == msgs.ACTION_CREATE {

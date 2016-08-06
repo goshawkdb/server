@@ -53,17 +53,11 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
 	}).ResultError(); err == nil && result != nil {
-		bites := result.([]byte)
-		if seg, _, err := capn.ReadFromMemoryZeroCopy(bites); err == nil {
-			txn := msgs.ReadRootTxn(seg)
-			actions := txn.Actions()
-			v.curFrame = NewFrame(nil, v, writeTxnId, &actions, writeTxnClock, writesClock)
-			v.curFrameOnDisk = v.curFrame
-			v.varCap = &varCap
-			return v, nil
-		} else {
-			return nil, err
-		}
+		txn := TxnReaderFromData(result.([]byte))
+		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
+		v.curFrameOnDisk = v.curFrame
+		v.varCap = &varCap
+		return v, nil
 	} else {
 		return nil, err
 	}
@@ -254,7 +248,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
 	varData := server.SegToBytes(varSeg)
 
-	txnBytes := action.TxnRootBytes()
+	txnBytes := action.TxnReader.Data
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...

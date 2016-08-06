@@ -12,8 +12,7 @@ import (
 )
 
 type BallotAccumulator struct {
-	Txn            *msgs.Txn
-	txnId          *common.TxnId
+	txn            *eng.TxnReader
 	vUUIdToBallots map[common.VarUUId]*varBallot
 	outcome        *outcomeEqualId
 	incompleteVars int
@@ -24,11 +23,10 @@ type BallotAccumulator struct {
 // paxos instance namespace is {rmId,varId}. So for each var, we
 // expect to see ballots from fInc distinct rms.
 
-func NewBallotAccumulator(txnId *common.TxnId, txn *msgs.Txn) *BallotAccumulator {
-	actions := txn.Actions()
+func NewBallotAccumulator(txn *eng.TxnReader) *BallotAccumulator {
+	actions := txn.Actions(true).Actions()
 	ba := &BallotAccumulator{
-		Txn:            txn,
-		txnId:          txnId,
+		txn:            txn,
 		vUUIdToBallots: make(map[common.VarUUId]*varBallot),
 		outcome:        nil,
 		incompleteVars: actions.Len(),
@@ -44,7 +42,7 @@ func NewBallotAccumulator(txnId *common.TxnId, txn *msgs.Txn) *BallotAccumulator
 		ba.vUUIdToBallots[*vUUId] = vBallot
 	}
 
-	allocs := txn.Allocations()
+	allocs := txn.Txn.Allocations()
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
 		if alloc.Active() == 0 {
@@ -84,8 +82,8 @@ type rmBallot struct {
 	roundNumber  paxosNumber
 }
 
-func BallotAccumulatorFromData(txnId *common.TxnId, txn *msgs.Txn, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List) *BallotAccumulator {
-	ba := NewBallotAccumulator(txnId, txn)
+func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List) *BallotAccumulator {
+	ba := NewBallotAccumulator(txn)
 	ba.outcome = outcome
 
 	for idx, l := 0, instances.Len(); idx < l; idx++ {
@@ -117,9 +115,9 @@ func BallotAccumulatorFromData(txnId *common.TxnId, txn *msgs.Txn, outcome *outc
 // For every vUUId involved in this txn, we should see fInc * ballots:
 // one from each RM voting for each vUUId. rmId is the paxos
 // instanceRMId.
-func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *msgs.Txn) *outcomeEqualId {
-	if isDeflated(ba.Txn) && !isDeflated(txn) {
-		ba.Txn = txn
+func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *eng.TxnReader) *outcomeEqualId {
+	if ba.txn.IsDeflated() && !txn.HasDeflated() {
+		ba.txn = txn
 	}
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
@@ -161,7 +159,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	// being caught up. By waiting for at least F+1 ballots for a var
 	// (they don't have to be the same ballot!), we avoid this as there
 	// must be at least one voter who isn't in the past.
-	if !(ba.dirty && (ba.incompleteVars == 0 || ba.Txn.Retry())) {
+	if !(ba.dirty && (ba.incompleteVars == 0 || ba.txn.Txn.Retry())) {
 		return nil
 	}
 	ba.dirty = false
@@ -171,7 +169,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 
 	vUUIds := common.VarUUIds(make([]*common.VarUUId, 0, len(ba.vUUIdToBallots)))
 	br := NewBadReads()
-	server.Log(ba.txnId, "Calculating result")
+	server.Log(ba.txn.Id, "Calculating result")
 	for _, vBallot := range ba.vUUIdToBallots {
 		if len(vBallot.rmToBallot) < vBallot.voters {
 			continue
@@ -204,8 +202,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	}
 
 	if aborted {
-		deflatedTxn := deflateTxn(ba.Txn, seg)
-		outcome.SetTxn(*deflatedTxn)
+		outcome.SetTxn(ba.txn.AsDeflated().Data)
 		outcome.SetAbort()
 		abort := outcome.Abort()
 		if deadlock {
@@ -215,7 +212,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 		}
 
 	} else {
-		outcome.SetTxn(*ba.Txn)
+		outcome.SetTxn(ba.txn.Data)
 		outcome.SetCommit(combinedClock.AsData())
 	}
 
@@ -248,9 +245,9 @@ func (ba *BallotAccumulator) AddInstancesToSeg(seg *capn.Segment) msgs.Instances
 }
 
 func (ba *BallotAccumulator) Status(sc *server.StatusConsumer) {
-	sc.Emit(fmt.Sprintf("Ballot Accumulator for %v", ba.txnId))
+	sc.Emit(fmt.Sprintf("Ballot Accumulator for %v", ba.txn.Id))
 	sc.Emit(fmt.Sprintf("- incomplete var count: %v", ba.incompleteVars))
-	sc.Emit(fmt.Sprintf("- retry? %v", ba.Txn.Retry()))
+	sc.Emit(fmt.Sprintf("- retry? %v", ba.txn.Txn.Retry()))
 	sc.Join()
 }
 
@@ -340,37 +337,6 @@ func (cur *varBallotReducer) combineVote(rmBal *rmBallot) {
 	}
 }
 
-func deflateTxn(txn *msgs.Txn, seg *capn.Segment) *msgs.Txn {
-	if isDeflated(txn) {
-		return txn
-	}
-	deflatedTxn := msgs.NewTxn(seg)
-	deflatedTxn.SetId(txn.Id())
-	deflatedTxn.SetRetry(txn.Retry())
-	deflatedTxn.SetSubmitter(txn.Submitter())
-	deflatedTxn.SetSubmitterBootCount(txn.SubmitterBootCount())
-	deflatedTxn.SetFInc(txn.FInc())
-	deflatedTxn.SetTopologyVersion(txn.TopologyVersion())
-
-	deflatedTxn.SetAllocations(txn.Allocations())
-
-	actionsList := txn.Actions()
-	deflatedActionsList := msgs.NewActionList(seg, actionsList.Len())
-	deflatedTxn.SetActions(deflatedActionsList)
-	for idx, l := 0, actionsList.Len(); idx < l; idx++ {
-		deflatedAction := deflatedActionsList.At(idx)
-		deflatedAction.SetVarId(actionsList.At(idx).VarId())
-		deflatedAction.SetMissing()
-	}
-
-	return &deflatedTxn
-}
-
-func isDeflated(txn *msgs.Txn) bool {
-	actions := txn.Actions()
-	return actions.Len() != 0 && actions.At(0).Which() == msgs.ACTION_MISSING
-}
-
 type badReads map[common.VarUUId]*badReadAction
 
 func NewBadReads() badReads {
@@ -381,7 +347,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 	badRead := rmBal.ballot.VoteCap.AbortBadRead()
 	clock := rmBal.ballot.Clock
 	txnId := common.MakeTxnId(badRead.TxnId())
-	actions := badRead.TxnActions()
+	actions := eng.TxnActionsFromData(badRead.TxnActions(), true).Actions()
 
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -493,21 +459,23 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 		update := updates.At(idx)
 		idx++
 		update.SetTxnId(txnId[:])
-		actionList := msgs.NewActionList(seg, len(*badReadActions))
-		update.SetActions(actionList)
+		actionsListSeg := capn.NewBuffer(nil)
+		actionsListWrapper := msgs.NewRootActionListWrapper(actionsListSeg)
+		actionsList := msgs.NewActionList(actionsListSeg, len(*badReadActions))
+		actionsListWrapper.SetActions(actionsList)
 		clock := eng.NewVectorClock().AsMutable()
 		for idy, bra := range *badReadActions {
 			action := bra.action
 			switch action.Which() {
 			case msgs.ACTION_READ:
-				newAction := actionList.At(idy)
+				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
 				newAction.SetMissing()
 			case msgs.ACTION_WRITE:
-				actionList.Set(idy, *action)
+				actionsList.Set(idy, *action)
 			case msgs.ACTION_READWRITE:
 				readWrite := action.Readwrite()
-				newAction := actionList.At(idy)
+				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
 				newAction.SetWrite()
 				newWrite := newAction.Write()
@@ -515,7 +483,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 				newWrite.SetReferences(readWrite.References())
 			case msgs.ACTION_CREATE:
 				create := action.Create()
-				newAction := actionList.At(idy)
+				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
 				newAction.SetWrite()
 				newWrite := newAction.Write()
@@ -523,7 +491,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 				newWrite.SetReferences(create.References())
 			case msgs.ACTION_ROLL:
 				roll := action.Roll()
-				newAction := actionList.At(idy)
+				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
 				newAction.SetWrite()
 				newWrite := newAction.Write()
@@ -535,6 +503,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 			}
 			clock.SetVarIdMax(bra.vUUId, bra.clockElem)
 		}
+		update.SetActions(server.SegToBytes(actionsListSeg))
 		update.SetClock(clock.AsData())
 	}
 

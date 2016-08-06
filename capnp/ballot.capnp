@@ -18,7 +18,7 @@ struct Vote {
     commit                @0: Void;
     abortBadRead :group {
       txnId      @1: Data;
-      txnActions @2: List(Txn.Action);
+      txnActions @2: Data;
     }
     abortDeadlock         @3: Void;
   }

@@ -82,7 +82,7 @@ func (ballot *BallotBuilder) buildSeg() (*capn.Segment, msgs.Ballot) {
 	return seg, ballotCap
 }
 
-func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *msgs.Action_List) *Ballot {
+func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *TxnActions) *Ballot {
 	ballot.Vote = AbortBadRead
 	seg, ballotCap := ballot.buildSeg()
 
@@ -91,7 +91,7 @@ func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *m
 	voteCap.SetAbortBadRead()
 	badReadCap := voteCap.AbortBadRead()
 	badReadCap.SetTxnId(txnId[:])
-	badReadCap.SetTxnActions(*actions)
+	badReadCap.SetTxnActions(actions.Data)
 	ballotCap.SetVote(voteCap)
 	ballot.Data = server.SegToBytes(seg)
 	return ballot.Ballot

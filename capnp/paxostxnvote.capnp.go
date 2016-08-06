@@ -436,8 +436,8 @@ func NewTwoATxnVotes(s *C.Segment) TwoATxnVotes      { return TwoATxnVotes(s.New
 func NewRootTwoATxnVotes(s *C.Segment) TwoATxnVotes  { return TwoATxnVotes(s.NewRootStruct(8, 2)) }
 func AutoNewTwoATxnVotes(s *C.Segment) TwoATxnVotes  { return TwoATxnVotes(s.NewStructAR(8, 2)) }
 func ReadRootTwoATxnVotes(s *C.Segment) TwoATxnVotes { return TwoATxnVotes(s.Root(0).ToStruct()) }
-func (s TwoATxnVotes) Txn() Txn                      { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
-func (s TwoATxnVotes) SetTxn(v Txn)                  { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s TwoATxnVotes) Txn() []byte                   { return C.Struct(s).GetObject(0).ToData() }
+func (s TwoATxnVotes) SetTxn(v []byte)               { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s TwoATxnVotes) RmId() uint32                  { return C.Struct(s).Get32(0) }
 func (s TwoATxnVotes) SetRmId(v uint32)              { C.Struct(s).Set32(0, v) }
 func (s TwoATxnVotes) AcceptRequests() TxnVoteAcceptRequest_List {
@@ -461,7 +461,11 @@ func (s TwoATxnVotes) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Txn()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -545,7 +549,11 @@ func (s TwoATxnVotes) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Txn()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}

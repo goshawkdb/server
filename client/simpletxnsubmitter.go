@@ -31,8 +31,8 @@ type SimpleTxnSubmitter struct {
 	bufferedSubmissions []func()
 }
 
-type txnOutcomeConsumer func(common.RMId, *common.TxnId, *msgs.Outcome)
-type TxnCompletionConsumer func(*common.TxnId, *msgs.Outcome, error)
+type txnOutcomeConsumer func(common.RMId, *eng.TxnReader, *msgs.Outcome)
+type TxnCompletionConsumer func(*eng.TxnReader, *msgs.Outcome, error)
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -71,21 +71,22 @@ func (sts *SimpleTxnSubmitter) EnsurePositions(varPosMap map[common.VarUUId]*com
 	}
 }
 
-func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
+func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+	txnId := txn.Id
 	if consumer, found := sts.outcomeConsumers[*txnId]; found {
-		consumer(sender, txnId, outcome)
+		consumer(sender, txn, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
 	}
 }
 
-func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay time.Duration) {
+// txnCap must be a root
+func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay time.Duration) {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
-	msg.SetTxnSubmission(*txnCap)
+	msg.SetTxnSubmission(server.SegToBytes(txnCap.Segment))
 
-	txnId := common.MakeTxnId(txnCap.Id())
 	server.Log(txnId, "Submitting txn")
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
 	var removeSenderCh chan chan server.EmptyStruct
@@ -102,7 +103,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 			close(doneChan)
 		}()
 	}
-	acceptors := paxos.GetAcceptorsFromTxn(txnCap)
+	acceptors := paxos.GetAcceptorsFromTxn(*txnCap)
 
 	shutdownFun := func(shutdown bool) {
 		delete(sts.outcomeConsumers, *txnId)
@@ -124,28 +125,28 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, activeRMs []c
 				// problem with these msgs getting to the propposers.
 				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 			}
-			continuation(txnId, nil, nil)
+			continuation(nil, nil, nil)
 		}
 	}
 	shutdownFunPtr := &shutdownFun
 	sts.onShutdown[shutdownFunPtr] = server.EmptyStructVal
 
 	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.FInc()), acceptors)
-	consumer := func(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
+	consumer := func(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
 			shutdownFun(false)
-			continuation(txnId, outcome, nil)
+			continuation(txn, outcome, nil)
 		}
 	}
 	sts.outcomeConsumers[*txnId] = consumer
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
-		fun := func() { sts.SubmitClientTransaction(ctxnCap, continuation, delay, useNextVersion) }
+		fun := func() { sts.SubmitClientTransaction(ctxnCap, txnId, continuation, delay, useNextVersion) }
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func(){fun}
 		} else {
@@ -162,7 +163,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		continuation(nil, nil, err)
 		return
 	}
-	sts.SubmitTransaction(txnCap, activeRMs, continuation, delay)
+	sts.SubmitTransaction(txnCap, txnId, activeRMs, continuation, delay)
 }
 
 func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {
@@ -221,7 +222,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 
 func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
-	txnCap := msgs.NewTxn(outgoingSeg)
+	txnCap := msgs.NewRootTxn(outgoingSeg)
 
 	txnCap.SetId(clientTxnCap.Id())
 	txnCap.SetRetry(clientTxnCap.Retry())
@@ -231,15 +232,18 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, 
 	txnCap.SetTopologyVersion(topologyVersion)
 
 	clientActions := clientTxnCap.Actions()
-	actions := msgs.NewActionList(outgoingSeg, clientActions.Len())
-	txnCap.SetActions(actions)
+	actionsListSeg := capn.NewBuffer(nil)
+	actionsWrapper := msgs.NewRootActionListWrapper(actionsListSeg)
+	actions := msgs.NewActionList(actionsListSeg, clientActions.Len())
+	actionsWrapper.SetActions(actions)
 	picker := ch.NewCombinationPicker(int(sts.topology.FInc), sts.disabledHashCodes)
 
-	rmIdToActionIndices, err := sts.translateActions(outgoingSeg, picker, &actions, &clientActions)
+	rmIdToActionIndices, err := sts.translateActions(actionsListSeg, picker, &actions, &clientActions)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
+	txnCap.SetActions(server.SegToBytes(actionsListSeg))
 	// NB: we're guaranteed that activeRMs and passiveRMs are
 	// disjoint. Thus there is no RM that has some active and some
 	// passive actions.

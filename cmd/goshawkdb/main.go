@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"runtime/trace"
 	"sync/atomic"
@@ -255,6 +256,8 @@ func (s *server) SignalShutdown() {
 }
 
 func (s *server) signalStatus() {
+	runtime.GC()
+	debug.FreeOSMemory()
 	sc := goshawk.NewStatusConsumer()
 	go sc.Consume(func(str string) {
 		log.Printf("System Status for %v\n%v\nStatus End\n", s.rmId, str)

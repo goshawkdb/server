@@ -3,10 +3,7 @@ package db
 import (
 	"encoding/binary"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
-	msgs "goshawkdb.io/server/capnp"
 	// "fmt"
-	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 )
@@ -14,21 +11,6 @@ import (
 func init() {
 	DB.Transactions = &mdbs.DBISettings{Flags: mdb.CREATE}
 	DB.TransactionRefs = &mdbs.DBISettings{Flags: mdb.CREATE}
-}
-
-func TxnToRootBytes(txn *msgs.Txn) []byte {
-	seg := capn.NewBuffer(nil)
-	txnCap := msgs.NewRootTxn(seg)
-	txnCap.SetId(txn.Id())
-	txnCap.SetRetry(txn.Retry())
-	txnCap.SetSubmitter(txn.Submitter())
-	txnCap.SetSubmitterBootCount(txn.SubmitterBootCount())
-	txnCap.SetActions(txn.Actions())
-	txnCap.SetAllocations(txn.Allocations())
-	txnCap.SetFInc(txn.FInc())
-	txnCap.SetTopologyVersion(txn.TopologyVersion())
-
-	return server.SegToBytes(seg)
 }
 
 func (db *Databases) WriteTxnToDisk(rwtxn *mdbs.RWTxn, txnId *common.TxnId, txnBites []byte) error {

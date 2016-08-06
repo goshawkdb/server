@@ -5,7 +5,6 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xd3af64eb7d699620;
 
-using Txn     = import "transaction.capnp";
 using Outcome = import "outcome.capnp";
 
 struct OneATxnVotes {
@@ -21,7 +20,7 @@ struct OneBTxnVotes {
 }
 
 struct TwoATxnVotes {
-  txn            @0: Txn.Txn;
+  txn            @0: Data;
   rmId           @1: UInt32;
   acceptRequests @2: List(TxnVoteAcceptRequest);
 }

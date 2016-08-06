@@ -507,7 +507,7 @@ type migrationTxnLocalStateChange struct {
 	inprogressPtr          *int32
 }
 
-func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(*eng.Txn, ...*eng.Ballot) {
+func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(...*eng.Ballot) {
 	panic("TxnBallotsComplete called on migrating txn.")
 }
 
@@ -1574,12 +1574,14 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 	}
 
 	seg := capn.NewBuffer(nil)
-	txn := msgs.NewTxn(seg)
+	txn := msgs.NewRootTxn(seg)
 	txn.SetSubmitter(uint32(task.connectionManager.RMId))
 	txn.SetSubmitterBootCount(task.connectionManager.BootCount)
 
-	actions := msgs.NewActionList(seg, 1)
-	txn.SetActions(actions)
+	actionsSeg := capn.NewBuffer(nil)
+	actionsWrapper := msgs.NewRootActionListWrapper(actionsSeg)
+	actions := msgs.NewActionList(actionsSeg, 1)
+	actionsWrapper.SetActions(actions)
 	action := actions.At(0)
 	action.SetVarId(configuration.TopologyVarUUId[:])
 
@@ -1618,6 +1620,7 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 		}
 		rw.SetReferences(refs)
 	}
+	txn.SetActions(server.SegToBytes(actionsSeg))
 
 	allocs := msgs.NewAllocationList(seg, len(active)+len(passive))
 	txn.SetAllocations(allocs)
@@ -1663,7 +1666,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 	for {
 		txn := task.createTopologyTransaction(nil, nil, []common.RMId{task.connectionManager.RMId}, nil)
 
-		result, err := task.localConnection.RunTransaction(txn, true, task.connectionManager.RMId)
+		_, result, err := task.localConnection.RunTransaction(txn, nil, task.connectionManager.RMId)
 		if err != nil {
 			return nil, err
 		}
@@ -1683,7 +1686,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 		}
 		update := abortUpdates.At(0)
 		dbversion := common.MakeTxnId(update.TxnId())
-		updateActions := update.Actions()
+		updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
 		if updateActions.Len() != 1 {
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave multiple actions: %v", updateActions.Len())
 		}
@@ -1706,7 +1709,7 @@ func (task *targetConfig) createTopologyZero(config *configuration.NextConfigura
 	txn := task.createTopologyTransaction(nil, topology, []common.RMId{task.connectionManager.RMId}, nil)
 	txnId := topology.DBVersion
 	txn.SetId(txnId[:])
-	result, err := task.localConnection.RunTransaction(txn, false, task.connectionManager.RMId)
+	_, result, err := task.localConnection.RunTransaction(txn, txnId, task.connectionManager.RMId)
 	if err != nil {
 		return nil, err
 	}
@@ -1723,11 +1726,11 @@ func (task *targetConfig) createTopologyZero(config *configuration.NextConfigura
 func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, active, passive common.RMIds) (*configuration.Topology, bool, error) {
 	txn := task.createTopologyTransaction(read, write, active, passive)
 
-	result, err := task.localConnection.RunTransaction(txn, true, active...)
+	txnReader, result, err := task.localConnection.RunTransaction(txn, nil, active...)
 	if result == nil || err != nil {
 		return nil, false, err
 	}
-	txnId := common.MakeTxnId(result.Txn().Id())
+	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
 		topology := write.Clone()
 		topology.DBVersion = txnId
@@ -1748,7 +1751,7 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, a
 	update := abortUpdates.At(0)
 	dbversion := common.MakeTxnId(update.TxnId())
 
-	updateActions := update.Actions()
+	updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
 		return nil, false,
 			fmt.Errorf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
@@ -1793,7 +1796,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 		root.VarUUId = vUUId
 	}
 	ctxn.SetActions(actions)
-	result, err := task.localConnection.RunClientTransaction(&ctxn, nil, true)
+	txnReader, result, err := task.localConnection.RunClientTransaction(&ctxn, nil)
 	log.Println("Create root result", result, err)
 	if err != nil {
 		return false, nil, err
@@ -1802,7 +1805,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 		return false, nil, nil
 	}
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		actions := result.Txn().Actions()
+		actions := txnReader.Actions(true).Actions()
 		for idx := range roots {
 			root := &roots[idx]
 			action := actions.At(idx)
@@ -1819,8 +1822,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 		server.Log("Topology: Roots created in", roots)
 		return false, roots, nil
 	}
-	abort := result.Abort()
-	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
+	if result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT {
 		return true, nil, nil
 	}
 	return false, nil, fmt.Errorf("Internal error: creation of root gave rerun outcome")
@@ -1933,12 +1935,7 @@ func (it *dbIterator) iterate() {
 				if txnBytes == nil {
 					return true
 				}
-				seg, _, err = capn.ReadFromMemoryZeroCopy(txnBytes)
-				if err != nil {
-					cursor.Error(err)
-					return true
-				}
-				txnCap := msgs.ReadRootTxn(seg)
+				txn := eng.TxnReaderFromData(txnBytes)
 				// So, we only need to send based on the vars that we have
 				// (in fact, we require the positions so we can only look
 				// at the vars we have). However, the txn var allocations
@@ -1947,8 +1944,8 @@ func (it *dbIterator) iterate() {
 				// txn when it changes. So that all just means we must
 				// ignore the allocations here, and just work through the
 				// actions directly.
-				actions := txnCap.Actions()
-				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], &actions)
+				actions := txn.Actions(true).Actions()
+				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], actions)
 				if err != nil {
 					return true
 				} else if len(varCaps) == 0 {
@@ -1960,7 +1957,7 @@ func (it *dbIterator) iterate() {
 						cursor.Error(err)
 						return true
 					} else if len(matchingVarCaps) != 0 {
-						sb.add(&txnCap, matchingVarCaps)
+						sb.add(txn, matchingVarCaps)
 					}
 				}
 			}
@@ -2076,7 +2073,7 @@ type sendBatch struct {
 }
 
 type migrationElem struct {
-	txn  *msgs.Txn
+	txn  *eng.TxnReader
 	vars []*msgs.Var
 }
 
@@ -2100,7 +2097,7 @@ func (sb *sendBatch) flush() {
 	elems := msgs.NewMigrationElementList(seg, len(sb.elems))
 	for idx, elem := range sb.elems {
 		elemCap := msgs.NewMigrationElement(seg)
-		elemCap.SetTxn(*elem.txn)
+		elemCap.SetTxn(elem.txn.Data)
 		vars := msgs.NewVarList(seg, len(elem.vars))
 		for idy, varCap := range elem.vars {
 			vars.Set(idy, *varCap)
@@ -2116,9 +2113,9 @@ func (sb *sendBatch) flush() {
 	sb.elems = sb.elems[:0]
 }
 
-func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
+func (sb *sendBatch) add(txn *eng.TxnReader, varCaps []*msgs.Var) {
 	elem := &migrationElem{
-		txn:  txnCap,
+		txn:  txn,
 		vars: varCaps,
 	}
 	sb.elems = append(sb.elems, elem)

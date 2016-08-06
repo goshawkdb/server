@@ -91,16 +91,18 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 	}
 }
 
-func (pm *ProposerManager) ImmigrationReceived(txnId *common.TxnId, txnCap *msgs.Txn, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {
-	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txnCap, varCaps)
+func (pm *ProposerManager) ImmigrationReceived(txn *eng.TxnReader, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {
+	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txn, varCaps)
 }
 
-func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, txnCap *msgs.Txn) {
+func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other
-	// proposers will have created abort proposals, and consensus may
-	// have already been reached. If this is the case, it is correct to
-	// ignore this message.
+	// proposers will have created abort proposals on our behalf, and
+	// consensus may have already been reached. If this is the case, it
+	// is correct to ignore this message.
+	txnId := txn.Id
+	txnCap := txn.Txn
 	if _, found := pm.proposers[*txnId]; !found {
 		server.Log(txnId, "Received")
 		accept := true
@@ -109,7 +111,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, 
 				// Could also do pm.topology.BarrierReached1(sender), but
 				// would need to specialise that to rolls rather than
 				// topology txns, and it's enforced on the sending side
-				// anyway. One the sender has received the next topology,
+				// anyway. Once the sender has received the next topology,
 				// it'll do the right thing and locally block until it's
 				// in barrier1.
 				(pm.topology.Next() != nil && pm.topology.Next().Version == txnCap.TopologyVersion())
@@ -119,7 +121,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, 
 			}
 		}
 		if accept {
-			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveVoter, pm.topology)
+			proposer := NewProposer(pm, txn, ProposerActiveVoter, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 
@@ -128,26 +130,27 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txnId *common.TxnId, 
 			acceptors := GetAcceptorsFromTxn(txnCap)
 			fInc := int(txnCap.FInc())
 			alloc := AllocForRMId(txnCap, pm.RMId)
-			ballots := MakeAbortBallots(txnCap, alloc)
-			pm.NewPaxosProposals(txnId, txnCap, fInc, ballots, acceptors, pm.RMId, true)
+			ballots := MakeAbortBallots(txn, alloc)
+			pm.NewPaxosProposals(txn, fInc, ballots, acceptors, pm.RMId, true)
 			// ActiveLearner is right - we don't want the proposer to
 			// vote, but it should exist to collect the 2Bs that should
 			// come back.
-			proposer := NewProposer(pm, txnId, txnCap, ProposerActiveLearner, pm.topology)
+			proposer := NewProposer(pm, txn, ProposerActiveLearner, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 		}
 	}
 }
 
-func (pm *ProposerManager) NewPaxosProposals(txnId *common.TxnId, txn *msgs.Txn, fInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
+func (pm *ProposerManager) NewPaxosProposals(txn *eng.TxnReader, fInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
+	txnId := txn.Id
 	copy(instIdSlice, txnId[:])
 	binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], uint32(rmId))
 	if _, found := pm.proposals[instId]; !found {
 		server.Log(txnId, "NewPaxos; acceptors:", acceptors, "; instance:", rmId)
-		prop := NewProposal(pm, txnId, txn, fInc, ballots, rmId, acceptors, skipPhase1)
+		prop := NewProposal(pm, txn, fInc, ballots, rmId, acceptors, skipPhase1)
 		pm.proposals[instId] = prop
 		prop.Start()
 	}
@@ -182,7 +185,7 @@ func (pm *ProposerManager) OneBTxnVotesReceived(sender common.RMId, txnId *commo
 }
 
 // from network
-func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, twoBTxnVotes *msgs.TwoBTxnVotes) {
+func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, txn *eng.TxnReader, twoBTxnVotes *msgs.TwoBTxnVotes) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -206,9 +209,9 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			return
 		}
 
-		txnCap := outcome.Txn()
+		txnCap := txn.Txn
 
-		alloc := AllocForRMId(&txnCap, pm.RMId)
+		alloc := AllocForRMId(txnCap, pm.RMId)
 
 		if alloc.Active() != 0 {
 			// We have no record of this, but we were active - we must
@@ -227,13 +230,13 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			// do is to start a proposal for our own vars. The proposal
 			// itself will detect any further absences and take care of
 			// them.
-			acceptors := GetAcceptorsFromTxn(&txnCap)
+			acceptors := GetAcceptorsFromTxn(txnCap)
 			server.Log(txnId, "Starting abort proposals with acceptors", acceptors)
 			fInc := int(txnCap.FInc())
-			ballots := MakeAbortBallots(&txnCap, alloc)
-			pm.NewPaxosProposals(txnId, &txnCap, fInc, ballots, acceptors, pm.RMId, false)
+			ballots := MakeAbortBallots(txn, alloc)
+			pm.NewPaxosProposals(txn, fInc, ballots, acceptors, pm.RMId, false)
 
-			proposer := NewProposer(pm, txnId, &txnCap, ProposerActiveLearner, pm.topology)
+			proposer := NewProposer(pm, txn, ProposerActiveLearner, pm.topology)
 			pm.proposers[*txnId] = proposer
 			proposer.Start()
 			proposer.BallotOutcomeReceived(sender, &outcome)
@@ -242,7 +245,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
 				server.Log(txnId, "2B outcome received from", sender, "(unknown learner)")
 				// we must be a learner.
-				proposer := NewProposer(pm, txnId, &txnCap, ProposerPassiveLearner, pm.topology)
+				proposer := NewProposer(pm, txn, ProposerPassiveLearner, pm.topology)
 				pm.proposers[*txnId] = proposer
 				proposer.Start()
 				proposer.BallotOutcomeReceived(sender, &outcome)
@@ -322,7 +325,7 @@ func (pm *ProposerManager) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func GetAcceptorsFromTxn(txnCap *msgs.Txn) common.RMIds {
+func GetAcceptorsFromTxn(txnCap msgs.Txn) common.RMIds {
 	fInc := int(txnCap.FInc())
 	twoFInc := fInc + fInc - 1
 	acceptors := make([]common.RMId, twoFInc)
@@ -363,7 +366,7 @@ func MakeTxnSubmissionAbortMsg(txnId *common.TxnId) []byte {
 	return server.SegToBytes(seg)
 }
 
-func AllocForRMId(txn *msgs.Txn, rmId common.RMId) *msgs.Allocation {
+func AllocForRMId(txn msgs.Txn, rmId common.RMId) *msgs.Allocation {
 	allocs := txn.Allocations()
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
@@ -374,8 +377,8 @@ func AllocForRMId(txn *msgs.Txn, rmId common.RMId) *msgs.Allocation {
 	return nil
 }
 
-func MakeAbortBallots(txn *msgs.Txn, alloc *msgs.Allocation) []*eng.Ballot {
-	actions := txn.Actions()
+func MakeAbortBallots(txn *eng.TxnReader, alloc *msgs.Allocation) []*eng.Ballot {
+	actions := txn.Actions(true).Actions()
 	actionIndices := alloc.ActionIndices()
 	ballots := make([]*eng.Ballot, actionIndices.Len())
 	for idx, l := 0, actionIndices.Len(); idx < l; idx++ {
