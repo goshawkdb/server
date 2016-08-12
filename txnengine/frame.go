@@ -11,6 +11,7 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"sort"
+	"time"
 )
 
 var AbortRollNotFirst = errors.New("AbortRollNotFirst")
@@ -27,6 +28,7 @@ type frame struct {
 	readVoteClock    *VectorClockMutable
 	positionsFound   bool
 	mask             *VectorClockMutable
+	scheduleInterval time.Duration
 	frameOpen
 	frameClosed
 	frameErase
@@ -45,12 +47,17 @@ func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions
 	}
 	if parent == nil {
 		f.mask = NewVectorClock().AsMutable()
+		f.scheduleInterval = server.VarIdleTimeoutMin + time.Duration(v.rng.Intn(int(server.VarIdleTimeoutMin)))
 	} else {
 		f.mask = parent.mask
+		f.scheduleInterval = parent.scheduleInterval / 2
+		if f.scheduleInterval < server.VarIdleTimeoutMin {
+			f.scheduleInterval = server.VarIdleTimeoutMin + time.Duration(v.rng.Intn(int(server.VarIdleTimeoutMin)))
+		}
 	}
 	f.init()
 	server.Log(f, "NewFrame")
-	f.maybeScheduleRoll()
+	f.maybeStartRoll()
 	return f
 }
 
@@ -173,6 +180,7 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 }
 
 func (fo *frameOpen) AddRead(action *localAction) {
+	fo.v.poisson.AddNow()
 	txn := action.Txn
 	server.Log(fo.frame, "AddRead", txn, action.readVsn)
 	switch {
@@ -234,6 +242,7 @@ func (fo *frameOpen) ReadCommitted(action *localAction) {
 }
 
 func (fo *frameOpen) AddWrite(action *localAction) {
+	fo.v.poisson.AddNow()
 	txn := action.Txn
 	server.Log(fo.frame, "AddWrite", txn)
 	cid := txn.Id.ClientId()
@@ -274,7 +283,7 @@ func (fo *frameOpen) WriteAborted(action *localAction, permitInactivate bool) {
 		action.frame = nil
 		if fo.writes.Len() == 0 {
 			fo.writeVoteClock = nil
-			fo.maybeScheduleRoll()
+			fo.maybeStartRoll()
 			if permitInactivate {
 				fo.v.maybeMakeInactive()
 			}
@@ -303,6 +312,7 @@ func (fo *frameOpen) WriteCommitted(action *localAction) {
 }
 
 func (fo *frameOpen) AddReadWrite(action *localAction) {
+	fo.v.poisson.AddNow()
 	txn := action.Txn
 	server.Log(fo.frame, "AddReadWrite", txn, action.readVsn)
 	switch {
@@ -344,7 +354,7 @@ func (fo *frameOpen) ReadWriteAborted(action *localAction, permitInactivate bool
 		action.frame = nil
 		if fo.writes.Len() == 0 {
 			fo.writeVoteClock = nil
-			fo.maybeScheduleRoll()
+			fo.maybeStartRoll()
 			if permitInactivate {
 				fo.v.maybeMakeInactive()
 			}
@@ -421,7 +431,7 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 			return true
 		})
 		server.Log(fo.frame, "ReadLearnt", txn, "uncommittedReads:", fo.uncommittedReads, "uncommittedWrites:", fo.uncommittedWrites)
-		fo.maybeScheduleRoll()
+		fo.maybeStartRoll()
 		return true
 	} else {
 		panic(fmt.Sprintf("%v ReadLearnt called for known txn %v", fo.frame, txn))
@@ -510,7 +520,7 @@ func (fo *frameOpen) maybeFindMaxReadFrom(action *localAction, node *sl.Node) {
 }
 
 func (fo *frameOpen) maybeStartWrites() {
-	fo.maybeScheduleRoll()
+	fo.maybeStartRoll()
 	if fo.writes.Len() == 0 || fo.uncommittedReads != 0 {
 		return
 	}
@@ -519,10 +529,12 @@ func (fo *frameOpen) maybeStartWrites() {
 		fo.maybeCreateChild()
 	} else {
 		fo.calculateWriteVoteClock()
+		now := time.Now()
 		for node := fo.writes.First(); node != nil; {
 			next := node.Next()
 			if node.Value == postponed {
 				node.Value = uncommitted
+				fo.v.poisson.AddThen(now)
 				if action := node.Key.(*localAction); !action.VoteCommit(fo.writeVoteClock) {
 					if action.IsRead() {
 						fo.ReadWriteAborted(action, false)
@@ -690,51 +702,78 @@ func (fo *frameOpen) maybeCreateChild() {
 	fo.v.SetCurFrame(fo.child, winner, positions)
 }
 
-func (fo *frameOpen) maybeScheduleRoll() {
-	// do not check vm.RollAllowed here.
-	if !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
-		fo.rollScheduled = true
-		fo.v.vm.ScheduleCallback(func() {
-			fo.v.applyToVar(func() {
-				fo.rollScheduled = false
-				fo.maybeStartRoll()
-			})
-		})
-	}
+func (fo *frameOpen) basicRollCondition() bool {
+	return !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
+		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	if fo.v.vm.RollAllowed && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) {
-		fo.rollActive = true
-		go func() {
-			server.Log(fo.frame, "Starting roll")
-			ctxn, varPosMap := fo.createRollClientTxn()
-			_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap)
-			ow := ""
-			if outcome != nil {
-				ow = fmt.Sprint(outcome.Which())
-				if outcome.Which() == msgs.OUTCOME_ABORT {
-					ow += fmt.Sprintf("-%v", outcome.Abort().Which())
+	fo.maybeStartRollSchedule(true)
+}
+
+func (fo *frameOpen) maybeStartRollSchedule(forceSchedule bool) {
+	if fo.basicRollCondition() {
+		multiplier := 1
+		for node := fo.reads.First(); node != nil; node = node.Next() {
+			if node.Value == committed {
+				multiplier += node.Key.(*localAction).TxnReader.Actions(true).Actions().Len()
+			}
+		}
+		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
+		if quietDuration > 400*time.Millisecond {
+			quietDuration = 400 * time.Millisecond
+		}
+		// fmt.Printf("m%v ", multiplier)
+		probOfZero := fo.v.poisson.P(quietDuration, 0)
+		if !forceSchedule && probOfZero > server.VarRollPRequirement && fo.v.vm.RollAllowed {
+			// fmt.Printf("r%v\n", fo.v.UUId)
+			fo.startRoll()
+		} else {
+			fo.rollScheduled = true
+			// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
+			fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
+				fo.v.applyToVar(func() {
+					fo.rollScheduled = false
+					fo.maybeStartRollSchedule(false)
+				})
+			})
+			fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarIdleTimeoutMin)))
+			if fo.scheduleInterval > 1000*server.VarIdleTimeoutMin {
+				fo.scheduleInterval = fo.scheduleInterval / 2
+			}
+		}
+	}
+}
+
+func (fo *frameOpen) startRoll() {
+	fo.rollActive = true
+	go func() {
+		server.Log(fo.frame, "Starting roll")
+		ctxn, varPosMap := fo.createRollClientTxn()
+		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap)
+		ow := ""
+		if outcome != nil {
+			ow = fmt.Sprint(outcome.Which())
+			if outcome.Which() == msgs.OUTCOME_ABORT {
+				ow += fmt.Sprintf("-%v", outcome.Abort().Which())
+			}
+		}
+		// fmt.Printf("%v r%v (%v)\n", fo.v.UUId, ow, err == AbortRollNotFirst)
+		server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
+		fo.v.applyToVar(func() {
+			fo.rollActive = false
+			if fo.v.curFrame != fo.frame {
+				return
+			}
+			if (outcome == nil && err != nil) || (outcome != nil && outcome.Which() != msgs.OUTCOME_COMMIT) {
+				if err == AbortRollNotInPermutation {
+					fo.v.maybeMakeInactive()
+				} else {
+					fo.maybeStartRoll()
 				}
 			}
-			// fmt.Printf("r%v ", ow)
-			server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
-			if (outcome == nil && err != nil) || (outcome != nil && outcome.Which() != msgs.OUTCOME_COMMIT) {
-				fo.v.applyToVar(func() {
-					fo.rollActive = false
-					if err == AbortRollNotInPermutation {
-						fo.v.maybeMakeInactive()
-					} else {
-						fo.maybeScheduleRoll()
-					}
-				})
-			}
-		}()
-	} else {
-		fo.maybeScheduleRoll()
-	}
+		})
+	}()
 }
 
 func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions) {
@@ -864,7 +903,7 @@ func (fc *frameClosed) MaybeCompleteTxns() {
 			}
 		}
 	}
-	fc.maybeScheduleRoll()
+	fc.maybeStartRoll()
 	fc.v.maybeMakeInactive()
 }
 

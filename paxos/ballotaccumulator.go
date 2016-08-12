@@ -116,9 +116,7 @@ func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, inst
 // one from each RM voting for each vUUId. rmId is the paxos
 // instanceRMId.
 func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *eng.TxnReader) *outcomeEqualId {
-	if ba.txn.IsDeflated() && !txn.HasDeflated() {
-		ba.txn = txn
-	}
+	ba.txn = ba.txn.Combine(txn)
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
 	if vBallot.rmToBallot == nil {

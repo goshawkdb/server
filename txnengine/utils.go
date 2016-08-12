@@ -37,11 +37,29 @@ func (tr *TxnReader) Actions(forceDecode bool) *TxnActions {
 	} else if forceDecode {
 		tr.actions.decode()
 	}
+	if tr.deflated == nil && tr.actions.decoded && tr.actions.deflated {
+		tr.deflated = tr
+	}
 	return tr.actions
 }
 
-func (tr *TxnReader) HasDeflated() bool {
-	return tr.deflated != nil || tr.Actions(true).deflated
+func (a *TxnReader) Combine(b *TxnReader) *TxnReader {
+	a.Actions(true)
+	b.Actions(true)
+	switch {
+	case a.deflated != nil && a.deflated != a: // a has both
+		return a
+	case b.deflated != nil && b.deflated != b: // b has both
+		return b
+	case a.deflated == a && b.deflated == nil: // a is deflated, b is not
+		b.deflated = a
+		return b
+	case a.deflated == nil && b.deflated == b: // b is deflated, a is not
+		a.deflated = b
+		return a
+	default: // a and b must both be the same
+		return a
+	}
 }
 
 func (tr *TxnReader) IsDeflated() bool {

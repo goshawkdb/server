@@ -21,6 +21,7 @@ type VarWriteSubscriber struct {
 type Var struct {
 	UUId            *common.VarUUId
 	positions       *common.Positions
+	poisson         *Poisson
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
@@ -83,6 +84,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	return &Var{
 		UUId:            uuid,
 		positions:       nil,
+		poisson:         NewPoisson(),
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
@@ -211,8 +213,8 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 		}
 	}
 
-	// diffLen := len(action.outcomeClock.Clock) - action.TxnCap.Actions().Len()
-	// fmt.Printf("%v ", diffLen)
+	diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
+	fmt.Printf("d%v ", diffLen)
 
 	v.maybeWriteFrame(f, action, positions)
 }

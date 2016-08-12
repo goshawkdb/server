@@ -16,6 +16,17 @@ const (
 	AbortDeadlock = Vote(msgs.VOTE_ABORTDEADLOCK)
 )
 
+func (v Vote) String() string {
+	switch v {
+	case AbortBadRead:
+		return "Abort-badRead"
+	case AbortDeadlock:
+		return "Abort-deadlock"
+	default:
+		return "Commit"
+	}
+}
+
 func (v Vote) ToVoteEnum() msgs.VoteEnum {
 	switch v {
 	case AbortBadRead:
@@ -33,6 +44,10 @@ type Ballot struct {
 	VoteCap *msgs.Vote
 	Clock   *VectorClock
 	Vote    Vote
+}
+
+func (b *Ballot) String() string {
+	return fmt.Sprintf("%v %v", b.VarUUId, b.Vote)
 }
 
 type BallotBuilder struct {
