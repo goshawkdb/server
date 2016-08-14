@@ -10,6 +10,7 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"math"
 	"sort"
 	"time"
 )
@@ -708,10 +709,6 @@ func (fo *frameOpen) basicRollCondition() bool {
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	fo.maybeStartRollSchedule(true)
-}
-
-func (fo *frameOpen) maybeStartRollSchedule(forceSchedule bool) {
 	if fo.basicRollCondition() {
 		multiplier := 1
 		for node := fo.reads.First(); node != nil; node = node.Next() {
@@ -720,21 +717,18 @@ func (fo *frameOpen) maybeStartRollSchedule(forceSchedule bool) {
 			}
 		}
 		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
-		if quietDuration > 400*time.Millisecond {
-			quietDuration = 400 * time.Millisecond
-		}
-		// fmt.Printf("m%v ", multiplier)
 		probOfZero := fo.v.poisson.P(quietDuration, 0)
-		if !forceSchedule && probOfZero > server.VarRollPRequirement && fo.v.vm.RollAllowed {
+		probReq := math.Pow(server.VarRollPRequirement, float64(fo.reads.Len()))
+		if !(fo.reads.Len() > fo.uncommittedReads) || probOfZero > probReq && fo.v.vm.RollAllowed {
 			// fmt.Printf("r%v\n", fo.v.UUId)
 			fo.startRoll()
 		} else {
 			fo.rollScheduled = true
-			// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
+			// fmt.Printf("s%v(%v|%v|%v)\n", fo.v.UUId, probOfZero, probReq, fo.scheduleInterval)
 			fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
 				fo.v.applyToVar(func() {
 					fo.rollScheduled = false
-					fo.maybeStartRollSchedule(false)
+					fo.maybeStartRoll()
 				})
 			})
 			fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarIdleTimeoutMin)))

@@ -12,7 +12,7 @@ const (
 	SubmissionMaxSubmitDelay      = 2 * time.Second
 	VarIdleTimeoutMin             = 50 * time.Millisecond
 	VarRollTimeExpectation        = 2 * time.Millisecond
-	VarRollPRequirement           = 0.95
+	VarRollPRequirement           = 0.9
 	ConnectionRestartDelayRangeMS = 5000
 	ConnectionRestartDelayMin     = 3 * time.Second
 	MostRandomByteIndex           = 7 // will be the lsb of a big-endian client-n in the txnid.

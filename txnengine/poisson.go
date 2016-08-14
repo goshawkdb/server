@@ -8,13 +8,14 @@ import (
 
 type Poisson struct {
 	events []time.Time
-	ptr    int
+	front  int
+	back   int
+	length int
 }
 
 func NewPoisson() *Poisson {
 	return &Poisson{
-		events: make([]time.Time, 0, server.PoissonSamples),
-		ptr:    0,
+		events: make([]time.Time, server.PoissonSamples),
 	}
 }
 
@@ -23,49 +24,50 @@ func (p *Poisson) AddNow() {
 }
 
 func (p *Poisson) AddThen(now time.Time) {
-	l, c := len(p.events), cap(p.events)
-	switch {
-	case l < c:
-		p.events = append(p.events, now)
-	default:
-		p.events[p.ptr] = now
-		p.ptr++
-		if p.ptr == l {
-			p.ptr = 0
+	p.events[p.front] = now
+	p.front++
+	if p.front == server.PoissonSamples {
+		p.front = 0
+	}
+	if p.front == p.back {
+		p.back++
+		if p.back == server.PoissonSamples {
+			p.back = 0
+		}
+	} else {
+		p.length++
+	}
+}
+
+func (p *Poisson) Cull(limit time.Time) {
+	for p.back != p.front {
+		if p.events[p.back].Before(limit) {
+			p.length--
+			p.back++
+			if p.back == server.PoissonSamples {
+				p.back = 0
+			}
+		} else {
+			break
 		}
 	}
 }
 
 func (p *Poisson) interval(now time.Time) time.Duration {
-	l, c := len(p.events), cap(p.events)
-	switch {
-	case l == 0:
+	if p.length == 0 {
 		return 0
-	case l < c:
-		return now.Sub(p.events[0])
-	default:
-		oldest := p.ptr + 1
-		if oldest == l {
-			oldest = 0
-		}
-		return now.Sub(p.events[oldest])
-	}
-}
-
-func (p *Poisson) length() float64 {
-	if l, c := len(p.events), cap(p.events); l < c {
-		return float64(l)
 	} else {
-		return float64(c)
+		return now.Sub(p.events[p.back])
 	}
 }
 
 func (p *Poisson) λ(now time.Time) float64 {
-	return p.length() / float64(p.interval(now))
+	return float64(p.length) / float64(p.interval(now))
 }
 
 func (p *Poisson) P(t time.Duration, k int64) float64 {
 	now := time.Now()
+	p.Cull(now.Add(-1 * time.Second))
 	λt := p.λ(now) * float64(t)
 	if math.IsNaN(λt) {
 		return 1
