@@ -741,9 +741,10 @@ func (fo *frameOpen) maybeStartRoll() {
 
 func (fo *frameOpen) startRoll() {
 	fo.rollActive = true
+	// must do roll txn creation in the main go-routine
+	ctxn, varPosMap := fo.createRollClientTxn()
 	go func() {
 		server.Log(fo.frame, "Starting roll")
-		ctxn, varPosMap := fo.createRollClientTxn()
 		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap)
 		ow := ""
 		if outcome != nil {
