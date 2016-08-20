@@ -10,7 +10,8 @@ const (
 	TwoToTheSixtyThree            = 9223372036854775808
 	SubmissionInitialBackoff      = 2 * time.Microsecond
 	SubmissionMaxSubmitDelay      = 2 * time.Second
-	VarIdleTimeoutMin             = 50 * time.Millisecond
+	VarRollDelayMin               = 50 * time.Millisecond
+	VarRollDelayMax               = 500 * time.Millisecond
 	VarRollTimeExpectation        = 2 * time.Millisecond
 	VarRollPRequirement           = 0.9
 	ConnectionRestartDelayRangeMS = 5000

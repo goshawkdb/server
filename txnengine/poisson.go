@@ -65,9 +65,8 @@ func (p *Poisson) λ(now time.Time) float64 {
 	return float64(p.length) / float64(p.interval(now))
 }
 
-func (p *Poisson) P(t time.Duration, k int64) float64 {
-	now := time.Now()
-	p.Cull(now.Add(-1 * time.Second))
+func (p *Poisson) P(t time.Duration, k int64, now time.Time) float64 {
+	//p.Cull(now.Add(-1 * time.Second))
 	λt := p.λ(now) * float64(t)
 	if math.IsNaN(λt) {
 		return 1

@@ -10,7 +10,6 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"math"
 	"sort"
 	"time"
 )
@@ -48,12 +47,12 @@ func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions
 	}
 	if parent == nil {
 		f.mask = NewVectorClock().AsMutable()
-		f.scheduleInterval = server.VarIdleTimeoutMin + time.Duration(v.rng.Intn(int(server.VarIdleTimeoutMin)))
+		f.scheduleInterval = server.VarRollDelayMin + time.Duration(v.rng.Intn(int(server.VarRollDelayMin)))
 	} else {
 		f.mask = parent.mask
 		f.scheduleInterval = parent.scheduleInterval / 2
-		if f.scheduleInterval < server.VarIdleTimeoutMin {
-			f.scheduleInterval = server.VarIdleTimeoutMin + time.Duration(v.rng.Intn(int(server.VarIdleTimeoutMin)))
+		if f.scheduleInterval < server.VarRollDelayMin {
+			f.scheduleInterval = server.VarRollDelayMin + time.Duration(v.rng.Intn(int(server.VarRollDelayMin)))
 		}
 	}
 	f.init()
@@ -107,7 +106,7 @@ func (f *frame) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Mask: %v", f.mask))
 	sc.Emit(fmt.Sprintf("- Current State: %v", f.currentState))
 	sc.Emit(fmt.Sprintf("- Locked? %v", f.isLocked()))
-	sc.Emit(fmt.Sprintf("- Roll scheduled/active? %v/%v", f.rollScheduled, f.rollActive))
+	sc.Emit(fmt.Sprintf("- Roll scheduled/active? %v/%v", f.rollScheduled != nil, f.rollActive))
 	sc.Emit(fmt.Sprintf("- DescendentOnDisk? %v", f.onDisk))
 	sc.Emit(fmt.Sprintf("- Child == nil? %v", f.child == nil))
 	sc.Emit(fmt.Sprintf("- Parent == nil? %v", f.parent == nil))
@@ -147,7 +146,7 @@ type frameOpen struct {
 	clientWrites       map[[common.ClientLen]byte]server.EmptyStruct
 	uncommittedWrites  uint
 	rwPresent          bool
-	rollScheduled      bool
+	rollScheduled      *time.Time
 	rollActive         bool
 	rollTxn            *cmsgs.ClientTxn
 	rollTxnPos         map[common.VarUUId]*common.Positions
@@ -704,11 +703,15 @@ func (fo *frameOpen) maybeCreateChild() {
 }
 
 func (fo *frameOpen) basicRollCondition() bool {
-	return !fo.rollScheduled && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
+	return fo.rollScheduled == nil && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
 		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
+	fo.maybeStartRollFrom(nil)
+}
+
+func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 	if fo.basicRollCondition() {
 		multiplier := 1
 		for node := fo.reads.First(); node != nil; node = node.Next() {
@@ -716,23 +719,26 @@ func (fo *frameOpen) maybeStartRoll() {
 				multiplier += node.Key.(*localAction).TxnReader.Actions(true).Actions().Len()
 			}
 		}
+		now := time.Now()
 		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
-		probOfZero := fo.v.poisson.P(quietDuration, 0)
-		probReq := math.Pow(server.VarRollPRequirement, float64(fo.reads.Len()))
-		if !(fo.reads.Len() > fo.uncommittedReads) || probOfZero > probReq && fo.v.vm.RollAllowed {
+		probOfZero := fo.v.poisson.P(quietDuration, 0, now)
+		if fo.v.vm.RollAllowed && (!(fo.reads.Len() > fo.uncommittedReads) || (then != nil && now.Sub(*then) > server.VarRollDelayMax) || probOfZero > server.VarRollPRequirement) {
 			// fmt.Printf("r%v\n", fo.v.UUId)
 			fo.startRoll()
 		} else {
-			fo.rollScheduled = true
-			// fmt.Printf("s%v(%v|%v|%v)\n", fo.v.UUId, probOfZero, probReq, fo.scheduleInterval)
+			if then == nil {
+				then = &now
+			}
+			fo.rollScheduled = then
+			// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
 			fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
 				fo.v.applyToVar(func() {
-					fo.rollScheduled = false
-					fo.maybeStartRoll()
+					fo.rollScheduled = nil
+					fo.maybeStartRollFrom(then)
 				})
 			})
-			fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarIdleTimeoutMin)))
-			if fo.scheduleInterval > 1000*server.VarIdleTimeoutMin {
+			fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarRollDelayMin)))
+			if fo.scheduleInterval > server.VarRollDelayMax {
 				fo.scheduleInterval = fo.scheduleInterval / 2
 			}
 		}
@@ -842,7 +848,7 @@ func (fo *frameOpen) subtractClock(clock VectorClockInterface) {
 }
 
 func (fo *frameOpen) isIdle() bool {
-	return fo.parent == nil && !fo.rollScheduled && fo.isEmpty()
+	return fo.parent == nil && fo.rollScheduled == nil && fo.isEmpty()
 }
 
 func (fo *frameOpen) isEmpty() bool {
