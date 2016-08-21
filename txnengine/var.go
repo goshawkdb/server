@@ -213,8 +213,8 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 		}
 	}
 
-	diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
-	fmt.Printf("d%v ", diffLen)
+	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
+	// fmt.Printf("d%v ", diffLen)
 
 	v.maybeWriteFrame(f, action, positions)
 }

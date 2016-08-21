@@ -362,7 +362,7 @@ func (vcA *VectorClockMutable) LessThan(vcB VectorClockInterface) bool {
 }
 
 func (vcA *VectorClockMutable) MergeInMax(vcB VectorClockInterface) bool {
-	if vcB.Len() == 0 {
+	if vcB == nil || vcB.Len() == 0 {
 		return false
 	}
 	changed := false

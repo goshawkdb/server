@@ -105,7 +105,6 @@ func (f *frame) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- RW Present: %v", f.rwPresent))
 	sc.Emit(fmt.Sprintf("- Mask: %v", f.mask))
 	sc.Emit(fmt.Sprintf("- Current State: %v", f.currentState))
-	sc.Emit(fmt.Sprintf("- Locked? %v", f.isLocked()))
 	sc.Emit(fmt.Sprintf("- Roll scheduled/active? %v/%v", f.rollScheduled != nil, f.rollActive))
 	sc.Emit(fmt.Sprintf("- DescendentOnDisk? %v", f.onDisk))
 	sc.Emit(fmt.Sprintf("- Child == nil? %v", f.child == nil))
@@ -186,7 +185,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writeVoteClock != nil || (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil || fo.isLocked():
+	case fo.writes.Len() != 0 || (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil:
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
@@ -250,7 +249,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.rwPresent || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || found || len(fo.learntFutureReads) != 0 || fo.isLocked():
+	case fo.rwPresent || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || found || len(fo.learntFutureReads) != 0:
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.writes.Get(action) == nil:
 		fo.uncommittedWrites++
@@ -318,7 +317,7 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddReadWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writeVoteClock != nil || fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0 || (!action.IsRoll() && fo.isLocked()):
+	case fo.writes.Len() != 0 || fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0:
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
@@ -387,7 +386,7 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		panic(fmt.Sprintf("%v ReadLearnt called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
-	if actClockElem == 0 {
+	if actClockElem == deleted {
 		panic("Just did 0 - 1 in int64")
 	}
 	actClockElem--
@@ -424,12 +423,14 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		// missing some TGCs - essentially we can infer TGCs by
 		// observing the outcome clocks on future txns we learn.
 		fo.calculateReadVoteClock()
+		mask := NewVectorClock().AsMutable()
 		fo.readVoteClock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if action.outcomeClock.At(vUUId) == 0 {
-				fo.mask.SetVarIdMax(vUUId, v)
+			if action.outcomeClock.At(vUUId) == deleted {
+				mask.SetVarIdMax(vUUId, v)
 			}
 			return true
 		})
+		fo.subtractClock(mask)
 		server.Log(fo.frame, "ReadLearnt", txn, "uncommittedReads:", fo.uncommittedReads, "uncommittedWrites:", fo.uncommittedWrites)
 		fo.maybeStartRoll()
 		return true
@@ -465,43 +466,28 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 		fo.writes.Insert(action, committed)
 		action.frame = fo.frame
 		fo.positionsFound = fo.positionsFound || (fo.frameTxnActions == nil && action.createPositions != nil)
-		// See corresponding comment in ReadLearnt
+		// See corresponding comment in ReadLearnt. We only force the
+		// readvoteclock here because we cannot calculate the
+		// writevoteclock because we may have uncommitted reads.
 		clock := fo.writeVoteClock
 		if clock == nil {
 			fo.calculateReadVoteClock()
 			clock = fo.readVoteClock
 		}
+		mask := NewVectorClock().AsMutable()
 		clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if action.outcomeClock.At(vUUId) == 0 {
-				fo.mask.SetVarIdMax(vUUId, v)
+			if action.outcomeClock.At(vUUId) == deleted {
+				mask.SetVarIdMax(vUUId, v)
 			}
 			return true
 		})
+		fo.subtractClock(mask)
 		server.Log(fo.frame, "WriteLearnt", txn, "uncommittedReads:", fo.uncommittedReads, "uncommittedWrites:", fo.uncommittedWrites)
-		if fo.uncommittedReads == 0 {
-			fo.maybeCreateChild()
-		}
+		fo.maybeCreateChild()
 		return true
 	} else {
 		panic(fmt.Sprintf("%v WriteLearnt called for known txn %v", fo.frame, txn))
 	}
-}
-
-func (fo *frameOpen) isLocked() bool {
-	return false
-	// Locking is disabled because it's unsafe when there are temporary
-	// node failures around: with node failures, TGCs don't get issued
-	// so the clocks don't get tidied up, so the frame can lock itself
-	// and then we can't make progress. TODO FIXME.
-	/*
-		if fo.frameTxnActions == nil || fo.parent == nil {
-			return false
-		}
-		rvcLen := fo.readVoteClock.Len()
-		actionsLen := fo.frameTxnActions.Len()
-		excess := rvcLen - actionsLen
-		return excess > server.FrameLockMinExcessSize && rvcLen > actionsLen*server.FrameLockMinRatio
-	*/
 }
 
 func (fo *frameOpen) maybeFindMaxReadFrom(action *localAction, node *sl.Node) {
@@ -550,22 +536,38 @@ func (fo *frameOpen) maybeStartWrites() {
 
 func (fo *frameOpen) calculateReadVoteClock() {
 	if fo.readVoteClock == nil {
-		if fo.frameWritesClock.At(fo.v.UUId) == 0 {
+		if fo.frameWritesClock.At(fo.v.UUId) == deleted {
 			panic(fmt.Sprintf("%v no write to self! %v", fo.frame, fo.frameWritesClock))
 		}
+
+		// see notes below in calculateWriteVoteClock!
 		clock := fo.frameTxnClock.Clone()
-		clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if fo.mask.At(vUUId) >= v {
-				clock.Delete(vUUId)
-			}
-			return true
-		})
-		fo.frameWritesClock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if fo.mask.At(vUUId) < v || fo.v.UUId.Compare(vUUId) == common.EQ {
-				clock.SetVarIdMax(vUUId, v+1)
-			}
-			return true
-		})
+		if fo.mask.Len()+fo.frameWritesClock.Len() > clock.Len() {
+			// mask is bigger, so look through clock
+			clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
+				if m := fo.mask.At(vUUId); m >= v {
+					clock.Delete(vUUId)
+				} else if w := fo.frameWritesClock.At(vUUId); w == v {
+					clock.Bump(vUUId, 1)
+				}
+				return true
+			})
+
+		} else {
+			fo.mask.ForEach(func(vUUId *common.VarUUId, m uint64) bool {
+				if v := clock.At(vUUId); m >= v {
+					clock.Delete(vUUId)
+				}
+				return true
+			})
+			fo.frameWritesClock.ForEach(func(vUUId *common.VarUUId, w uint64) bool {
+				if v := clock.At(vUUId); v == w {
+					clock.Bump(vUUId, 1)
+				}
+				return true
+			})
+		}
+
 		fo.readVoteClock = clock
 	}
 }
@@ -582,18 +584,43 @@ func (fo *frameOpen) calculateWriteVoteClock() {
 				written.SetVarIdMax(k, action.outcomeClock.At(k))
 			}
 		}
-		clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if fo.mask.At(vUUId) >= v {
-				clock.Delete(vUUId)
-			}
-			return true
-		})
-		written.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if fo.mask.At(vUUId) < v {
-				clock.SetVarIdMax(vUUId, v+1)
-			}
-			return true
-		})
+
+		// Everything in written is also in clock. But the value in
+		// written can be lower than in clock because a txn may have a
+		// future read of a var with a higher clock elem.  But if the
+		// mask is > then the value in clock then it can't be the case
+		// that the value in mask is <= the value in written.
+
+		if fo.mask.Len()+written.Len() > clock.Len() {
+			// mask is bigger, so loop through clock
+			clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
+				if m := fo.mask.At(vUUId); m >= v {
+					clock.Delete(vUUId)
+				} else if w := written.At(vUUId); w == v {
+					clock.Bump(vUUId, 1)
+				}
+				return true
+			})
+
+		} else {
+			// mask is smaller, so loop through mask. But this means we
+			// have to do written separately
+			fo.mask.ForEach(func(vUUId *common.VarUUId, m uint64) bool {
+				if v := clock.At(vUUId); m >= v {
+					// there is no risk we will add this back in in the
+					// written loop (see above)
+					clock.Delete(vUUId)
+				}
+				return true
+			})
+			written.ForEach(func(vUUId *common.VarUUId, w uint64) bool {
+				if v := clock.At(vUUId); v == w {
+					clock.Bump(vUUId, 1)
+				}
+				return true
+			})
+		}
+
 		fo.writeVoteClock = clock
 	}
 }
@@ -666,16 +693,17 @@ func (fo *frameOpen) maybeCreateChild() {
 	for _, localElemVal := range localElemVals {
 		actions := localElemValToTxns[localElemVal]
 		for _, action := range *actions {
-			outcomeClock := action.outcomeClock.AsMutable()
-			action.outcomeClock = outcomeClock
-			outcomeClock.MergeInMissing(clock)
-			winner = maxTxnByOutcomeClock(winner, action)
-
 			if positions == nil && action.createPositions != nil {
 				positions = action.createPositions
 			}
 
+			outcomeClock := action.outcomeClock.AsMutable()
+			action.outcomeClock = outcomeClock
+
 			clock.MergeInMax(outcomeClock)
+			outcomeClock.MergeInMissing(clock)
+			winner = maxTxnByOutcomeClock(winner, action)
+
 			if action.writesClock == nil {
 				for _, k := range action.writes {
 					written.SetVarIdMax(k, outcomeClock.At(k))
@@ -842,8 +870,14 @@ func (fo *frameOpen) subtractClock(clock VectorClockInterface) {
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v subtractClock called with frame in state %v", fo.v, fo.currentState))
 	}
-	if changed := fo.mask.MergeInMax(clock); changed && fo.reads.Len() == 0 && fo.writeVoteClock == nil {
-		fo.readVoteClock = nil
+	if changed := fo.mask.MergeInMax(clock); changed {
+		fo.mask.Delete(fo.v.UUId)
+		if fo.writes.Len() == 0 && len(fo.learntFutureReads) == 0 {
+			fo.writeVoteClock = nil
+			if fo.reads.Len() == 0 {
+				fo.readVoteClock = nil
+			}
+		}
 	}
 }
 
