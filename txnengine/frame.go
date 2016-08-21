@@ -713,7 +713,7 @@ func (fo *frameOpen) maybeStartRoll() {
 
 func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 	if fo.basicRollCondition() {
-		multiplier := 1
+		multiplier := 0
 		for node := fo.reads.First(); node != nil; node = node.Next() {
 			if node.Value == committed {
 				multiplier += node.Key.(*localAction).TxnReader.Actions(true).Actions().Len()
@@ -722,7 +722,7 @@ func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 		now := time.Now()
 		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
 		probOfZero := fo.v.poisson.P(quietDuration, 0, now)
-		if fo.v.vm.RollAllowed && (!(fo.reads.Len() > fo.uncommittedReads) || (then != nil && now.Sub(*then) > server.VarRollDelayMax) || probOfZero > server.VarRollPRequirement) {
+		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (then != nil && now.Sub(*then) > server.VarRollDelayMax)) {
 			// fmt.Printf("r%v\n", fo.v.UUId)
 			fo.startRoll()
 		} else {

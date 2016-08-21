@@ -12,7 +12,7 @@ const (
 	SubmissionMaxSubmitDelay      = 2 * time.Second
 	VarRollDelayMin               = 50 * time.Millisecond
 	VarRollDelayMax               = 500 * time.Millisecond
-	VarRollTimeExpectation        = 2 * time.Millisecond
+	VarRollTimeExpectation        = 3 * time.Millisecond
 	VarRollPRequirement           = 0.9
 	ConnectionRestartDelayRangeMS = 5000
 	ConnectionRestartDelayMin     = 3 * time.Second
