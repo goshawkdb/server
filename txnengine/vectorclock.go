@@ -414,7 +414,9 @@ func (vc *VectorClockMutable) AsData() []byte {
 			vc.data = vc.VectorClock.data
 
 		} else {
-			seg := capn.NewBuffer(nil)
+			// for each pair, we need KeyLen bytes for the vUUIds, and 8
+			// bytes for value. Then double it to be safe.
+			seg := capn.NewBuffer(make([]byte, 0, vc.length*(common.KeyLen+8)*2))
 			vcCap := msgs.NewRootVectorClock(seg)
 			vUUIds := seg.NewDataList(vc.length)
 			values := seg.NewUInt64List(vc.length)
