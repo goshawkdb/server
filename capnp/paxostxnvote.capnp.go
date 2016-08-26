@@ -436,8 +436,8 @@ func NewTwoATxnVotes(s *C.Segment) TwoATxnVotes      { return TwoATxnVotes(s.New
 func NewRootTwoATxnVotes(s *C.Segment) TwoATxnVotes  { return TwoATxnVotes(s.NewRootStruct(8, 2)) }
 func AutoNewTwoATxnVotes(s *C.Segment) TwoATxnVotes  { return TwoATxnVotes(s.NewStructAR(8, 2)) }
 func ReadRootTwoATxnVotes(s *C.Segment) TwoATxnVotes { return TwoATxnVotes(s.Root(0).ToStruct()) }
-func (s TwoATxnVotes) Txn() Txn                      { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
-func (s TwoATxnVotes) SetTxn(v Txn)                  { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s TwoATxnVotes) Txn() []byte                   { return C.Struct(s).GetObject(0).ToData() }
+func (s TwoATxnVotes) SetTxn(v []byte)               { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s TwoATxnVotes) RmId() uint32                  { return C.Struct(s).Get32(0) }
 func (s TwoATxnVotes) SetRmId(v uint32)              { C.Struct(s).Set32(0, v) }
 func (s TwoATxnVotes) AcceptRequests() TxnVoteAcceptRequest_List {
@@ -461,7 +461,11 @@ func (s TwoATxnVotes) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Txn()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -545,7 +549,11 @@ func (s TwoATxnVotes) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Txn()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -1093,8 +1101,8 @@ func (s TxnVotePromise) Accepted() TxnVotePromiseAccepted { return TxnVotePromis
 func (s TxnVotePromise) SetAccepted()                     { C.Struct(s).Set16(8, 1) }
 func (s TxnVotePromiseAccepted) RoundNumber() uint64      { return C.Struct(s).Get64(16) }
 func (s TxnVotePromiseAccepted) SetRoundNumber(v uint64)  { C.Struct(s).Set64(16, v) }
-func (s TxnVotePromiseAccepted) Ballot() Ballot           { return Ballot(C.Struct(s).GetObject(1).ToStruct()) }
-func (s TxnVotePromiseAccepted) SetBallot(v Ballot)       { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s TxnVotePromiseAccepted) Ballot() []byte           { return C.Struct(s).GetObject(1).ToData() }
+func (s TxnVotePromiseAccepted) SetBallot(v []byte)       { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s TxnVotePromise) RoundNumberTooLow() uint32        { return C.Struct(s).Get32(16) }
 func (s TxnVotePromise) SetRoundNumberTooLow(v uint32) {
 	C.Struct(s).Set16(8, 2)
@@ -1190,7 +1198,11 @@ func (s TxnVotePromise) WriteJSON(w io.Writer) error {
 			}
 			{
 				s := s.Ballot()
-				err = s.WriteJSON(b)
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
 				if err != nil {
 					return err
 				}
@@ -1320,7 +1332,11 @@ func (s TxnVotePromise) WriteCapLit(w io.Writer) error {
 			}
 			{
 				s := s.Ballot()
-				err = s.WriteCapLit(b)
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
 				if err != nil {
 					return err
 				}
@@ -1394,8 +1410,8 @@ func AutoNewTxnVoteAcceptRequest(s *C.Segment) TxnVoteAcceptRequest {
 func ReadRootTxnVoteAcceptRequest(s *C.Segment) TxnVoteAcceptRequest {
 	return TxnVoteAcceptRequest(s.Root(0).ToStruct())
 }
-func (s TxnVoteAcceptRequest) Ballot() Ballot          { return Ballot(C.Struct(s).GetObject(0).ToStruct()) }
-func (s TxnVoteAcceptRequest) SetBallot(v Ballot)      { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s TxnVoteAcceptRequest) Ballot() []byte          { return C.Struct(s).GetObject(0).ToData() }
+func (s TxnVoteAcceptRequest) SetBallot(v []byte)      { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s TxnVoteAcceptRequest) RoundNumber() uint64     { return C.Struct(s).Get64(0) }
 func (s TxnVoteAcceptRequest) SetRoundNumber(v uint64) { C.Struct(s).Set64(0, v) }
 func (s TxnVoteAcceptRequest) WriteJSON(w io.Writer) error {
@@ -1413,7 +1429,11 @@ func (s TxnVoteAcceptRequest) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Ballot()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -1464,7 +1484,11 @@ func (s TxnVoteAcceptRequest) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Ballot()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
