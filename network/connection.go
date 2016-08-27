@@ -583,14 +583,14 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 		}
 	}
 
-	helloFromServer := cash.makeHelloServerFromServer(cash.topology)
+	helloFromServer := cash.makeHelloServerFromServer()
 	if err := cash.send(server.SegToBytes(helloFromServer)); err != nil {
 		return cash.connectionAwaitHandshake.maybeRestartConnection(err)
 	}
 
 	if seg, err := cash.readOne(); err == nil {
 		hello := msgs.ReadRootHelloServerFromServer(seg)
-		if cash.verifyTopology(cash.topology, &hello) {
+		if cash.verifyTopology(&hello) {
 			cash.remoteHost = hello.LocalHost()
 			cash.remoteRMId = common.RMId(hello.RmId())
 
@@ -612,10 +612,10 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	}
 }
 
-func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configuration.Topology, remote *msgs.HelloServerFromServer) bool {
-	if topology.ClusterId == remote.ClusterId() {
+func (cash *connectionAwaitServerHandshake) verifyTopology(remote *msgs.HelloServerFromServer) bool {
+	if cash.topology.ClusterId == remote.ClusterId() {
 		remoteUUId := remote.ClusterUUId()
-		localUUId := topology.ClusterUUId()
+		localUUId := cash.topology.ClusterUUId()
 		if remoteUUId == 0 || localUUId == 0 {
 			return true
 		} else {
@@ -625,7 +625,7 @@ func (cash *connectionAwaitServerHandshake) verifyTopology(topology *configurati
 	return false
 }
 
-func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *configuration.Topology) *capn.Segment {
+func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer() *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := msgs.NewRootHelloServerFromServer(seg)
 	localHost := cash.connectionManager.LocalHost()
@@ -635,8 +635,8 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer(topology *
 	tieBreak := cash.rng.Uint32()
 	cash.combinedTieBreak = tieBreak
 	hello.SetTieBreak(tieBreak)
-	hello.SetClusterId(topology.ClusterId)
-	hello.SetClusterUUId(topology.ClusterUUId())
+	hello.SetClusterId(cash.topology.ClusterId)
+	hello.SetClusterUUId(cash.topology.ClusterUUId())
 	return seg
 }
 
@@ -672,11 +672,11 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	}
 
 	peerCerts := socket.ConnectionState().PeerCertificates
-	if authenticated, hashsum, roots := cach.verifyPeerCerts(cach.topology, peerCerts); authenticated {
+	if authenticated, hashsum, roots := cach.verifyPeerCerts(peerCerts); authenticated {
 		cach.peerCerts = peerCerts
 		cach.roots = roots
 		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
-		helloFromServer := cach.makeHelloClientFromServer(cach.topology)
+		helloFromServer := cach.makeHelloClientFromServer()
 		if err := cach.send(server.SegToBytes(helloFromServer)); err != nil {
 			return false, err
 		}
@@ -688,8 +688,8 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	}
 }
 
-func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configuration.Topology, peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*cmsgs.Capabilities) {
-	fingerprints := topology.Fingerprints()
+func (cach *connectionAwaitClientHandshake) verifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*cmsgs.Capabilities) {
+	fingerprints := cach.topology.Fingerprints()
 	for _, cert := range peerCerts {
 		hashsum = sha256.Sum256(cert.Raw)
 		if roots, found := fingerprints[hashsum]; found {
@@ -699,7 +699,7 @@ func (cach *connectionAwaitClientHandshake) verifyPeerCerts(topology *configurat
 	return false, hashsum, nil
 }
 
-func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *configuration.Topology) *capn.Segment {
+func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer() *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
@@ -710,11 +710,11 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer(topology *
 	rootsCap := cmsgs.NewRootList(seg, len(cach.roots))
 	idy := 0
 	rootsVar := make(map[common.VarUUId]*cmsgs.Capabilities, len(cach.roots))
-	for idx, name := range topology.RootNames() {
+	for idx, name := range cach.topology.RootNames() {
 		if capabilities, found := cach.roots[name]; found {
 			rootCap := rootsCap.At(idy)
 			idy++
-			vUUId := topology.Roots[idx].VarUUId
+			vUUId := cach.topology.Roots[idx].VarUUId
 			rootCap.SetName(name)
 			rootCap.SetVarId(vUUId[:])
 			rootCap.SetCapabilities(*capabilities)
@@ -815,7 +815,7 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	}
 	if cr.isClient {
 		if topology != nil {
-			if authenticated, _, roots := cr.verifyPeerCerts(topology, cr.peerCerts); !authenticated {
+			if authenticated, _, roots := cr.verifyPeerCerts(cr.peerCerts); !authenticated {
 				server.Log("Connection", cr.Connection, "topologyChanged", tc, "(client unauthed)")
 				tc.maybeClose()
 				return errors.New("Client connection closed: No client certificate known")

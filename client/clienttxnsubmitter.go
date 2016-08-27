@@ -157,8 +157,6 @@ func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[c
 						referencesMask = referencesMask[1:]
 						varIdPos.SetVarId(ref.Id())
 						varIdPos.SetCapabilities(ref.Capabilities())
-					} else {
-						varIdPos.SetVarId([]byte{})
 					}
 					positions := common.Positions(ref.Positions())
 					cts.hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
