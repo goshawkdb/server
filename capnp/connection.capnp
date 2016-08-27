@@ -7,7 +7,6 @@ $Go.import("goshawkdb.io/server/capnp");
 
 using PTV = import "paxostxnvote.capnp";
 using Outcome = import "outcome.capnp";
-using Txn = import "transaction.capnp";
 using TxnCompletion = import "txncompletion.capnp";
 using Config = import "configuration.capnp";
 using Migration = import "migration.capnp";
@@ -25,7 +24,7 @@ struct Message {
   union {
     heartbeat             @0:  Void;
     connectionError       @1:  Text;
-    txnSubmission         @2:  Txn.Txn;
+    txnSubmission         @2:  Data;
     submissionOutcome     @3:  Outcome.Outcome;
     submissionComplete    @4:  TxnCompletion.TxnSubmissionComplete;
     submissionAbort       @5:  TxnCompletion.TxnSubmissionAbort;

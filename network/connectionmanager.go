@@ -56,18 +56,19 @@ func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Me
 	d := cm.Dispatchers
 	switch msgType {
 	case msgs.MESSAGE_TXNSUBMISSION:
-		txn := msg.TxnSubmission()
-		d.ProposerDispatcher.TxnReceived(sender, &txn)
+		txn := eng.TxnReaderFromData(msg.TxnSubmission())
+		d.ProposerDispatcher.TxnReceived(sender, txn)
 	case msgs.MESSAGE_SUBMISSIONOUTCOME:
 		outcome := msg.SubmissionOutcome()
-		txnId := common.MakeTxnId(outcome.Txn().Id())
+		txn := eng.TxnReaderFromData(outcome.Txn())
+		txnId := txn.Id
 		connNumber := binary.BigEndian.Uint32(txnId[8:12])
 		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
 		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
 			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
 		} else {
-			conn.SubmissionOutcomeReceived(sender, txnId, &outcome)
+			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
 			return
 		}
 	case msgs.MESSAGE_SUBMISSIONCOMPLETE:

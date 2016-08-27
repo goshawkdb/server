@@ -65,7 +65,7 @@ func (cms connectionMsgSend) witness() connectionMsg { return cms }
 type connectionMsgOutcomeReceived struct {
 	connectionMsgBasic
 	sender  common.RMId
-	txnId   *common.TxnId
+	txn     *eng.TxnReader
 	outcome *msgs.Outcome
 }
 
@@ -98,10 +98,10 @@ func (conn *Connection) Send(msg []byte) {
 	conn.enqueueQuery(connectionMsgSend(msg))
 }
 
-func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
+func (conn *Connection) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
 	conn.enqueueQuery(connectionMsgOutcomeReceived{
 		sender:  sender,
-		txnId:   txnId,
+		txn:     txn,
 		outcome: outcome,
 	})
 }
@@ -750,7 +750,7 @@ func (cr *connectionRun) outcomeReceived(out connectionMsgOutcomeReceived) error
 	if cr.currentState != cr {
 		return nil
 	}
-	err := cr.submitter.SubmissionOutcomeReceived(out.sender, out.txnId, out.outcome)
+	err := cr.submitter.SubmissionOutcomeReceived(out.sender, out.txn, out.outcome)
 	if cr.submitterIdle != nil && cr.submitter.IsIdle() {
 		si := cr.submitterIdle
 		cr.submitterIdle = nil

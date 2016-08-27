@@ -71,6 +71,6 @@ func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarMana
 }
 
 type LocalConnection interface {
-	RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error)
+	RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions) (*TxnReader, *msgs.Outcome, error)
 	Status(*server.StatusConsumer)
 }

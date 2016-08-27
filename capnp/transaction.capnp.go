@@ -24,8 +24,8 @@ func (s Txn) SubmitterBootCount() uint32       { return C.Struct(s).Get32(4) }
 func (s Txn) SetSubmitterBootCount(v uint32)   { C.Struct(s).Set32(4, v) }
 func (s Txn) Retry() bool                      { return C.Struct(s).Get1(64) }
 func (s Txn) SetRetry(v bool)                  { C.Struct(s).Set1(64, v) }
-func (s Txn) Actions() Action_List             { return Action_List(C.Struct(s).GetObject(1)) }
-func (s Txn) SetActions(v Action_List)         { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Txn) Actions() []byte                  { return C.Struct(s).GetObject(1).ToData() }
+func (s Txn) SetActions(v []byte)              { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s Txn) Allocations() Allocation_List     { return Allocation_List(C.Struct(s).GetObject(2)) }
 func (s Txn) SetAllocations(v Allocation_List) { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s Txn) FInc() uint8                      { return C.Struct(s).Get8(9) }
@@ -123,25 +123,11 @@ func (s Txn) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Actions()
-		{
-			err = b.WriteByte('[')
-			if err != nil {
-				return err
-			}
-			for i, s := range s.ToArray() {
-				if i != 0 {
-					_, err = b.WriteString(", ")
-				}
-				if err != nil {
-					return err
-				}
-				err = s.WriteJSON(b)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(']')
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
 		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -320,25 +306,11 @@ func (s Txn) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Actions()
-		{
-			err = b.WriteByte('[')
-			if err != nil {
-				return err
-			}
-			for i, s := range s.ToArray() {
-				if i != 0 {
-					_, err = b.WriteString(", ")
-				}
-				if err != nil {
-					return err
-				}
-				err = s.WriteCapLit(b)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(']')
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
 		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -441,6 +413,142 @@ func (s Txn_List) ToArray() []Txn {
 	return a
 }
 func (s Txn_List) Set(i int, item Txn) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type ActionListWrapper C.Struct
+
+func NewActionListWrapper(s *C.Segment) ActionListWrapper { return ActionListWrapper(s.NewStruct(0, 1)) }
+func NewRootActionListWrapper(s *C.Segment) ActionListWrapper {
+	return ActionListWrapper(s.NewRootStruct(0, 1))
+}
+func AutoNewActionListWrapper(s *C.Segment) ActionListWrapper {
+	return ActionListWrapper(s.NewStructAR(0, 1))
+}
+func ReadRootActionListWrapper(s *C.Segment) ActionListWrapper {
+	return ActionListWrapper(s.Root(0).ToStruct())
+}
+func (s ActionListWrapper) Actions() Action_List     { return Action_List(C.Struct(s).GetObject(0)) }
+func (s ActionListWrapper) SetActions(v Action_List) { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s ActionListWrapper) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"actions\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Actions()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteJSON(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s ActionListWrapper) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s ActionListWrapper) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("actions = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Actions()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteCapLit(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s ActionListWrapper) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type ActionListWrapper_List C.PointerList
+
+func NewActionListWrapperList(s *C.Segment, sz int) ActionListWrapper_List {
+	return ActionListWrapper_List(s.NewCompositeList(0, 1, sz))
+}
+func (s ActionListWrapper_List) Len() int { return C.PointerList(s).Len() }
+func (s ActionListWrapper_List) At(i int) ActionListWrapper {
+	return ActionListWrapper(C.PointerList(s).At(i).ToStruct())
+}
+func (s ActionListWrapper_List) ToArray() []ActionListWrapper {
+	n := s.Len()
+	a := make([]ActionListWrapper, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s ActionListWrapper_List) Set(i int, item ActionListWrapper) {
+	C.PointerList(s).Set(i, C.Object(item))
+}
 
 type Action C.Struct
 type ActionRead Action

@@ -13,20 +13,20 @@ import (
 
 type Var C.Struct
 
-func NewVar(s *C.Segment) Var                { return Var(s.NewStruct(0, 5)) }
-func NewRootVar(s *C.Segment) Var            { return Var(s.NewRootStruct(0, 5)) }
-func AutoNewVar(s *C.Segment) Var            { return Var(s.NewStructAR(0, 5)) }
-func ReadRootVar(s *C.Segment) Var           { return Var(s.Root(0).ToStruct()) }
-func (s Var) Id() []byte                     { return C.Struct(s).GetObject(0).ToData() }
-func (s Var) SetId(v []byte)                 { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Var) Positions() C.UInt8List         { return C.UInt8List(C.Struct(s).GetObject(1)) }
-func (s Var) SetPositions(v C.UInt8List)     { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Var) WriteTxnId() []byte             { return C.Struct(s).GetObject(2).ToData() }
-func (s Var) SetWriteTxnId(v []byte)         { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s Var) WriteTxnClock() VectorClock     { return VectorClock(C.Struct(s).GetObject(3).ToStruct()) }
-func (s Var) SetWriteTxnClock(v VectorClock) { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Var) WritesClock() VectorClock       { return VectorClock(C.Struct(s).GetObject(4).ToStruct()) }
-func (s Var) SetWritesClock(v VectorClock)   { C.Struct(s).SetObject(4, C.Object(v)) }
+func NewVar(s *C.Segment) Var            { return Var(s.NewStruct(0, 5)) }
+func NewRootVar(s *C.Segment) Var        { return Var(s.NewRootStruct(0, 5)) }
+func AutoNewVar(s *C.Segment) Var        { return Var(s.NewStructAR(0, 5)) }
+func ReadRootVar(s *C.Segment) Var       { return Var(s.Root(0).ToStruct()) }
+func (s Var) Id() []byte                 { return C.Struct(s).GetObject(0).ToData() }
+func (s Var) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Var) Positions() C.UInt8List     { return C.UInt8List(C.Struct(s).GetObject(1)) }
+func (s Var) SetPositions(v C.UInt8List) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Var) WriteTxnId() []byte         { return C.Struct(s).GetObject(2).ToData() }
+func (s Var) SetWriteTxnId(v []byte)     { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
+func (s Var) WriteTxnClock() []byte      { return C.Struct(s).GetObject(3).ToData() }
+func (s Var) SetWriteTxnClock(v []byte)  { C.Struct(s).SetObject(3, s.Segment.NewData(v)) }
+func (s Var) WritesClock() []byte        { return C.Struct(s).GetObject(4).ToData() }
+func (s Var) SetWritesClock(v []byte)    { C.Struct(s).SetObject(4, s.Segment.NewData(v)) }
 func (s Var) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -117,7 +117,11 @@ func (s Var) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.WriteTxnClock()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -132,7 +136,11 @@ func (s Var) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.WritesClock()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -239,7 +247,11 @@ func (s Var) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.WriteTxnClock()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -254,7 +266,11 @@ func (s Var) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.WritesClock()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}

@@ -46,7 +46,7 @@ type Connection interface {
 type ClientConnection interface {
 	Shutdownable
 	ServerConnectionSubscriber
-	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *msgs.Outcome)
+	SubmissionOutcomeReceived(common.RMId, *eng.TxnReader, *msgs.Outcome)
 }
 
 type Shutdownable interface {

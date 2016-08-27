@@ -191,9 +191,10 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capabilitie
 	}
 }
 
-func (vc versionCache) UpdateFromCommit(txnId *common.TxnId, outcome *msgs.Outcome) {
-	clock := eng.VectorClockFromCap(outcome.Commit())
-	actions := outcome.Txn().Actions()
+func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcome) {
+	txnId := txn.Id
+	clock := eng.VectorClockFromData(outcome.Commit(), false)
+	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		if act := action.Which(); act != msgs.ACTION_READ {
@@ -216,14 +217,14 @@ func (vc versionCache) UpdateFromCommit(txnId *common.TxnId, outcome *msgs.Outco
 
 func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.TxnId]*[]*update {
 	l := updatesCap.Len()
-	validUpdates := make(map[common.TxnId]*[]*update, l)
+	validUpdates := make(map[common.TxnId]*[]*update)
 	unreachedMap := make(map[common.VarUUId]unreached, l)
 
 	for idx := 0; idx < l; idx++ {
 		updateCap := updatesCap.At(idx)
 		txnId := common.MakeTxnId(updateCap.TxnId())
-		clock := eng.VectorClockFromCap(updateCap.Clock())
-		actionsCap := updateCap.Actions()
+		clock := eng.VectorClockFromData(updateCap.Clock(), true)
+		actionsCap := eng.TxnActionsFromData(updateCap.Actions(), true).Actions()
 		updatesList := make([]*update, 0, actionsCap.Len())
 		updatesListPtr := &updatesList
 		validUpdates[*txnId] = updatesListPtr
