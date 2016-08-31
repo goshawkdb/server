@@ -54,27 +54,28 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 	if cTxn.Retry() {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
+			vUUId := common.MakeVarUUId(action.VarId())
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
+			} else if _, found := vc[*vUUId]; !found {
+				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
 			}
 		}
 
 	} else {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
+			vUUId := common.MakeVarUUId(action.VarId())
+			_, found := vc[*vUUId]
 			switch action.Which() {
-			case cmsgs.CLIENTACTION_READ:
-				// do nothing
-			case cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
-				vUUId := common.MakeVarUUId(action.VarId())
-				if _, found := vc[*vUUId]; !found {
-					return fmt.Errorf("Transaction manipulates unknown object %v", vUUId)
+			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
+				if !found {
+					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
 				}
 
 			case cmsgs.CLIENTACTION_CREATE:
-				vUUId := common.MakeVarUUId(action.VarId())
-				if _, found := vc[*vUUId]; found {
-					return fmt.Errorf("Transaction tries to create known object %v", vUUId)
+				if found {
+					return fmt.Errorf("Transaction tries to create existing object %v", vUUId)
 				}
 
 			default:
@@ -333,20 +334,24 @@ func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
 	aValue := a.Value()
 	aRefsRead := a.References().Read()
 	aRefsWrite := a.References().Write()
-	if aValue == cmsgs.VALUECAPABILITY_READWRITE &&
-		aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL &&
-		aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL {
-		return a
-	}
-
-	seg := capn.NewBuffer(nil)
-	cap := cmsgs.NewCapabilities(seg)
 
 	bValue := b.Value()
+	bRefsRead := b.References().Read()
+	bRefsWrite := b.References().Write()
+
 	valueRead := aValue == cmsgs.VALUECAPABILITY_READWRITE || aValue == cmsgs.VALUECAPABILITY_READ ||
 		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_READ
 	valueWrite := aValue == cmsgs.VALUECAPABILITY_READWRITE || aValue == cmsgs.VALUECAPABILITY_WRITE ||
 		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_WRITE
+	refsReadAll := aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL || bRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ONLY
+	refsWriteAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL || bRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
+
+	if valueRead && valueWrite && refsReadAll && refsWriteAll {
+		return maxCapsCap
+	}
+
+	seg := capn.NewBuffer(nil)
+	cap := cmsgs.NewCapabilities(seg)
 	switch {
 	case valueRead && valueWrite:
 		cap.SetValue(cmsgs.VALUECAPABILITY_READWRITE)
@@ -358,35 +363,21 @@ func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
 		cap.SetValue(cmsgs.VALUECAPABILITY_NONE)
 	}
 
-	isMax := valueRead && valueWrite
-
-	bRefsRead := b.References().Read()
-	readAll := aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL ||
-		aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
-	if readAll {
+	if refsReadAll {
 		cap.References().Read().SetAll()
 	} else {
-		isMax = false
 		aOnly, bOnly := aRefsRead.Only().ToArray(), bRefsRead.Only().ToArray()
 		cap.References().Read().SetOnly(mergeOnlies(seg, aOnly, bOnly))
 	}
 
-	bRefsWrite := b.References().Write()
-	writeAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL ||
-		aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
-	if writeAll {
+	if refsWriteAll {
 		cap.References().Write().SetAll()
 	} else {
-		isMax = false
 		aOnly, bOnly := aRefsWrite.Only().ToArray(), bRefsWrite.Only().ToArray()
 		cap.References().Write().SetOnly(mergeOnlies(seg, aOnly, bOnly))
 	}
 
-	if isMax {
-		return maxCapsCap
-	} else {
-		return &cap
-	}
+	return &cap
 }
 
 func mergeOnlies(seg *capn.Segment, a, b []uint32) capn.UInt32List {
