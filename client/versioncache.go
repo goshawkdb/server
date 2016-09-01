@@ -54,27 +54,28 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 	if cTxn.Retry() {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
+			vUUId := common.MakeVarUUId(action.VarId())
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
+			} else if _, found := vc[*vUUId]; !found {
+				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
 			}
 		}
 
 	} else {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
+			vUUId := common.MakeVarUUId(action.VarId())
+			_, found := vc[*vUUId]
 			switch action.Which() {
-			case cmsgs.CLIENTACTION_READ:
-				// do nothing
-			case cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
-				vUUId := common.MakeVarUUId(action.VarId())
-				if _, found := vc[*vUUId]; !found {
-					return fmt.Errorf("Transaction manipulates unknown object %v", vUUId)
+			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
+				if !found {
+					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
 				}
 
 			case cmsgs.CLIENTACTION_CREATE:
-				vUUId := common.MakeVarUUId(action.VarId())
-				if _, found := vc[*vUUId]; found {
-					return fmt.Errorf("Transaction tries to create known object %v", vUUId)
+				if found {
+					return fmt.Errorf("Transaction tries to create existing object %v", vUUId)
 				}
 
 			default:
@@ -199,17 +200,35 @@ func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcom
 		action := actions.At(idx)
 		if act := action.Which(); act != msgs.ACTION_READ {
 			vUUId := common.MakeVarUUId(action.VarId())
-			if c, found := vc[*vUUId]; found {
-				c.txnId = txnId
-				c.clockElem = clock.At(vUUId)
-			} else if act == msgs.ACTION_CREATE {
-				vc[*vUUId] = &cached{
-					txnId:     txnId,
-					clockElem: clock.At(vUUId),
-					caps:      maxCapsCap,
+			c, found := vc[*vUUId]
+			if act == msgs.ACTION_CREATE && !found {
+				create := action.Create()
+				c = &cached{
+					txnId:      txnId,
+					clockElem:  clock.At(vUUId),
+					caps:       maxCapsCap,
+					value:      create.Value(),
+					references: create.References().ToArray(),
 				}
+				vc[*vUUId] = c
 			} else {
-				panic(fmt.Sprintf("%v contained action (%v) for unknown %v", txnId, act, vUUId))
+				panic(fmt.Sprintf("%v contained illegal action (%v) for %v", txnId, act, vUUId))
+			}
+
+			c.txnId = txnId
+			c.clockElem = clock.At(vUUId)
+
+			switch act {
+			case msgs.ACTION_WRITE:
+				write := action.Write()
+				c.value = write.Value()
+				c.references = write.References().ToArray()
+			case msgs.ACTION_READWRITE:
+				rw := action.Readwrite()
+				c.value = rw.Value()
+				c.references = rw.References().ToArray()
+			default:
+				panic(fmt.Sprintf("Unexpected action type on txn commit! %v %v", txnId, act))
 			}
 		}
 	}
@@ -261,35 +280,78 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 			case msgs.ACTION_WRITE:
 				write := actionCap.Write()
 				if c, found := vc[*vUUId]; found {
-					cmp := c.txnId.Compare(txnId)
-					if cmp == common.EQ && clockElem != c.clockElem {
-						panic(fmt.Sprintf("Clock version changed on write for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
+					// If it's in vc then we can either reach it currently
+					// or we have been able to in the past.
+					valid := c.txnId == nil
+					if !valid {
+						cmp := c.txnId.Compare(txnId)
+						if cmp == common.EQ && clockElem != c.clockElem {
+							panic(fmt.Sprintf("Clock version changed on write for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
+						}
+						valid = clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT)
 					}
-					if c.txnId == nil || clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
+					// If it's not valid then we're not going to send it to
+					// the client in which case the capabilities can't
+					// widen: we already know everything the client knows
+					// and we're not extending that.
+					if valid {
 						c.txnId = txnId
 						c.clockElem = clockElem
 						c.value = write.Value()
 						refs := write.References().ToArray()
 						c.references = refs
-						*updatesListPtr = append(*updatesListPtr, &update{
-							cached:  c,
-							varUUId: vUUId,
-						})
-						for ; len(refs) > 0; refs = refs[1:] {
-							ref := refs[0]
-							caps := ref.Capabilities()
-							vUUId := common.MakeVarUUId(ref.Id())
-							if c, found := vc[*vUUId]; found {
-								c.caps = mergeCaps(c.caps, &caps)
-							} else if ur, found := unreachedMap[*vUUId]; found {
-								delete(unreachedMap, *vUUId)
-								c := ur.update.cached
-								c.caps = &caps
-								vc[*vUUId] = c
-								*ur.updates = append(*ur.updates, ur.update)
-								refs = append(refs, ur.update.references...)
-							} else {
-								vc[*vUUId] = &cached{caps: &caps}
+						// This update could be here because the client txn
+						// had the capability to read this var and did so,
+						// but got the wrong version. In which case just
+						// updating this c is fine. But, this update could
+						// equally be here as a side effect of some other
+						// failed read. Just because c exists doesn't mean
+						// the client actually has the capability to read
+						// this var, so we need to be careful here.
+						valueCap := c.caps.Value()
+						refsReadCap := c.caps.References().Read()
+						refsReadCapAll := refsReadCap.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
+						var refsReadCapOnly []uint32
+						if !refsReadCapAll {
+							refsReadCapOnly = refsReadCap.Only().ToArray()
+						}
+						needsUpdate := valueCap == cmsgs.VALUECAPABILITY_READ ||
+							valueCap == cmsgs.VALUECAPABILITY_READWRITE ||
+							refsReadCapAll || len(refsReadCapOnly) > 0
+						if needsUpdate {
+							*updatesListPtr = append(*updatesListPtr, &update{
+								cached:  c,
+								varUUId: vUUId,
+							})
+						}
+						if refsReadCapAll || len(refsReadCapOnly) > 0 {
+							for idy, ref := range refs {
+								switch {
+								case refsReadCapAll:
+								case len(refsReadCapOnly) > 0 && refsReadCapOnly[0] == uint32(idy):
+									refsReadCapOnly = refsReadCapOnly[1:]
+								default:
+									continue
+								}
+								caps := ref.Capabilities()
+								vUUId := common.MakeVarUUId(ref.Id())
+								if c, found := vc[*vUUId]; found {
+									// Even if c.txnId == nil, the fact is the
+									// client is going to have some capability
+									// to interact with this var, so we need to
+									// keep track of that.
+									c.caps = mergeCaps(c.caps, &caps)
+								} else if ur, found := unreachedMap[*vUUId]; found {
+									delete(unreachedMap, *vUUId)
+									c := ur.update.cached
+									c.caps = &caps
+									vc[*vUUId] = c
+									*ur.updates = append(*ur.updates, ur.update)
+									// FIXME err, this is a big problem now
+									refs = append(refs, ur.update.references...)
+								} else {
+									vc[*vUUId] = &cached{caps: &caps}
+								}
 							}
 						}
 					}
@@ -333,20 +395,24 @@ func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
 	aValue := a.Value()
 	aRefsRead := a.References().Read()
 	aRefsWrite := a.References().Write()
-	if aValue == cmsgs.VALUECAPABILITY_READWRITE &&
-		aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL &&
-		aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL {
-		return a
-	}
-
-	seg := capn.NewBuffer(nil)
-	cap := cmsgs.NewCapabilities(seg)
 
 	bValue := b.Value()
+	bRefsRead := b.References().Read()
+	bRefsWrite := b.References().Write()
+
 	valueRead := aValue == cmsgs.VALUECAPABILITY_READWRITE || aValue == cmsgs.VALUECAPABILITY_READ ||
 		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_READ
 	valueWrite := aValue == cmsgs.VALUECAPABILITY_READWRITE || aValue == cmsgs.VALUECAPABILITY_WRITE ||
 		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_WRITE
+	refsReadAll := aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL || bRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ONLY
+	refsWriteAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL || bRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
+
+	if valueRead && valueWrite && refsReadAll && refsWriteAll {
+		return maxCapsCap
+	}
+
+	seg := capn.NewBuffer(nil)
+	cap := cmsgs.NewCapabilities(seg)
 	switch {
 	case valueRead && valueWrite:
 		cap.SetValue(cmsgs.VALUECAPABILITY_READWRITE)
@@ -358,35 +424,21 @@ func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
 		cap.SetValue(cmsgs.VALUECAPABILITY_NONE)
 	}
 
-	isMax := valueRead && valueWrite
-
-	bRefsRead := b.References().Read()
-	readAll := aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL ||
-		aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
-	if readAll {
+	if refsReadAll {
 		cap.References().Read().SetAll()
 	} else {
-		isMax = false
 		aOnly, bOnly := aRefsRead.Only().ToArray(), bRefsRead.Only().ToArray()
 		cap.References().Read().SetOnly(mergeOnlies(seg, aOnly, bOnly))
 	}
 
-	bRefsWrite := b.References().Write()
-	writeAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL ||
-		aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
-	if writeAll {
+	if refsWriteAll {
 		cap.References().Write().SetAll()
 	} else {
-		isMax = false
 		aOnly, bOnly := aRefsWrite.Only().ToArray(), bRefsWrite.Only().ToArray()
 		cap.References().Write().SetOnly(mergeOnlies(seg, aOnly, bOnly))
 	}
 
-	if isMax {
-		return maxCapsCap
-	} else {
-		return &cap
-	}
+	return &cap
 }
 
 func mergeOnlies(seg *capn.Segment, a, b []uint32) capn.UInt32List {
