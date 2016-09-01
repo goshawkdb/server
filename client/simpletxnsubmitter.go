@@ -290,6 +290,7 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 	}
 }
 
+// translate from client representation to server representation
 func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc versionCache) (map[common.RMId]*[]int, error) {
 
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
@@ -445,6 +446,9 @@ func (sts *SimpleTxnSubmitter) translateRoll(outgoingSeg *capn.Segment, referenc
 	roll.SetReferences(copyReferences(&clientReferences, outgoingSeg, referencesInNeedOfPositions, nil, nil))
 }
 
+// so the challenge here is that we need to merge the references which
+// the client may have rewritten with the 'actual' references taking
+// into account masks and such from capabilities
 func copyReferences(clientReferences *cmsgs.ClientVarIdPos_List, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, vc versionCache) msgs.VarIdPos_List {
 	all, mask, existingRefs := vc.ReferencesWriteMask(vUUId)
 	if all {
