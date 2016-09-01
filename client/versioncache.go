@@ -24,9 +24,11 @@ type update struct {
 	varUUId *common.VarUUId
 }
 
-type unreached struct {
-	update  *update
-	updates *[]*update
+type cacheOverlay struct {
+	*cached
+	// we only duplicate the txnId here for the MISSING case
+	txnId  *common.TxnId
+	stored bool
 }
 
 var maxCapsCap *cmsgs.Capabilities
@@ -235,18 +237,38 @@ func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcom
 }
 
 func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.TxnId]*[]*update {
-	l := updatesCap.Len()
-	validUpdates := make(map[common.TxnId]*[]*update)
-	unreachedMap := make(map[common.VarUUId]unreached, l)
+	updateGraph := make(map[common.VarUUId]*cacheOverlay)
 
-	for idx := 0; idx < l; idx++ {
+	// 1. update everything we know we can already reach, and filter out erroneous updates
+	vc.updateExisting(updatesCap, updateGraph)
+
+	// 2. figure out what we can now reach, and propagate through extended caps
+	vc.updateReachable(updateGraph)
+
+	// 3. populate results
+	validUpdates := make(map[common.TxnId]*[]*update, len(updateGraph))
+	for vUUId, overlay := range updateGraph {
+		if !overlay.stored {
+			continue
+		}
+		updateListPtr, found := validUpdates[*overlay.txnId]
+		if !found {
+			updateList := []*update{}
+			validUpdates[*overlay.txnId] = &updateList
+		}
+		vUUIdCopy := vUUId
+		*updateListPtr = append(*updateListPtr, &update{cached: overlay.cached, varUUId: &vUUIdCopy})
+	}
+
+	return validUpdates
+}
+
+func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph map[common.VarUUId]*cacheOverlay) {
+	for idx, l := 0, updatesCap.Len(); idx < l; idx++ {
 		updateCap := updatesCap.At(idx)
 		txnId := common.MakeTxnId(updateCap.TxnId())
 		clock := eng.VectorClockFromData(updateCap.Clock(), true)
 		actionsCap := eng.TxnActionsFromData(updateCap.Actions(), true).Actions()
-		updatesList := make([]*update, 0, actionsCap.Len())
-		updatesListPtr := &updatesList
-		validUpdates[*txnId] = updatesListPtr
 
 		for idy, m := 0, actionsCap.Len(); idy < m; idy++ {
 			actionCap := actionsCap.At(idy)
@@ -270,10 +292,11 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 						c.clockElem = 0
 						c.value = nil
 						c.references = nil
-						*updatesListPtr = append(*updatesListPtr, &update{
-							cached:  c,
-							varUUId: vUUId,
-						})
+						updateGraph[*vUUId] = &cacheOverlay{
+							cached: c,
+							txnId:  txnId,
+							stored: true,
+						}
 					}
 				}
 
@@ -282,94 +305,44 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 				if c, found := vc[*vUUId]; found {
 					// If it's in vc then we can either reach it currently
 					// or we have been able to in the past.
-					valid := c.txnId == nil
-					if !valid {
+					updating := c.txnId == nil
+					if !updating {
 						cmp := c.txnId.Compare(txnId)
 						if cmp == common.EQ && clockElem != c.clockElem {
 							panic(fmt.Sprintf("Clock version changed on write for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
 						}
-						valid = clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT)
+						updating = clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT)
 					}
-					// If it's not valid then we're not going to send it to
-					// the client in which case the capabilities can't
+					// If we're not updating then the update must predate
+					// our current knowledge of vUUId. So we're not going
+					// to send it to the client in which case the
+					// capabilities vUUId grants via its own refs can't
 					// widen: we already know everything the client knows
-					// and we're not extending that.
-					if valid {
+					// and we're not extending that. So it's safe to
+					// totally ignore it.
+					if updating {
 						c.txnId = txnId
 						c.clockElem = clockElem
 						c.value = write.Value()
-						refs := write.References().ToArray()
-						c.references = refs
-						// This update could be here because the client txn
-						// had the capability to read this var and did so,
-						// but got the wrong version. In which case just
-						// updating this c is fine. But, this update could
-						// equally be here as a side effect of some other
-						// failed read. Just because c exists doesn't mean
-						// the client actually has the capability to read
-						// this var, so we need to be careful here.
-						valueCap := c.caps.Value()
-						refsReadCap := c.caps.References().Read()
-						refsReadCapAll := refsReadCap.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
-						var refsReadCapOnly []uint32
-						if !refsReadCapAll {
-							refsReadCapOnly = refsReadCap.Only().ToArray()
-						}
-						needsUpdate := valueCap == cmsgs.VALUECAPABILITY_READ ||
-							valueCap == cmsgs.VALUECAPABILITY_READWRITE ||
-							refsReadCapAll || len(refsReadCapOnly) > 0
-						if needsUpdate {
-							*updatesListPtr = append(*updatesListPtr, &update{
-								cached:  c,
-								varUUId: vUUId,
-							})
-						}
-						if refsReadCapAll || len(refsReadCapOnly) > 0 {
-							for idy, ref := range refs {
-								switch {
-								case refsReadCapAll:
-								case len(refsReadCapOnly) > 0 && refsReadCapOnly[0] == uint32(idy):
-									refsReadCapOnly = refsReadCapOnly[1:]
-								default:
-									continue
-								}
-								caps := ref.Capabilities()
-								vUUId := common.MakeVarUUId(ref.Id())
-								if c, found := vc[*vUUId]; found {
-									// Even if c.txnId == nil, the fact is the
-									// client is going to have some capability
-									// to interact with this var, so we need to
-									// keep track of that.
-									c.caps = mergeCaps(c.caps, &caps)
-								} else if ur, found := unreachedMap[*vUUId]; found {
-									delete(unreachedMap, *vUUId)
-									c := ur.update.cached
-									c.caps = &caps
-									vc[*vUUId] = c
-									*ur.updates = append(*ur.updates, ur.update)
-									// FIXME err, this is a big problem now
-									refs = append(refs, ur.update.references...)
-								} else {
-									vc[*vUUId] = &cached{caps: &caps}
-								}
-							}
+						c.references = write.References().ToArray()
+						updateGraph[*vUUId] = &cacheOverlay{
+							cached: c,
+							txnId:  txnId,
+							stored: true,
 						}
 					}
-				} else if _, found := unreachedMap[*vUUId]; found {
-					panic(fmt.Sprintf("%v reported twice in same update (and appeared in unreachedMap twice!)", vUUId))
+
 				} else {
 					//log.Printf("%v contains write action of %v\n", txnId, vUUId)
-					unreachedMap[*vUUId] = unreached{
-						update: &update{
-							cached: &cached{
-								txnId:      txnId,
-								clockElem:  clockElem,
-								value:      write.Value(),
-								references: write.References().ToArray(),
-							},
-							varUUId: vUUId,
+					updateGraph[*vUUId] = &cacheOverlay{
+						cached: &cached{
+							txnId:      txnId,
+							clockElem:  clockElem,
+							value:      write.Value(),
+							references: write.References().ToArray(),
 						},
-						updates: updatesListPtr,
+						txnId:  txnId,
+						stored: false,
 					}
 				}
 
@@ -378,18 +351,77 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 			}
 		}
 	}
-
-	for txnId, updates := range validUpdates {
-		if len(*updates) == 0 {
-			delete(validUpdates, txnId)
-		}
-	}
-	return validUpdates
 }
 
-func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
-	if a == maxCapsCap || b == maxCapsCap {
-		return maxCapsCap
+func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOverlay) {
+	reaches := make(map[common.VarUUId][]*msgs.VarIdPos)
+	worklist := make([]common.VarUUId, 0, len(updateGraph))
+
+	for vUUId, overlay := range updateGraph {
+		if overlay.stored {
+			reaches[vUUId] = overlay.reachableReferences()
+			worklist = append(worklist, vUUId)
+		}
+	}
+
+	for len(worklist) > 0 {
+		vUUId := worklist[0]
+		worklist = worklist[1:]
+		for _, ref := range reaches[vUUId] {
+			// Given the current vUUId.caps, we're looking at what we
+			// can reach from there.
+			vUUIdRef := common.MakeVarUUId(ref.Id())
+			caps := ref.Capabilities()
+			var c *cached
+			if overlay, found := updateGraph[*vUUIdRef]; found {
+				if !overlay.stored {
+					overlay.stored = true
+					vc[*vUUIdRef] = overlay.cached
+				}
+				c = overlay.cached
+			} else {
+				// There's no update for vUUIdRef, but it's possible we're
+				// adding to the capabilities the client now has on
+				// vUUIdRef so we need to record that. That in turn can
+				// mean we now have access to extra vars.
+				var found bool
+				c, found = vc[*vUUIdRef]
+				if !found {
+					// We have no idea though what this var actually points
+					// to. caps is just our capabilities to act on this
+					// var, so there's no extra work to do
+					// (c.reachableReferences will return []).
+					c = &cached{caps: &caps}
+					vc[*vUUIdRef] = c
+				}
+			}
+			// We have two questions to answer: 1. Have we already
+			// processed vUUIdRef?  2. If we have, do we have wider caps
+			// now than before?
+			before := reaches[*vUUIdRef]
+			c.mergeCaps(&caps)
+			after := c.reachableReferences()
+			if len(after) > len(before) {
+				reaches[*vUUIdRef] = after
+				worklist = append(worklist, *vUUIdRef)
+			}
+		}
+	}
+}
+
+func (c *cached) mergeCaps(b *cmsgs.Capabilities) {
+	a := c.caps
+	switch {
+	case a == b:
+		return
+	case a == maxCapsCap || b == maxCapsCap:
+		c.caps = maxCapsCap
+		return
+	case a == nil:
+		c.caps = b
+		return
+	case b == nil:
+		return
 	}
 
 	aValue := a.Value()
@@ -408,7 +440,8 @@ func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
 	refsWriteAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL || bRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
 
 	if valueRead && valueWrite && refsReadAll && refsWriteAll {
-		return maxCapsCap
+		c.caps = maxCapsCap
+		return
 	}
 
 	seg := capn.NewBuffer(nil)
@@ -428,20 +461,30 @@ func mergeCaps(a, b *cmsgs.Capabilities) *cmsgs.Capabilities {
 		cap.References().Read().SetAll()
 	} else {
 		aOnly, bOnly := aRefsRead.Only().ToArray(), bRefsRead.Only().ToArray()
-		cap.References().Read().SetOnly(mergeOnlies(seg, aOnly, bOnly))
+		cap.References().Read().SetOnly(mergeOnliesSeg(seg, aOnly, bOnly))
 	}
 
 	if refsWriteAll {
 		cap.References().Write().SetAll()
 	} else {
 		aOnly, bOnly := aRefsWrite.Only().ToArray(), bRefsWrite.Only().ToArray()
-		cap.References().Write().SetOnly(mergeOnlies(seg, aOnly, bOnly))
+		cap.References().Write().SetOnly(mergeOnliesSeg(seg, aOnly, bOnly))
 	}
 
-	return &cap
+	c.caps = &cap
 }
 
-func mergeOnlies(seg *capn.Segment, a, b []uint32) capn.UInt32List {
+func mergeOnliesSeg(seg *capn.Segment, a, b []uint32) capn.UInt32List {
+	only := mergeOnlies(a, b)
+
+	cap := seg.NewUInt32List(len(only))
+	for idx, index := range only {
+		cap.Set(idx, index)
+	}
+	return cap
+}
+
+func mergeOnlies(a, b []uint32) []uint32 {
 	only := make([]uint32, 0, len(a)+len(b))
 	for len(a) > 0 && len(b) > 0 {
 		aIndex, bIndex := a[0], b[0]
@@ -453,7 +496,7 @@ func mergeOnlies(seg *capn.Segment, a, b []uint32) capn.UInt32List {
 			only = append(only, bIndex)
 			b = b[1:]
 		default:
-			only = append(only, bIndex)
+			only = append(only, aIndex)
 			a = a[1:]
 			b = b[1:]
 		}
@@ -464,11 +507,39 @@ func mergeOnlies(seg *capn.Segment, a, b []uint32) capn.UInt32List {
 		only = append(only, b...)
 	}
 
-	cap := seg.NewUInt32List(len(only))
-	for idx, index := range only {
-		cap.Set(idx, index)
+	return only
+}
+
+// does not leave holes in the result - compacted.
+func (c *cached) reachableReferences() []*msgs.VarIdPos {
+	if c.caps == nil || len(c.references) == 0 {
+		return nil
 	}
-	return cap
+
+	refsReadCap := c.caps.References().Read()
+	refsWriteCap := c.caps.References().Write()
+	all := refsReadCap.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL ||
+		refsWriteCap.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
+	var only []uint32
+	if !all {
+		refsReadOnly := c.caps.References().Read().Only().ToArray()
+		refsWriteOnly := c.caps.References().Write().Only().ToArray()
+		only = mergeOnlies(refsReadOnly, refsWriteOnly)
+	}
+
+	result := make([]*msgs.VarIdPos, 0, len(c.references))
+	for index, ref := range c.references {
+		if all {
+			result = append(result, &ref)
+		} else if len(only) > 0 && uint32(index) == only[0] {
+			result = append(result, &ref)
+			only = only[1:]
+			if len(only) == 0 {
+				break
+			}
+		}
+	}
+	return result
 }
 
 func (u *update) Value() []byte {
