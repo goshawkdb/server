@@ -373,7 +373,8 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 			vUUIdRef := common.MakeVarUUId(ref.Id())
 			caps := ref.Capabilities()
 			var c *cached
-			if overlay, found := updateGraph[*vUUIdRef]; found {
+			overlay, found := updateGraph[*vUUIdRef]
+			if found {
 				if !overlay.stored {
 					overlay.stored = true
 					vc[*vUUIdRef] = overlay.cached
@@ -384,12 +385,11 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 				// adding to the capabilities the client now has on
 				// vUUIdRef so we need to record that. That in turn can
 				// mean we now have access to extra vars.
-				var found bool
 				c, found = vc[*vUUIdRef]
 				if !found {
-					// We have no idea though what this var actually points
-					// to. caps is just our capabilities to act on this
-					// var, so there's no extra work to do
+					// We have no idea though what this var (vUUIdRef)
+					// actually points to. caps is just our capabilities to
+					// act on this var, so there's no extra work to do
 					// (c.reachableReferences will return []).
 					c = &cached{caps: &caps}
 					vc[*vUUIdRef] = c
@@ -399,29 +399,44 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 			// processed vUUIdRef?  2. If we have, do we have wider caps
 			// now than before?
 			before := reaches[*vUUIdRef]
-			c.mergeCaps(&caps)
+			ensureUpdate := c.mergeCaps(&caps)
 			after := c.reachableReferences()
 			if len(after) > len(before) {
 				reaches[*vUUIdRef] = after
 				worklist = append(worklist, *vUUIdRef)
+				ensureUpdate = true
+			}
+			if ensureUpdate && overlay == nil && c.txnId != nil {
+				// Our access to vUUIdRef has expanded to the extent that
+				// we can now see more of the refs from vUUIdRef, or we
+				// can now see the value of vUUIdRef. So even though there
+				// wasn't an actual update for vUUIdRef, we need to create
+				// one.
+				updateGraph[*vUUIdRef] = &cacheOverlay{
+					cached: c,
+					txnId:  c.txnId,
+					stored: true,
+				}
 			}
 		}
 	}
 }
 
-func (c *cached) mergeCaps(b *cmsgs.Capabilities) {
+// returns true iff we couldn't read the value before merge, but we
+// can after
+func (c *cached) mergeCaps(b *cmsgs.Capabilities) (gainedRead bool) {
 	a := c.caps
 	switch {
 	case a == b:
-		return
+		return false
 	case a == maxCapsCap || b == maxCapsCap:
 		c.caps = maxCapsCap
-		return
+		return a != maxCapsCap
 	case a == nil:
 		c.caps = b
-		return
+		return b.Value() == cmsgs.VALUECAPABILITY_READ || b.Value() == cmsgs.VALUECAPABILITY_READWRITE
 	case b == nil:
-		return
+		return false
 	}
 
 	aValue := a.Value()
@@ -438,6 +453,8 @@ func (c *cached) mergeCaps(b *cmsgs.Capabilities) {
 		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_WRITE
 	refsReadAll := aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL || bRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ONLY
 	refsWriteAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL || bRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
+
+	gainedRead = valueRead && aValue != cmsgs.VALUECAPABILITY_READ && aValue != cmsgs.VALUECAPABILITY_READWRITE
 
 	if valueRead && valueWrite && refsReadAll && refsWriteAll {
 		c.caps = maxCapsCap
@@ -472,6 +489,7 @@ func (c *cached) mergeCaps(b *cmsgs.Capabilities) {
 	}
 
 	c.caps = &cap
+	return
 }
 
 func mergeOnliesSeg(seg *capn.Segment, a, b []uint32) capn.UInt32List {
