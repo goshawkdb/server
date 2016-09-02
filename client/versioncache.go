@@ -60,7 +60,7 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 			vUUId := common.MakeVarUUId(action.VarId())
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
-			} else if _, found := vc[*vUUId]; !found {
+			} else if c, found := vc[*vUUId]; !found || c.txnId == nil {
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
 			}
 		}
@@ -69,10 +69,10 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
-			_, found := vc[*vUUId]
+			c, found := vc[*vUUId]
 			switch action.Which() {
 			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
-				if !found {
+				if !found || c.txnId == nil {
 					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
 				}
 
@@ -89,35 +89,58 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 	return nil
 }
 
-func (vc versionCache) ValueForWrite(vUUId *common.VarUUId, value []byte) []byte {
+func (vc versionCache) ValueForWrite(vUUId *common.VarUUId, value []byte) ([]byte, error) {
 	if vc == nil {
-		return value
+		return value, nil
 	}
-	if c, found := vc[*vUUId]; !found {
-		panic(fmt.Errorf("ValueForWrite called for unknown %v", vUUId))
+	if c, found := vc[*vUUId]; !found || c.txnId == nil {
+		return nil, fmt.Errorf("ValueForWrite called for unknown %v", vUUId)
 	} else {
 		switch c.caps.Value() {
 		case cmsgs.VALUECAPABILITY_WRITE, cmsgs.VALUECAPABILITY_READWRITE:
-			return value
+			return value, nil
 		default:
-			return c.value
+			return c.value, nil
 		}
 	}
 }
 
-func (vc versionCache) ReferencesWriteMask(vUUId *common.VarUUId) (bool, []uint32, []msgs.VarIdPos) {
-	if vc == nil || vUUId == nil {
-		return true, nil, nil
+// returns the 'extra' refs, with holes in the list for valid client refs
+func (vc versionCache) ReferencesForWrite(vUUId *common.VarUUId, clientRefs *cmsgs.ClientVarIdPos_List) ([]*msgs.VarIdPos, *cached, error) {
+	if vc == nil {
+		return nil, nil, nil
 	}
-	if c, found := vc[*vUUId]; !found {
-		panic(fmt.Errorf("ReferencesWriteMask called for unknown %v", vUUId))
+	if c, found := vc[*vUUId]; !found || c.txnId == nil {
+		return nil, nil, fmt.Errorf("ReferencesForWrite called for unknown %v", vUUId)
 	} else {
-		write := c.caps.References().Write()
-		switch write.Which() {
+		refsWriteCap := c.caps.References().Write()
+		switch refsWriteCap.Which() {
 		case cmsgs.CAPABILITIESREFERENCESWRITE_ALL:
-			return true, nil, c.references
+			return nil, c, nil
 		default:
-			return false, write.Only().ToArray(), c.references
+			clientRefsLen := clientRefs.Len()
+			// If the client _can_ write it then it _must_ write it.
+			if clientRefsLen != len(c.references) {
+				return nil, nil, fmt.Errorf("Wrong number of references provided for write of %v", vUUId)
+			}
+			only := refsWriteCap.Only().ToArray()
+			results := make([]*msgs.VarIdPos, 0, len(c.references))
+			nonNilAppended := false
+			for idx, ref := range c.references {
+				refCopy := ref
+				if len(only) > 0 && uint32(idx) == only[0] {
+					only = only[1:]
+					results = append(results, nil)
+				} else {
+					nonNilAppended = true
+					results = append(results, &refCopy)
+				}
+			}
+			if nonNilAppended {
+				return results, c, nil
+			} else {
+				return nil, c, nil
+			}
 		}
 	}
 }
@@ -131,7 +154,11 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capabilitie
 			return true
 		}
 		valueNew, valueOld := cap.Value(), c.caps.Value()
-		if valueNew > valueOld {
+		switch {
+		case valueNew == valueOld:
+		case valueNew == cmsgs.VALUECAPABILITY_NONE: // new is bottom, always fine
+		case valueOld == cmsgs.VALUECAPABILITY_READWRITE: // old is top, always fine
+		default:
 			return false
 		}
 
@@ -144,14 +171,12 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capabilitie
 			if len(readNewOnly) > len(readOldOnly) {
 				return false
 			}
-			common.SortUInt32(readNewOnly).Sort()
-			common.SortUInt32(readOldOnly).Sort()
 			for idx, indexNew := range readNewOnly {
 				indexOld := readOldOnly[0]
 				readOldOnly = readOldOnly[1:]
 				if indexNew < indexOld {
 					return false
-				} else {
+				} else if indexNew > indexOld {
 					for ; indexNew > indexOld && len(readOldOnly) > 0; readOldOnly = readOldOnly[1:] {
 						indexOld = readOldOnly[0]
 					}
@@ -171,14 +196,12 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capabilitie
 			if len(writeNewOnly) > len(writeOldOnly) {
 				return false
 			}
-			common.SortUInt32(writeNewOnly).Sort()
-			common.SortUInt32(writeOldOnly).Sort()
 			for idx, indexNew := range writeNewOnly {
 				indexOld := writeOldOnly[0]
 				writeOldOnly = writeOldOnly[1:]
 				if indexNew < indexOld {
 					return false
-				} else {
+				} else if indexNew > indexOld {
 					for ; indexNew > indexOld && len(writeOldOnly) > 0; writeOldOnly = writeOldOnly[1:] {
 						indexOld = writeOldOnly[0]
 					}
@@ -188,11 +211,8 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capabilitie
 				}
 			}
 		}
-
-		return true
-	} else {
-		return true
 	}
+	return true
 }
 
 func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcome) {
@@ -568,27 +588,28 @@ func (c *cached) reachableReferences() []*msgs.VarIdPos {
 
 func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.Segment, clientAction *cmsgs.ClientAction) {
 	clientAction.SetVarId(u.varUUId[:])
-	if u.cached.txnId == nil {
+	c := u.cached
+	if c.txnId == nil {
 		clientAction.SetDelete()
 	} else {
 		clientAction.SetWrite()
 		clientWrite := clientAction.Write()
 
-		switch u.caps.Value() {
+		switch c.caps.Value() {
 		case cmsgs.VALUECAPABILITY_READ, cmsgs.VALUECAPABILITY_READWRITE:
-			clientWrite.SetValue(u.value)
+			clientWrite.SetValue(c.value)
 		default:
 			clientWrite.SetValue([]byte{})
 		}
 
-		refsReadCaps := u.caps.References().Read()
+		refsReadCaps := c.caps.References().Read()
 		all := refsReadCaps.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
 		var only []uint32
 		if !all {
 			only = refsReadCaps.Only().ToArray()
 		}
-		clientReferences := cmsgs.NewClientVarIdPosList(seg, len(u.references))
-		for idx, ref := range u.references {
+		clientReferences := cmsgs.NewClientVarIdPosList(seg, len(c.references))
+		for idx, ref := range c.references {
 			switch {
 			case all:
 			case len(only) > 0 && only[0] == uint32(idx):
