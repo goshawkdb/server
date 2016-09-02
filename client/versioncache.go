@@ -6,6 +6,7 @@ import (
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
+	ch "goshawkdb.io/server/consistenthash"
 	eng "goshawkdb.io/server/txnengine"
 )
 
@@ -246,6 +247,7 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 	vc.updateReachable(updateGraph)
 
 	// 3. populate results
+	updates := make([]update, len(updateGraph))
 	validUpdates := make(map[common.TxnId]*[]*update, len(updateGraph))
 	for vUUId, overlay := range updateGraph {
 		if !overlay.stored {
@@ -257,7 +259,11 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 			validUpdates[*overlay.txnId] = &updateList
 		}
 		vUUIdCopy := vUUId
-		*updateListPtr = append(*updateListPtr, &update{cached: overlay.cached, varUUId: &vUUIdCopy})
+		update := &updates[0]
+		updates = updates[1:]
+		update.cached = overlay.cached
+		update.varUUId = &vUUIdCopy
+		*updateListPtr = append(*updateListPtr, update)
 	}
 
 	return validUpdates
@@ -560,31 +566,42 @@ func (c *cached) reachableReferences() []*msgs.VarIdPos {
 	return result
 }
 
-func (u *update) Value() []byte {
-	if u.value == nil {
-		return nil
-	}
-	switch u.caps.Value() {
-	case cmsgs.VALUECAPABILITY_READ, cmsgs.VALUECAPABILITY_READWRITE:
-		return u.value
-	default:
-		return []byte{}
-	}
-}
+func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.Segment, clientAction *cmsgs.ClientAction) {
+	clientAction.SetVarId(u.varUUId[:])
+	if u.cached.txnId == nil {
+		clientAction.SetDelete()
+	} else {
+		clientAction.SetWrite()
+		clientWrite := clientAction.Write()
 
-func (u *update) ReferencesReadMask() []uint32 {
-	if u.value == nil {
-		return nil
-	}
-	read := u.caps.References().Read()
-	switch read.Which() {
-	case cmsgs.CAPABILITIESREFERENCESREAD_ALL:
-		mask := make([]uint32, len(u.references))
-		for idx := range mask {
-			mask[idx] = uint32(idx)
+		switch u.caps.Value() {
+		case cmsgs.VALUECAPABILITY_READ, cmsgs.VALUECAPABILITY_READWRITE:
+			clientWrite.SetValue(u.value)
+		default:
+			clientWrite.SetValue([]byte{})
 		}
-		return mask
-	default:
-		return read.Only().ToArray()
+
+		refsReadCaps := u.caps.References().Read()
+		all := refsReadCaps.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
+		var only []uint32
+		if !all {
+			only = refsReadCaps.Only().ToArray()
+		}
+		clientReferences := cmsgs.NewClientVarIdPosList(seg, len(u.references))
+		for idx, ref := range u.references {
+			switch {
+			case all:
+			case len(only) > 0 && only[0] == uint32(idx):
+				only = only[1:]
+			default:
+				continue
+			}
+			varIdPos := clientReferences.At(idx)
+			varIdPos.SetVarId(ref.Id())
+			varIdPos.SetCapabilities(ref.Capabilities())
+			positions := common.Positions(ref.Positions())
+			hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
+		}
+		clientWrite.SetReferences(clientReferences)
 	}
 }

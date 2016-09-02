@@ -140,28 +140,7 @@ func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[c
 
 		for idy, action := range *actions {
 			clientAction := clientActions.At(idy)
-			clientAction.SetVarId(action.varUUId[:])
-			if value := action.Value(); value == nil {
-				clientAction.SetDelete()
-			} else {
-				clientAction.SetWrite()
-				clientWrite := clientAction.Write()
-				clientWrite.SetValue(value)
-				references := action.references
-				clientReferences := cmsgs.NewClientVarIdPosList(seg, len(references))
-				clientWrite.SetReferences(clientReferences)
-				referencesMask := action.ReferencesReadMask()
-				for idz, ref := range references {
-					varIdPos := clientReferences.At(idz)
-					if len(referencesMask) != 0 && referencesMask[0] == uint32(idz) {
-						referencesMask = referencesMask[1:]
-						varIdPos.SetVarId(ref.Id())
-						varIdPos.SetCapabilities(ref.Capabilities())
-					}
-					positions := common.Positions(ref.Positions())
-					cts.hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
-				}
-			}
+			action.AddToClientAction(cts.hashCache, seg, &clientAction)
 		}
 	}
 	return clientUpdates
