@@ -89,16 +89,19 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 	return nil
 }
 
+// the problem is that we can't distinguish between a client trying to write an empty value or not.
 func (vc versionCache) ValueForWrite(vUUId *common.VarUUId, value []byte) ([]byte, error) {
 	if vc == nil {
 		return value, nil
 	}
 	if c, found := vc[*vUUId]; !found || c.txnId == nil {
-		return nil, fmt.Errorf("ValueForWrite called for unknown %v", vUUId)
+		return nil, fmt.Errorf("Write attempted on unknown %v", vUUId)
 	} else {
-		switch c.caps.Value() {
-		case cmsgs.VALUECAPABILITY_WRITE, cmsgs.VALUECAPABILITY_READWRITE:
+		switch valueCap := c.caps.Value(); {
+		case valueCap == cmsgs.VALUECAPABILITY_WRITE || valueCap == cmsgs.VALUECAPABILITY_READWRITE:
 			return value, nil
+		case len(value) > 0: // fuzzy. The client could be attempting to write empty value illegally too.
+			return nil, fmt.Errorf("Transaction illegally to write the value of an object. %v", vUUId)
 		default:
 			return c.value, nil
 		}
@@ -119,22 +122,41 @@ func (vc versionCache) ReferencesForWrite(vUUId *common.VarUUId, clientRefs *cms
 			return nil, c, nil
 		default:
 			clientRefsLen := clientRefs.Len()
-			// If the client _can_ write it then it _must_ write it.
-			if clientRefsLen != len(c.references) {
-				return nil, nil, fmt.Errorf("Wrong number of references provided for write of %v", vUUId)
-			}
 			only := refsWriteCap.Only().ToArray()
-			results := make([]*msgs.VarIdPos, 0, len(c.references))
+			// The client must provide refs for every index in only.
+			reqLen := 0
+			if l := len(only); l > 0 {
+				reqLen = int(only[l-1]) + 1
+			}
+			if clientRefsLen != reqLen {
+				return nil, nil, fmt.Errorf("Incorrect number of references provided for write of %v", vUUId)
+			}
+			// Where possible, we fill in the gaps in only with
+			// c.references. Keep in mind that the client may have onlies
+			// that are longer than the current number of
+			// references. This can happen when a capability in a ref
+			// includes writes to n refs, and then the object itself is
+			// updated to only include m refs, where m < n. We change a
+			// write to a readwrite iff c.references - onlies is not the
+			// empty set.
+			resultsLen := clientRefsLen
+			if l := len(c.references); l > resultsLen {
+				resultsLen = l
+			}
+			results := make([]*msgs.VarIdPos, resultsLen)
 			nonNilAppended := false
-			for idx, ref := range c.references {
-				refCopy := ref
+			for idx := 0; idx < clientRefsLen; idx++ {
 				if len(only) > 0 && uint32(idx) == only[0] {
 					only = only[1:]
-					results = append(results, nil)
-				} else {
+				} else if idx < len(c.references) {
 					nonNilAppended = true
-					results = append(results, &refCopy)
+					results[idx] = &c.references[idx]
 				}
+			}
+			// add on anything in c.references that's left over
+			for idx := clientRefsLen; idx < resultsLen; idx++ {
+				nonNilAppended = true
+				results[idx] = &c.references[idx]
 			}
 			if nonNilAppended {
 				return results, c, nil
@@ -561,26 +583,27 @@ func (c *cached) reachableReferences() []*msgs.VarIdPos {
 	}
 
 	refsReadCap := c.caps.References().Read()
-	refsWriteCap := c.caps.References().Write()
-	all := refsReadCap.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL ||
-		refsWriteCap.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
+	all := refsReadCap.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL
 	var only []uint32
 	if !all {
-		refsReadOnly := c.caps.References().Read().Only().ToArray()
-		refsWriteOnly := c.caps.References().Write().Only().ToArray()
-		only = mergeOnlies(refsReadOnly, refsWriteOnly)
+		only = c.caps.References().Read().Only().ToArray()
 	}
 
 	result := make([]*msgs.VarIdPos, 0, len(c.references))
+LOOP:
 	for index, ref := range c.references {
-		if all {
-			result = append(result, &ref)
-		} else if len(only) > 0 && uint32(index) == only[0] {
-			result = append(result, &ref)
+		refCopy := ref
+		switch {
+		case all:
+		case len(only) == 0:
+			break LOOP
+		case uint32(index) == only[0]:
 			only = only[1:]
-			if len(only) == 0 {
-				break
-			}
+		default:
+			continue
+		}
+		if len(ref.Id()) == common.KeyLen {
+			result = append(result, &refCopy)
 		}
 	}
 	return result
@@ -619,9 +642,11 @@ func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.
 			}
 			varIdPos := clientReferences.At(idx)
 			varIdPos.SetVarId(ref.Id())
-			varIdPos.SetCapabilities(ref.Capabilities())
-			positions := common.Positions(ref.Positions())
-			hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
+			if len(ref.Id()) == common.KeyLen {
+				varIdPos.SetCapabilities(ref.Capabilities())
+				positions := common.Positions(ref.Positions())
+				hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
+			}
 		}
 		clientWrite.SetReferences(clientReferences)
 	}

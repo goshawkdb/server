@@ -512,7 +512,12 @@ func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositi
 		refs := msgs.NewVarIdPosList(seg, len(refsWithHoles))
 		for idx, ref := range refsWithHoles {
 			vUUIdPos := refs.At(idx)
-			if ref == nil {
+			switch {
+			case ref != nil:
+				vUUIdPos.SetId(ref.Id())
+				vUUIdPos.SetCapabilities(ref.Capabilities())
+				*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
+			case idx < clientReferences.Len():
 				clientRef := clientReferences.At(idx)
 				target := common.MakeVarUUId(clientRef.VarId())
 				vUUIdPos.SetId(target[:])
@@ -521,11 +526,10 @@ func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositi
 					return nil, err
 				}
 				vUUIdPos.SetCapabilities(caps)
-			} else {
-				vUUIdPos.SetId(ref.Id())
-				vUUIdPos.SetCapabilities(ref.Capabilities())
+				*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
+			default:
+				vUUIdPos.SetId([]byte{})
 			}
-			*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
 		}
 		return &refs, nil
 	}
