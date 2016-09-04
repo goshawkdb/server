@@ -22,7 +22,7 @@ type ClientTxnSubmitter struct {
 	initialDelay time.Duration
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*cmsgs.Capabilities, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capabilities, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		versionCache:       NewVersionCache(roots),

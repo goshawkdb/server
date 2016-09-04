@@ -15,7 +15,7 @@ type versionCache map[common.VarUUId]*cached
 type cached struct {
 	txnId      *common.TxnId
 	clockElem  uint64
-	caps       *cmsgs.Capabilities
+	caps       *common.Capabilities
 	value      []byte
 	references []msgs.VarIdPos
 }
@@ -32,19 +32,7 @@ type cacheOverlay struct {
 	stored bool
 }
 
-var maxCapsCap *cmsgs.Capabilities
-
-func init() {
-	seg := capn.NewBuffer(nil)
-	cap := cmsgs.NewCapabilities(seg)
-	cap.SetValue(cmsgs.VALUECAPABILITY_READWRITE)
-	ref := cap.References()
-	ref.Read().SetAll()
-	ref.Write().SetAll()
-	maxCapsCap = &cap
-}
-
-func NewVersionCache(roots map[common.VarUUId]*cmsgs.Capabilities) versionCache {
+func NewVersionCache(roots map[common.VarUUId]*common.Capabilities) versionCache {
 	cache := make(map[common.VarUUId]*cached)
 	for vUUId, caps := range roots {
 		cache[vUUId] = &cached{caps: caps}
@@ -60,7 +48,7 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 			vUUId := common.MakeVarUUId(action.VarId())
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
-			} else if c, found := vc[*vUUId]; !found || c.txnId == nil {
+			} else if _, found := vc[*vUUId]; !found {
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
 			}
 		}
@@ -69,10 +57,10 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
-			c, found := vc[*vUUId]
+			_, found := vc[*vUUId]
 			switch action.Which() {
 			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
-				if !found || c.txnId == nil {
+				if !found {
 					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
 				}
 
@@ -94,7 +82,7 @@ func (vc versionCache) ValueForWrite(vUUId *common.VarUUId, value []byte) ([]byt
 	if vc == nil {
 		return value, nil
 	}
-	if c, found := vc[*vUUId]; !found || c.txnId == nil {
+	if c, found := vc[*vUUId]; !found {
 		return nil, fmt.Errorf("Write attempted on unknown %v", vUUId)
 	} else {
 		switch valueCap := c.caps.Value(); {
@@ -113,7 +101,7 @@ func (vc versionCache) ReferencesForWrite(vUUId *common.VarUUId, clientRefs *cms
 	if vc == nil {
 		return nil, nil, nil
 	}
-	if c, found := vc[*vUUId]; !found || c.txnId == nil {
+	if c, found := vc[*vUUId]; !found {
 		return nil, nil, fmt.Errorf("ReferencesForWrite called for unknown %v", vUUId)
 	} else {
 		refsWriteCap := c.caps.References().Write()
@@ -172,7 +160,7 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capabilitie
 		return true
 	}
 	if c, found := vc[*vUUId]; found {
-		if c.caps == maxCapsCap {
+		if c.caps == common.MaxCapsCap {
 			return true
 		}
 		valueNew, valueOld := cap.Value(), c.caps.Value()
@@ -251,7 +239,7 @@ func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcom
 				c = &cached{
 					txnId:      txnId,
 					clockElem:  clock.At(vUUId),
-					caps:       maxCapsCap,
+					caps:       common.MaxCapsCap,
 					value:      create.Value(),
 					references: create.References().ToArray(),
 				}
@@ -298,7 +286,8 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 		updateListPtr, found := validUpdates[*overlay.txnId]
 		if !found {
 			updateList := []*update{}
-			validUpdates[*overlay.txnId] = &updateList
+			updateListPtr = &updateList
+			validUpdates[*overlay.txnId] = updateListPtr
 		}
 		vUUIdCopy := vUUId
 		update := &updates[0]
@@ -419,7 +408,7 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 			// Given the current vUUId.caps, we're looking at what we
 			// can reach from there.
 			vUUIdRef := common.MakeVarUUId(ref.Id())
-			caps := ref.Capabilities()
+			caps := common.NewCapabilities(ref.Capabilities())
 			var c *cached
 			overlay, found := updateGraph[*vUUIdRef]
 			if found {
@@ -439,7 +428,7 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 					// actually points to. caps is just our capabilities to
 					// act on this var, so there's no extra work to do
 					// (c.reachableReferences will return []).
-					c = &cached{caps: &caps}
+					c = &cached{caps: caps}
 					vc[*vUUIdRef] = c
 				}
 			}
@@ -447,7 +436,7 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 			// processed vUUIdRef?  2. If we have, do we have wider caps
 			// now than before?
 			before := reaches[*vUUIdRef]
-			ensureUpdate := c.mergeCaps(&caps)
+			ensureUpdate := c.mergeCaps(caps)
 			after := c.reachableReferences()
 			if len(after) > len(before) {
 				reaches[*vUUIdRef] = after
@@ -472,108 +461,16 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 
 // returns true iff we couldn't read the value before merge, but we
 // can after
-func (c *cached) mergeCaps(b *cmsgs.Capabilities) (gainedRead bool) {
+func (c *cached) mergeCaps(b *common.Capabilities) (gainedRead bool) {
 	a := c.caps
-	switch {
-	case a == b:
-		return false
-	case a == maxCapsCap || b == maxCapsCap:
-		c.caps = maxCapsCap
-		return a != maxCapsCap
-	case a == nil:
-		c.caps = b
-		return b.Value() == cmsgs.VALUECAPABILITY_READ || b.Value() == cmsgs.VALUECAPABILITY_READWRITE
-	case b == nil:
-		return false
+	c.caps = a.Union(b)
+	if a != c.caps {
+		aValue := a.Value()
+		nValue := c.caps.Value()
+		return (aValue != cmsgs.VALUECAPABILITY_READ && aValue != cmsgs.VALUECAPABILITY_READWRITE) &&
+			(nValue == cmsgs.VALUECAPABILITY_READ || nValue == cmsgs.VALUECAPABILITY_READWRITE)
 	}
-
-	aValue := a.Value()
-	aRefsRead := a.References().Read()
-	aRefsWrite := a.References().Write()
-
-	bValue := b.Value()
-	bRefsRead := b.References().Read()
-	bRefsWrite := b.References().Write()
-
-	valueRead := aValue == cmsgs.VALUECAPABILITY_READWRITE || aValue == cmsgs.VALUECAPABILITY_READ ||
-		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_READ
-	valueWrite := aValue == cmsgs.VALUECAPABILITY_READWRITE || aValue == cmsgs.VALUECAPABILITY_WRITE ||
-		bValue == cmsgs.VALUECAPABILITY_READWRITE || bValue == cmsgs.VALUECAPABILITY_WRITE
-	refsReadAll := aRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ALL || bRefsRead.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ONLY
-	refsWriteAll := aRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL || bRefsWrite.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ALL
-
-	gainedRead = valueRead && aValue != cmsgs.VALUECAPABILITY_READ && aValue != cmsgs.VALUECAPABILITY_READWRITE
-
-	if valueRead && valueWrite && refsReadAll && refsWriteAll {
-		c.caps = maxCapsCap
-		return
-	}
-
-	seg := capn.NewBuffer(nil)
-	cap := cmsgs.NewCapabilities(seg)
-	switch {
-	case valueRead && valueWrite:
-		cap.SetValue(cmsgs.VALUECAPABILITY_READWRITE)
-	case valueWrite:
-		cap.SetValue(cmsgs.VALUECAPABILITY_WRITE)
-	case valueRead:
-		cap.SetValue(cmsgs.VALUECAPABILITY_WRITE)
-	default:
-		cap.SetValue(cmsgs.VALUECAPABILITY_NONE)
-	}
-
-	if refsReadAll {
-		cap.References().Read().SetAll()
-	} else {
-		aOnly, bOnly := aRefsRead.Only().ToArray(), bRefsRead.Only().ToArray()
-		cap.References().Read().SetOnly(mergeOnliesSeg(seg, aOnly, bOnly))
-	}
-
-	if refsWriteAll {
-		cap.References().Write().SetAll()
-	} else {
-		aOnly, bOnly := aRefsWrite.Only().ToArray(), bRefsWrite.Only().ToArray()
-		cap.References().Write().SetOnly(mergeOnliesSeg(seg, aOnly, bOnly))
-	}
-
-	c.caps = &cap
-	return
-}
-
-func mergeOnliesSeg(seg *capn.Segment, a, b []uint32) capn.UInt32List {
-	only := mergeOnlies(a, b)
-
-	cap := seg.NewUInt32List(len(only))
-	for idx, index := range only {
-		cap.Set(idx, index)
-	}
-	return cap
-}
-
-func mergeOnlies(a, b []uint32) []uint32 {
-	only := make([]uint32, 0, len(a)+len(b))
-	for len(a) > 0 && len(b) > 0 {
-		aIndex, bIndex := a[0], b[0]
-		switch {
-		case aIndex < bIndex:
-			only = append(only, aIndex)
-			a = a[1:]
-		case aIndex > bIndex:
-			only = append(only, bIndex)
-			b = b[1:]
-		default:
-			only = append(only, aIndex)
-			a = a[1:]
-			b = b[1:]
-		}
-	}
-	if len(a) > 0 {
-		only = append(only, a...)
-	} else {
-		only = append(only, b...)
-	}
-
-	return only
+	return false
 }
 
 // does not leave holes in the result - compacted.

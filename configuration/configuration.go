@@ -32,7 +32,7 @@ type Configuration struct {
 	roots                         []string
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
-	fingerprints                  map[[sha256.Size]byte]map[string]*cmsgs.Capabilities
+	fingerprints                  map[[sha256.Size]byte]map[string]*common.Capabilities
 	nextConfiguration             *NextConfiguration
 }
 
@@ -207,7 +207,7 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 	} else {
 		rootsMap := make(map[string]server.EmptyStruct)
 		rootsName := []string{}
-		fingerprints := make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, len(config.ClientCertificateFingerprints))
+		fingerprints := make(map[[sha256.Size]byte]map[string]*common.Capabilities, len(config.ClientCertificateFingerprints))
 		seg := capn.NewBuffer(nil)
 		for fingerprint, rootsCapabilities := range config.ClientCertificateFingerprints {
 			fingerprintBytes, err := hex.DecodeString(fingerprint)
@@ -219,7 +219,7 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 			if len(rootsCapabilities) == 0 {
 				return nil, fmt.Errorf("No roots configured for client fingerprint %v; at least 1 needed", fingerprint)
 			}
-			roots := make(map[string]*cmsgs.Capabilities, len(rootsCapabilities))
+			roots := make(map[string]*common.Capabilities, len(rootsCapabilities))
 			for name, rootCapabilities := range rootsCapabilities {
 				if _, found := rootsMap[name]; !found {
 					rootsMap[name] = server.EmptyStructVal
@@ -285,7 +285,7 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 					}
 					capRefs.Write().SetOnly(only)
 				}
-				roots[name] = &cap
+				roots[name] = common.NewCapabilities(cap)
 			}
 			ary := [sha256.Size]byte{}
 			copy(ary[:], fingerprintBytes)
@@ -325,18 +325,18 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	rootsName := []string{}
 	rootsMap := make(map[string]server.EmptyStruct)
 	fingerprints := config.Fingerprints()
-	fingerprintsMap := make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, fingerprints.Len())
+	fingerprintsMap := make(map[[sha256.Size]byte]map[string]*common.Capabilities, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
 		fingerprint := fingerprints.At(idx)
 		ary := [sha256.Size]byte{}
 		copy(ary[:], fingerprint.Sha256())
 		rootsCap := fingerprint.Roots()
-		roots := make(map[string]*cmsgs.Capabilities, rootsCap.Len())
+		roots := make(map[string]*common.Capabilities, rootsCap.Len())
 		for idy, m := 0, rootsCap.Len(); idy < m; idy++ {
 			rootCap := rootsCap.At(idy)
 			name := rootCap.Name()
 			capabilities := rootCap.Capabilities()
-			roots[name] = &capabilities
+			roots[name] = common.NewCapabilities(capabilities)
 			if _, found := rootsMap[name]; !found {
 				rootsName = append(rootsName, name)
 				rootsMap[name] = server.EmptyStructVal
@@ -430,7 +430,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			return false
 		} else {
 			for name, aRootCaps := range aRoots {
-				if bRootCaps, found := bRoots[name]; !found || !common.EqualCapabilities(aRootCaps, bRootCaps) {
+				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
 					return false
 				}
 			}
@@ -463,7 +463,7 @@ func (config *Configuration) SetClusterUUId(uuid uint64) {
 	}
 }
 
-func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*cmsgs.Capabilities {
+func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*common.Capabilities {
 	return config.fingerprints
 }
 
@@ -530,7 +530,7 @@ func (config *Configuration) Clone() *Configuration {
 		roots:             make([]string, len(config.roots)),
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
-		fingerprints:      make(map[[sha256.Size]byte]map[string]*cmsgs.Capabilities, len(config.fingerprints)),
+		fingerprints:      make(map[[sha256.Size]byte]map[string]*common.Capabilities, len(config.fingerprints)),
 		nextConfiguration: config.nextConfiguration.Clone(),
 	}
 
@@ -593,7 +593,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		for name, capabilities := range roots {
 			rootCap := msgs.NewRoot(seg)
 			rootCap.SetName(name)
-			rootCap.SetCapabilities(*capabilities)
+			rootCap.SetCapabilities(capabilities.Capabilities)
 			rootsCap.Set(idy, rootCap)
 			idy++
 		}
