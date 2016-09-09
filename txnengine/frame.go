@@ -861,7 +861,7 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 		posMap[*vUUId] = &pos
 		varIdPos := refVarList.At(idx)
 		varIdPos.SetVarId(vUUId[:])
-		varIdPos.SetCapabilities(ref.Capabilities())
+		varIdPos.SetCapability(ref.Capability())
 	}
 	fo.rollTxn = &ctxn
 	fo.rollTxnPos = posMap

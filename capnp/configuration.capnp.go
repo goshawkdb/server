@@ -1552,10 +1552,10 @@ func ReadRootRoot(s *C.Segment) Root { return Root(s.Root(0).ToStruct()) }
 func (s Root) Name() string          { return C.Struct(s).GetObject(0).ToText() }
 func (s Root) NameBytes() []byte     { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
 func (s Root) SetName(v string)      { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
-func (s Root) Capabilities() capnp.Capabilities {
-	return capnp.Capabilities(C.Struct(s).GetObject(1).ToStruct())
+func (s Root) Capability() capnp.Capability {
+	return capnp.Capability(C.Struct(s).GetObject(1).ToStruct())
 }
-func (s Root) SetCapabilities(v capnp.Capabilities) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Root) SetCapability(v capnp.Capability) { C.Struct(s).SetObject(1, C.Object(v)) }
 func (s Root) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -1584,12 +1584,12 @@ func (s Root) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"capabilities\":")
+	_, err = b.WriteString("\"capability\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Capabilities()
+		s := s.Capability()
 		err = s.WriteJSON(b)
 		if err != nil {
 			return err
@@ -1635,12 +1635,12 @@ func (s Root) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("capabilities = ")
+	_, err = b.WriteString("capability = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Capabilities()
+		s := s.Capability()
 		err = s.WriteCapLit(b)
 		if err != nil {
 			return err

@@ -313,10 +313,10 @@ func (s VarIdPos) Id() []byte                 { return C.Struct(s).GetObject(0).
 func (s VarIdPos) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s VarIdPos) Positions() C.UInt8List     { return C.UInt8List(C.Struct(s).GetObject(1)) }
 func (s VarIdPos) SetPositions(v C.UInt8List) { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s VarIdPos) Capabilities() capnp.Capabilities {
-	return capnp.Capabilities(C.Struct(s).GetObject(2).ToStruct())
+func (s VarIdPos) Capability() capnp.Capability {
+	return capnp.Capability(C.Struct(s).GetObject(2).ToStruct())
 }
-func (s VarIdPos) SetCapabilities(v capnp.Capabilities) { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s VarIdPos) SetCapability(v capnp.Capability) { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s VarIdPos) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -382,12 +382,12 @@ func (s VarIdPos) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"capabilities\":")
+	_, err = b.WriteString("\"capability\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Capabilities()
+		s := s.Capability()
 		err = s.WriteJSON(b)
 		if err != nil {
 			return err
@@ -470,12 +470,12 @@ func (s VarIdPos) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("capabilities = ")
+	_, err = b.WriteString("capability = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Capabilities()
+		s := s.Capability()
 		err = s.WriteCapLit(b)
 		if err != nil {
 			return err

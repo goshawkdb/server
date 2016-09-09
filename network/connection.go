@@ -645,8 +645,8 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer() *capn.Se
 type connectionAwaitClientHandshake struct {
 	*Connection
 	peerCerts []*x509.Certificate
-	roots     map[string]*common.Capabilities
-	rootsVar  map[common.VarUUId]*common.Capabilities
+	roots     map[string]*common.Capability
+	rootsVar  map[common.VarUUId]*common.Capability
 }
 
 func (cach *connectionAwaitClientHandshake) connectionStateMachineComponentWitness() {}
@@ -688,7 +688,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 	}
 }
 
-func (cach *connectionAwaitClientHandshake) verifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capabilities) {
+func (cach *connectionAwaitClientHandshake) verifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capability) {
 	fingerprints := cach.topology.Fingerprints()
 	for _, cert := range peerCerts {
 		hashsum = sha256.Sum256(cert.Raw)
@@ -709,16 +709,16 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer() *capn.Se
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(cach.roots))
 	idy := 0
-	rootsVar := make(map[common.VarUUId]*common.Capabilities, len(cach.roots))
+	rootsVar := make(map[common.VarUUId]*common.Capability, len(cach.roots))
 	for idx, name := range cach.topology.RootNames() {
-		if capabilities, found := cach.roots[name]; found {
+		if capability, found := cach.roots[name]; found {
 			rootCap := rootsCap.At(idy)
 			idy++
 			vUUId := cach.topology.Roots[idx].VarUUId
 			rootCap.SetName(name)
 			rootCap.SetVarId(vUUId[:])
-			rootCap.SetCapabilities(capabilities.Capabilities)
-			rootsVar[*vUUId] = capabilities
+			rootCap.SetCapability(capability.Capability)
+			rootsVar[*vUUId] = capability
 		}
 	}
 	hello.SetRoots(rootsCap)

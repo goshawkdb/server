@@ -16,7 +16,7 @@ struct Var {
 }
 
 struct VarIdPos {
-  id           @0: Data;
-  positions    @1: List(UInt8);
-  capabilities @2: Common.Capabilities;
+  id         @0: Data;
+  positions  @1: List(UInt8);
+  capability @2: Common.Capability;
 }

@@ -401,55 +401,25 @@ func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientRead cms
 }
 
 func (sts *SimpleTxnSubmitter) translateWrite(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientWrite cmsgs.ClientActionWrite) error {
-	writeValue, err := vc.ValueForWrite(vUUId, clientWrite.Value())
-	if err != nil {
-		return err
-	}
+	action.SetWrite()
+	write := action.Write()
+	write.SetValue(clientWrite.Value())
 	clientReferences := clientWrite.References()
-	refsWithHoles, c, err := vc.ReferencesForWrite(vUUId, &clientReferences)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
 	if err != nil {
 		return err
 	}
-	if refsWithHoles == nil {
-		// it really is just a write
-		action.SetWrite()
-		write := action.Write()
-		write.SetValue(writeValue)
-		refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, refsWithHoles, &clientReferences)
-		if err != nil {
-			return err
-		}
-		write.SetReferences(*refs)
-	} else {
-		// it actually needs to be a read-write
-		action.SetReadwrite()
-		readWrite := action.Readwrite()
-		readWrite.SetVersion(c.txnId[:])
-		readWrite.SetValue(writeValue)
-		refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, refsWithHoles, &clientReferences)
-		if err != nil {
-			return err
-		}
-		readWrite.SetReferences(*refs)
-	}
+	write.SetReferences(*refs)
 	return nil
 }
 
 func (sts *SimpleTxnSubmitter) translateReadWrite(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientReadWrite cmsgs.ClientActionReadwrite) error {
-	writeValue, err := vc.ValueForWrite(vUUId, clientReadWrite.Value())
-	if err != nil {
-		return err
-	}
 	clientReferences := clientReadWrite.References()
-	refsWithHoles, _, err := vc.ReferencesForWrite(vUUId, &clientReferences)
-	if err != nil {
-		return err
-	}
 	action.SetReadwrite()
 	readWrite := action.Readwrite()
 	readWrite.SetVersion(clientReadWrite.Version())
-	readWrite.SetValue(writeValue)
-	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, refsWithHoles, &clientReferences)
+	readWrite.SetValue(clientReadWrite.Value())
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
 	if err != nil {
 		return err
 	}
@@ -467,7 +437,7 @@ func (sts *SimpleTxnSubmitter) translateCreate(vc versionCache, outgoingSeg *cap
 	}
 	create.SetPositions((capn.UInt8List)(*positions))
 	clientReferences := clientCreate.References()
-	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, nil, &clientReferences)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -481,7 +451,7 @@ func (sts *SimpleTxnSubmitter) translateRoll(vc versionCache, outgoingSeg *capn.
 	roll.SetVersion(clientRoll.Version())
 	roll.SetValue(clientRoll.Value())
 	clientReferences := clientRoll.References()
-	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, nil, &clientReferences)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
 	if err != nil {
 		return err
 	}
@@ -489,84 +459,26 @@ func (sts *SimpleTxnSubmitter) translateRoll(vc versionCache, outgoingSeg *capn.
 	return nil
 }
 
-// so the challenge here is that we need to merge the references which
-// the client may have rewritten with the 'actual' references taking
-// into account masks and such from capabilities
-func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, refsWithHoles []*msgs.VarIdPos, clientReferences *cmsgs.ClientVarIdPos_List) (*msgs.VarIdPos_List, error) {
-	if refsWithHoles == nil {
-		refs := msgs.NewVarIdPosList(seg, clientReferences.Len())
-		for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
-			clientRef := clientReferences.At(idx)
-			vUUIdPos := refs.At(idx)
-			target := common.MakeVarUUId(clientRef.VarId())
-			vUUIdPos.SetId(target[:])
-			caps := clientRef.Capabilities()
-			if err := validateCapabilities(vc, target, caps); err != nil {
-				return nil, err
-			}
-			vUUIdPos.SetCapabilities(caps)
-			*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
+func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, clientReferences *cmsgs.ClientVarIdPos_List) (*msgs.VarIdPos_List, error) {
+	refs := msgs.NewVarIdPosList(seg, clientReferences.Len())
+	for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
+		clientRef := clientReferences.At(idx)
+		vUUIdPos := refs.At(idx)
+		target := common.MakeVarUUId(clientRef.VarId())
+		vUUIdPos.SetId(target[:])
+		caps := clientRef.Capability()
+		if err := validateCapability(vc, target, caps); err != nil {
+			return nil, err
 		}
-		return &refs, nil
-	} else {
-		refs := msgs.NewVarIdPosList(seg, len(refsWithHoles))
-		for idx, ref := range refsWithHoles {
-			vUUIdPos := refs.At(idx)
-			switch {
-			case ref != nil:
-				vUUIdPos.SetId(ref.Id())
-				vUUIdPos.SetCapabilities(ref.Capabilities())
-				*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
-			case idx < clientReferences.Len():
-				clientRef := clientReferences.At(idx)
-				target := common.MakeVarUUId(clientRef.VarId())
-				vUUIdPos.SetId(target[:])
-				caps := clientRef.Capabilities()
-				if err := validateCapabilities(vc, target, caps); err != nil {
-					return nil, err
-				}
-				vUUIdPos.SetCapabilities(caps)
-				*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
-			default:
-				vUUIdPos.SetId([]byte{})
-			}
-		}
-		return &refs, nil
+		vUUIdPos.SetCapability(caps)
+		*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
 	}
+	return &refs, nil
 }
 
-func validateCapabilities(vc versionCache, target *common.VarUUId, cap cmsgs.Capabilities) error {
-	refsReadCap := cap.References().Read()
-	refsWriteCap := cap.References().Write()
-	if refsReadCap.Which() == cmsgs.CAPABILITIESREFERENCESREAD_ONLY {
-		// just enforce that they unique and ascending
-		if !isUniqueAndAscending(refsReadCap.Only()) {
-			return fmt.Errorf("Invalid reference read capabilities: indices must be unique and ascending (ref target: %v)", target)
-		}
-	}
-	if refsWriteCap.Which() == cmsgs.CAPABILITIESREFERENCESWRITE_ONLY {
-		// just enforce that they unique and ascending
-		if !isUniqueAndAscending(refsWriteCap.Only()) {
-			return fmt.Errorf("Invalid reference write capabilities: indices must be unique and ascending (ref target: %v)", target)
-		}
-	}
+func validateCapability(vc versionCache, target *common.VarUUId, cap cmsgs.Capability) error {
 	if !vc.EnsureSubset(target, cap) {
 		return fmt.Errorf("Attempt made to grant wider capabilities on %v than acceptable", target)
 	}
 	return nil
-}
-
-func isUniqueAndAscending(onlyCap capn.UInt32List) bool {
-	only := onlyCap.ToArray()
-	if len(only) > 0 {
-		old := only[0]
-		only = only[1:]
-		for _, index := range only {
-			if index <= old {
-				return false
-			}
-			old = index
-		}
-	}
-	return true
 }
