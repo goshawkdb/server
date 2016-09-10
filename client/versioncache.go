@@ -310,7 +310,11 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 			// We have two questions to answer: 1. Have we already
 			// processed vUUIdRef?  2. If we have, do we have wider caps
 			// now than before?
-			before := reaches[*vUUIdRef]
+			before, found := reaches[*vUUIdRef]
+			if !found {
+				before = c.reachableReferences()
+				reaches[*vUUIdRef] = before
+			}
 			ensureUpdate := c.mergeCaps(caps)
 			after := c.reachableReferences()
 			if len(after) > len(before) {
