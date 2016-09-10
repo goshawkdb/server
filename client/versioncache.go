@@ -344,10 +344,14 @@ func (c *cached) mergeCaps(b *common.Capability) (gainedRead bool) {
 	a := c.caps
 	c.caps = a.Union(b)
 	if a != c.caps { // change has happened
-		aCap := a.Which()
 		nCap := c.caps.Which()
-		return (aCap != cmsgs.CAPABILITY_READ && aCap != cmsgs.CAPABILITY_READWRITE) &&
-			(nCap == cmsgs.CAPABILITY_READ || nCap == cmsgs.CAPABILITY_READWRITE)
+		nRead := nCap == cmsgs.CAPABILITY_READ || nCap == cmsgs.CAPABILITY_READWRITE
+		if a == nil {
+			return nRead
+		} else {
+			aCap := a.Which()
+			return nRead && aCap != cmsgs.CAPABILITY_READ && aCap != cmsgs.CAPABILITY_READWRITE
+		}
 	}
 	return false
 }
