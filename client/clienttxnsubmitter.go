@@ -105,9 +105,13 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
 			curTxnIdNum += 1 + uint64(cts.rng.Intn(8))
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
-			ctxnCap.SetId(curTxnId[:])
+			newSeg := capn.NewBuffer(nil)
+			newCtxnCap := cmsgs.NewClientTxn(newSeg)
+			newCtxnCap.SetId(curTxnId[:])
+			newCtxnCap.SetRetry(ctxnCap.Retry())
+			newCtxnCap.SetActions(ctxnCap.Actions())
 
-			cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, curTxnId, cont, delay, false)
+			cts.SimpleTxnSubmitter.SubmitClientTransaction(&newCtxnCap, curTxnId, cont, delay, false)
 		}
 	}
 
