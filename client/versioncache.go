@@ -48,8 +48,10 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 			vUUId := common.MakeVarUUId(action.VarId())
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
-			} else if _, found := vc[*vUUId]; !found {
+			} else if vc, found := vc[*vUUId]; !found {
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
+			} else if cap := vc.caps.Which(); !(cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE) {
+				return fmt.Errorf("Retry transaction has attempted illegal read from object: %v", vUUId)
 			}
 		}
 
@@ -57,11 +59,23 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
-			_, found := vc[*vUUId]
-			switch action.Which() {
+			vc, found := vc[*vUUId]
+			switch act := action.Which(); act {
 			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
 				if !found {
 					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
+				} else {
+					cap := vc.caps.Which()
+					canRead := cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE
+					canWrite := cap == cmsgs.CAPABILITY_WRITE || cap == cmsgs.CAPABILITY_READWRITE
+					switch {
+					case act == cmsgs.CLIENTACTION_READ && !canRead:
+						return fmt.Errorf("Transaction has illegal read action on object: %v", vUUId)
+					case act == cmsgs.CLIENTACTION_WRITE && !canWrite:
+						return fmt.Errorf("Transaction has illegal write action on object: %v", vUUId)
+					case act == cmsgs.CLIENTACTION_READWRITE && cap != cmsgs.CAPABILITY_READWRITE:
+						return fmt.Errorf("Transaction has illegal readwrite action on object: %v", vUUId)
+					}
 				}
 
 			case cmsgs.CLIENTACTION_CREATE:
