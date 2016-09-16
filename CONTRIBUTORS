@@ -2,3 +2,17 @@ This file lists all individuals having contributed content to the
 repository.
 
 Matthew Sackman <matthew@goshawkdb.io>
+Ashley Hewson <ash@lshift.net>
+
+By default, code in this repository is:
+Copyright (C) 2015-2016 Matthew Sackman <matthew@goshawkdb.io>
+
+Some patches have different copyright assignments, and on each release
+of GoshawkDB server, this file will be adjusted to contain those
+details in full.
+
+Where the copyright of a patch differs from the default, the patch and
+its copyright can be found by running the following command in this
+repository:
+
+$ hg log -k copyright -v
