@@ -28,8 +28,13 @@ type update struct {
 type cacheOverlay struct {
 	*cached
 	// we only duplicate the txnId here for the MISSING case
-	txnId  *common.TxnId
-	stored bool
+	txnId        *common.TxnId
+	inCache      bool
+	updateClient bool
+}
+
+func (co cacheOverlay) String() string {
+	return fmt.Sprintf("@%v (%v) (inCache: %v, updateClient %v)", co.txnId, co.caps, co.inCache, co.updateClient)
 }
 
 func NewVersionCache(roots map[common.VarUUId]*common.Capability) versionCache {
@@ -160,15 +165,17 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 
 	// 1. update everything we know we can already reach, and filter out erroneous updates
 	vc.updateExisting(updatesCap, updateGraph)
+	// fmt.Printf("updateGraph after updateExisting:\n %v\n", updateGraph)
 
 	// 2. figure out what we can now reach, and propagate through extended caps
 	vc.updateReachable(updateGraph)
+	// fmt.Printf("updateGraph after updateReachable:\n %v\n", updateGraph)
 
 	// 3. populate results
 	updates := make([]update, len(updateGraph))
 	validUpdates := make(map[common.TxnId]*[]*update, len(updateGraph))
 	for vUUId, overlay := range updateGraph {
-		if !overlay.stored {
+		if !overlay.updateClient {
 			continue
 		}
 		updateListPtr, found := validUpdates[*overlay.txnId]
@@ -219,9 +226,10 @@ func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph 
 						c.value = nil
 						c.references = nil
 						updateGraph[*vUUId] = &cacheOverlay{
-							cached: c,
-							txnId:  txnId,
-							stored: true,
+							cached:       c,
+							txnId:        txnId,
+							inCache:      true,
+							updateClient: true,
 						}
 					}
 				}
@@ -252,9 +260,10 @@ func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph 
 						c.value = write.Value()
 						c.references = write.References().ToArray()
 						updateGraph[*vUUId] = &cacheOverlay{
-							cached: c,
-							txnId:  txnId,
-							stored: true,
+							cached:       c,
+							txnId:        txnId,
+							inCache:      true,
+							updateClient: true,
 						}
 					}
 
@@ -267,8 +276,9 @@ func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph 
 							value:      write.Value(),
 							references: write.References().ToArray(),
 						},
-						txnId:  txnId,
-						stored: false,
+						txnId:        txnId,
+						inCache:      false,
+						updateClient: false,
 					}
 				}
 
@@ -284,7 +294,7 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 	worklist := make([]common.VarUUId, 0, len(updateGraph))
 
 	for vUUId, overlay := range updateGraph {
-		if overlay.stored {
+		if overlay.updateClient {
 			reaches[vUUId] = overlay.reachableReferences()
 			worklist = append(worklist, vUUId)
 		}
@@ -294,17 +304,16 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 		vUUId := worklist[0]
 		worklist = worklist[1:]
 		for _, ref := range reaches[vUUId] {
-			// Given the current vUUId.caps, we're looking at what we
-			// can reach from there.
+			// Given the current vUUId.caps, we're looking at what we can
+			// reach from there. However, just because we can reach
+			// something doesn't mean we should actually be sending that
+			// thing down to the client - we should only do that if the
+			// client has enough capabilities on it (i.e. can read it).
 			vUUIdRef := common.MakeVarUUId(ref.Id())
 			caps := common.NewCapability(ref.Capability())
 			var c *cached
 			overlay, found := updateGraph[*vUUIdRef]
 			if found {
-				if !overlay.stored {
-					overlay.stored = true
-					vc[*vUUIdRef] = overlay.cached
-				}
 				c = overlay.cached
 			} else {
 				// There's no update for vUUIdRef, but it's possible we're
@@ -329,24 +338,43 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 				before = c.reachableReferences()
 				reaches[*vUUIdRef] = before
 			}
-			ensureUpdate := c.mergeCaps(caps)
+			valueOrRefsUpdated := c.mergeCaps(caps)
 			after := c.reachableReferences()
 			if len(after) > len(before) {
 				reaches[*vUUIdRef] = after
 				worklist = append(worklist, *vUUIdRef)
-				ensureUpdate = true
+				valueOrRefsUpdated = true
 			}
-			if ensureUpdate && overlay == nil && c.txnId != nil {
-				// Our access to vUUIdRef has expanded to the extent that
-				// we can now see more of the refs from vUUIdRef, or we
-				// can now see the value of vUUIdRef. So even though there
-				// wasn't an actual update for vUUIdRef, we need to create
-				// one.
-				updateGraph[*vUUIdRef] = &cacheOverlay{
-					cached: c,
-					txnId:  c.txnId,
-					stored: true,
+			if overlay == nil {
+				// vUUIdRef is for a var that was not in any of the
+				// updates, and we know it is in the cache. But it may not
+				// yet be on the client. Its value in the cache has not
+				// changed: if c.txnId == nil then it's already nil on the
+				// client (if it exists at all on the client). So we only
+				// want to send this down to the client if the client has
+				// _gained_ the ability to read this vUUIdRef as a result
+				// of these updates.
+				if valueOrRefsUpdated && c.txnId != nil {
+					updateGraph[*vUUIdRef] = &cacheOverlay{
+						cached:       c,
+						txnId:        c.txnId,
+						inCache:      true,
+						updateClient: true,
+					}
 				}
+			} else {
+				if !overlay.inCache {
+					// There was an update for vUUIdRef, which we didn't
+					// know of before, and we've proven we can now reach
+					// vUUIdRef. Therefore we must store vUUIdRef in the
+					// cache to record the capability.
+					overlay.inCache = true
+					vc[*vUUIdRef] = overlay.cached
+				}
+				// If !updateClient then we know there has not yet been
+				// any evidence the client can read this var. Is there
+				// now?
+				overlay.updateClient = overlay.updateClient || valueOrRefsUpdated
 			}
 		}
 	}
