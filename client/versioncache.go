@@ -433,8 +433,7 @@ func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.
 			}
 			clientWrite.SetReferences(clientReferences)
 		default:
-			clientWrite.SetValue([]byte{})
-			clientWrite.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
+			panic(fmt.Sprintf("Internal logic error: attempted to send client update with non-read capability (%v)", u.varUUId))
 		}
 	}
 }
