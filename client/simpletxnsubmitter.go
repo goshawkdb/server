@@ -23,16 +23,16 @@ type SimpleTxnSubmitter struct {
 	connections         map[common.RMId]paxos.Connection
 	connPub             paxos.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
-	onShutdown          map[*func(bool)]server.EmptyStruct
+	onShutdown          map[*func(bool) error]server.EmptyStruct
 	resolver            *ch.Resolver
 	hashCache           *ch.ConsistentHashCache
 	topology            *configuration.Topology
 	rng                 *rand.Rand
-	bufferedSubmissions []func()
+	bufferedSubmissions []func() error
 }
 
-type txnOutcomeConsumer func(common.RMId, *eng.TxnReader, *msgs.Outcome)
-type TxnCompletionConsumer func(*eng.TxnReader, *msgs.Outcome, error)
+type txnOutcomeConsumer func(common.RMId, *eng.TxnReader, *msgs.Outcome) error
+type TxnCompletionConsumer func(*eng.TxnReader, *msgs.Outcome, error) error
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -44,7 +44,7 @@ func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.Ser
 		connections:      nil,
 		connPub:          connPub,
 		outcomeConsumers: make(map[common.TxnId]txnOutcomeConsumer),
-		onShutdown:       make(map[*func(bool)]server.EmptyStruct),
+		onShutdown:       make(map[*func(bool) error]server.EmptyStruct),
 		hashCache:        cache,
 		rng:              rng,
 	}
@@ -71,13 +71,14 @@ func (sts *SimpleTxnSubmitter) EnsurePositions(varPosMap map[common.VarUUId]*com
 	}
 }
 
-func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
 	txnId := txn.Id
 	if consumer, found := sts.outcomeConsumers[*txnId]; found {
-		consumer(sender, txn, outcome)
+		return consumer(sender, txn, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
+		return nil
 	}
 }
 
@@ -105,7 +106,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(*txnCap)
 
-	shutdownFun := func(shutdown bool) {
+	shutdownFun := func(shutdown bool) error {
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 		if delay == 0 {
@@ -125,53 +126,61 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 				// problem with these msgs getting to the propposers.
 				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 			}
-			continuation(nil, nil, nil)
+			return continuation(nil, nil, nil)
+		} else {
+			return nil
 		}
 	}
 	shutdownFunPtr := &shutdownFun
 	sts.onShutdown[shutdownFunPtr] = server.EmptyStructVal
 
 	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.FInc()), acceptors)
-	consumer := func(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+	consumer := func(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
-			shutdownFun(false)
-			continuation(txn, outcome, nil)
+			if err := shutdownFun(false); err != nil {
+				return err
+			} else {
+				return continuation(txn, outcome, nil)
+			}
 		}
+		return nil
 	}
 	sts.outcomeConsumers[*txnId] = consumer
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool) {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool, vc versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
-		fun := func() { sts.SubmitClientTransaction(ctxnCap, txnId, continuation, delay, useNextVersion) }
+		fun := func() error {
+			return sts.SubmitClientTransaction(ctxnCap, txnId, continuation, delay, useNextVersion, vc)
+		}
 		if sts.bufferedSubmissions == nil {
-			sts.bufferedSubmissions = []func(){fun}
+			sts.bufferedSubmissions = []func() error{fun}
 		} else {
 			sts.bufferedSubmissions = append(sts.bufferedSubmissions, fun)
 		}
-		return
+		return nil
 	}
 	version := sts.topology.Version
 	if next := sts.topology.Next(); next != nil && useNextVersion {
 		version = next.Version
 	}
-	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version)
+	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version, vc)
 	if err != nil {
-		continuation(nil, nil, err)
-		return
+		return continuation(nil, nil, err)
 	}
 	sts.SubmitTransaction(txnCap, txnId, activeRMs, continuation, delay)
+	return nil
 }
 
-func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) {
+func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) error {
 	server.Log("STS Topology Changed", topology)
 	if topology.IsBlank() {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.
-		return
+		return nil
 	}
 	sts.topology = topology
 	sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
@@ -181,18 +190,18 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 			sts.hashCache.AddPosition(root.VarUUId, root.Positions)
 		}
 	}
-	sts.calculateDisabledHashcodes()
+	return sts.calculateDisabledHashcodes()
 }
 
-func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) {
+func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
 	server.Log("STS ServerConnectionsChanged", servers)
 	sts.connections = servers
-	sts.calculateDisabledHashcodes()
+	return sts.calculateDisabledHashcodes()
 }
 
-func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() {
+func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() error {
 	if sts.topology == nil || sts.connections == nil {
-		return
+		return nil
 	}
 	sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
 	for _, rmId := range sts.topology.RMs() {
@@ -209,9 +218,12 @@ func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() {
 		funcs := sts.bufferedSubmissions
 		sts.bufferedSubmissions = nil
 		for _, fun := range funcs {
-			fun()
+			if err := fun(); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func (sts *SimpleTxnSubmitter) Shutdown() {
@@ -220,7 +232,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
@@ -238,7 +250,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, 
 	actionsWrapper.SetActions(actions)
 	picker := ch.NewCombinationPicker(int(sts.topology.FInc), sts.disabledHashCodes)
 
-	rmIdToActionIndices, err := sts.translateActions(actionsListSeg, picker, &actions, &clientActions)
+	rmIdToActionIndices, err := sts.translateActions(actionsListSeg, picker, &actions, &clientActions, vc)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -278,7 +290,8 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 	}
 }
 
-func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, error) {
+// translate from client representation to server representation
+func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc versionCache) (map[common.RMId]*[]int, error) {
 
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
@@ -288,34 +301,35 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 		clientAction := clientActions.At(idx)
 		action := actions.At(idx)
 		action.SetVarId(clientAction.VarId())
+		vUUId := common.MakeVarUUId(clientAction.VarId())
 
 		var err error
 		var hashCodes []common.RMId
 
 		switch clientAction.Which() {
 		case cmsgs.CLIENTACTION_READ:
-			sts.translateRead(&action, &clientAction)
+			err = sts.translateRead(&action, clientAction.Read())
 
 		case cmsgs.CLIENTACTION_WRITE:
-			sts.translateWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
+			err = sts.translateWrite(vc, outgoingSeg, &referencesInNeedOfPositions, vUUId, &action, clientAction.Write())
 
 		case cmsgs.CLIENTACTION_READWRITE:
-			sts.translateReadWrite(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
+			err = sts.translateReadWrite(vc, outgoingSeg, &referencesInNeedOfPositions, vUUId, &action, clientAction.Readwrite())
 
 		case cmsgs.CLIENTACTION_CREATE:
 			var positions *common.Positions
-			positions, hashCodes, err = sts.translateCreate(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
-			if err != nil {
-				return nil, err
-			}
-			vUUId := common.MakeVarUUId(clientAction.VarId())
+			positions, hashCodes, err = sts.translateCreate(vc, outgoingSeg, &referencesInNeedOfPositions, vUUId, &action, clientAction.Create())
 			createdPositions[*vUUId] = positions
 
 		case cmsgs.CLIENTACTION_ROLL:
-			sts.translateRoll(outgoingSeg, &referencesInNeedOfPositions, &action, &clientAction)
+			err = sts.translateRoll(vc, outgoingSeg, &referencesInNeedOfPositions, &action, clientAction.Roll())
 
 		default:
 			panic(fmt.Sprintf("Unexpected action type: %v", clientAction.Which()))
+		}
+
+		if err != nil {
+			return nil, err
 		}
 
 		if hashCodes == nil {
@@ -379,71 +393,92 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 	return rmIdToActionIndices, nil
 }
 
-func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientAction *cmsgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientRead cmsgs.ClientActionRead) error {
 	action.SetRead()
-	clientRead := clientAction.Read()
 	read := action.Read()
 	read.SetVersion(clientRead.Version())
+	return nil
 }
 
-func (sts *SimpleTxnSubmitter) translateWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateWrite(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientWrite cmsgs.ClientActionWrite) error {
 	action.SetWrite()
-	clientWrite := clientAction.Write()
 	write := action.Write()
 	write.SetValue(clientWrite.Value())
 	clientReferences := clientWrite.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	write.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
+	if err != nil {
+		return err
+	}
+	write.SetReferences(*refs)
+	return nil
 }
 
-func (sts *SimpleTxnSubmitter) translateReadWrite(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateReadWrite(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientReadWrite cmsgs.ClientActionReadwrite) error {
+	clientReferences := clientReadWrite.References()
 	action.SetReadwrite()
-	clientReadWrite := clientAction.Readwrite()
 	readWrite := action.Readwrite()
 	readWrite.SetVersion(clientReadWrite.Version())
 	readWrite.SetValue(clientReadWrite.Value())
-	clientReferences := clientReadWrite.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	readWrite.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
+	if err != nil {
+		return err
+	}
+	readWrite.SetReferences(*refs)
+	return nil
 }
 
-func (sts *SimpleTxnSubmitter) translateCreate(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) (*common.Positions, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) translateCreate(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientCreate cmsgs.ClientActionCreate) (*common.Positions, []common.RMId, error) {
 	action.SetCreate()
-	clientCreate := clientAction.Create()
 	create := action.Create()
 	create.SetValue(clientCreate.Value())
-	vUUId := common.MakeVarUUId(clientAction.VarId())
 	positions, hashCodes, err := sts.hashCache.CreatePositions(vUUId, int(sts.topology.MaxRMCount))
 	if err != nil {
 		return nil, nil, err
 	}
 	create.SetPositions((capn.UInt8List)(*positions))
 	clientReferences := clientCreate.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	create.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
+	if err != nil {
+		return nil, nil, err
+	}
+	create.SetReferences(*refs)
 	return positions, hashCodes, nil
 }
 
-func (sts *SimpleTxnSubmitter) translateRoll(outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientAction *cmsgs.ClientAction) {
+func (sts *SimpleTxnSubmitter) translateRoll(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientRoll cmsgs.ClientActionRoll) error {
 	action.SetRoll()
-	clientRoll := clientAction.Roll()
 	roll := action.Roll()
 	roll.SetVersion(clientRoll.Version())
 	roll.SetValue(clientRoll.Value())
 	clientReferences := clientRoll.References()
-	references := msgs.NewVarIdPosList(outgoingSeg, clientReferences.Len())
-	roll.SetReferences(references)
-	copyReferences(&clientReferences, &references, referencesInNeedOfPositions)
+	refs, err := copyReferences(vc, outgoingSeg, referencesInNeedOfPositions, &clientReferences)
+	if err != nil {
+		return err
+	}
+	roll.SetReferences(*refs)
+	return nil
 }
 
-func copyReferences(clientReferences *capn.DataList, references *msgs.VarIdPos_List, referencesInNeedOfPositions *[]*msgs.VarIdPos) {
+func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, clientReferences *cmsgs.ClientVarIdPos_List) (*msgs.VarIdPos_List, error) {
+	refs := msgs.NewVarIdPosList(seg, clientReferences.Len())
 	for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
-		vUUIdPos := references.At(idx)
-		vUUId := clientReferences.At(idx)
-		vUUIdPos.SetId(vUUId)
+		clientRef := clientReferences.At(idx)
+		vUUIdPos := refs.At(idx)
+		target := common.MakeVarUUId(clientRef.VarId())
+		vUUIdPos.SetId(target[:])
+		caps := clientRef.Capability()
+		if err := validateCapability(vc, target, caps); err != nil {
+			return nil, err
+		}
+		vUUIdPos.SetCapability(caps)
 		*referencesInNeedOfPositions = append(*referencesInNeedOfPositions, &vUUIdPos)
 	}
+	return &refs, nil
+}
+
+func validateCapability(vc versionCache, target *common.VarUUId, cap cmsgs.Capability) error {
+	if !vc.EnsureSubset(target, cap) {
+		return fmt.Errorf("Attempt made to grant wider capabilities on %v than acceptable", target)
+	}
+	return nil
 }

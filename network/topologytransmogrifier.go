@@ -1791,7 +1791,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 		action.SetCreate()
 		create := action.Create()
 		create.SetValue([]byte{})
-		create.SetReferences(seg.NewDataList(0))
+		create.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
 		root := &roots[idx]
 		root.VarUUId = vUUId
 	}

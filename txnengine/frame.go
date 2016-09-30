@@ -852,14 +852,16 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	}
 	posMap := make(map[common.VarUUId]*common.Positions)
 	posMap[*fo.v.UUId] = fo.v.positions
-	refVarList := seg.NewDataList(refs.Len())
+	refVarList := cmsgs.NewClientVarIdPosList(seg, refs.Len())
 	roll.SetReferences(refVarList)
 	for idx, l := 0, refs.Len(); idx < l; idx++ {
 		ref := refs.At(idx)
 		vUUId := common.MakeVarUUId(ref.Id())
 		pos := common.Positions(ref.Positions())
 		posMap[*vUUId] = &pos
-		refVarList.Set(idx, vUUId[:])
+		varIdPos := refVarList.At(idx)
+		varIdPos.SetVarId(vUUId[:])
+		varIdPos.SetCapability(ref.Capability())
 	}
 	fo.rollTxn = &ctxn
 	fo.rollTxnPos = posMap

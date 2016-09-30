@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error)
+type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error) error
 
 type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
@@ -22,10 +22,10 @@ type ClientTxnSubmitter struct {
 	initialDelay time.Duration
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
-		versionCache:       NewVersionCache(),
+		versionCache:       NewVersionCache(roots),
 		txnLive:            false,
 		initialDelay:       time.Duration(0),
 	}
@@ -37,10 +37,13 @@ func (cts *ClientTxnSubmitter) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation ClientTxnCompletionConsumer) {
+func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation ClientTxnCompletionConsumer) error {
 	if cts.txnLive {
-		continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
-		return
+		return continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
+	}
+
+	if err := cts.versionCache.ValidateTransaction(ctxnCap); err != nil {
+		return continuation(nil, err)
 	}
 
 	seg := capn.NewBuffer(nil)
@@ -56,11 +59,10 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	start := time.Now()
 
 	var cont TxnCompletionConsumer
-	cont = func(txn *eng.TxnReader, outcome *msgs.Outcome, err error) {
+	cont = func(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
 		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
-			continuation(nil, err)
-			return
+			return continuation(nil, err)
 		}
 		txnId := txn.Id
 		end := time.Now()
@@ -74,8 +76,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			cts.addCreatesToCache(txn)
 			cts.txnLive = false
 			cts.initialDelay = delay >> 1
-			continuation(&clientOutcome, nil)
-			return
+			return continuation(&clientOutcome, nil)
 
 		default:
 			abort := outcome.Abort()
@@ -90,8 +91,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
 					cts.initialDelay = delay >> 1
-					continuation(&clientOutcome, nil)
-					return
+					return continuation(&clientOutcome, nil)
 				}
 			}
 			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
@@ -111,13 +111,13 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			newCtxnCap.SetRetry(ctxnCap.Retry())
 			newCtxnCap.SetActions(ctxnCap.Actions())
 
-			cts.SimpleTxnSubmitter.SubmitClientTransaction(&newCtxnCap, curTxnId, cont, delay, false)
+			return cts.SimpleTxnSubmitter.SubmitClientTransaction(&newCtxnCap, curTxnId, cont, delay, false, cts.versionCache)
 		}
 	}
 
 	cts.txnLive = true
 	// fmt.Printf("%v ", delay)
-	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, curTxnId, cont, delay, false)
+	return cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, curTxnId, cont, delay, false, cts.versionCache)
 }
 
 func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {
@@ -132,39 +132,19 @@ func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {
 	}
 }
 
-func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) cmsgs.ClientUpdate_List {
+func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[common.TxnId]*[]*update) cmsgs.ClientUpdate_List {
 	clientUpdates := cmsgs.NewClientUpdateList(seg, len(updates))
 	idx := 0
-	for update, actions := range updates {
+	for txnId, actions := range updates {
 		clientUpdate := clientUpdates.At(idx)
 		idx++
-		clientUpdate.SetVersion(update.TxnId())
-		clientActions := cmsgs.NewClientActionList(seg, len(actions))
+		clientUpdate.SetVersion(txnId[:])
+		clientActions := cmsgs.NewClientActionList(seg, len(*actions))
 		clientUpdate.SetActions(clientActions)
 
-		for idy, action := range actions {
+		for idy, action := range *actions {
 			clientAction := clientActions.At(idy)
-			clientAction.SetVarId(action.VarId())
-			switch action.Which() {
-			case msgs.ACTION_MISSING:
-				clientAction.SetDelete()
-			case msgs.ACTION_WRITE:
-				clientAction.SetWrite()
-				write := action.Write()
-				clientWrite := clientAction.Write()
-				clientWrite.SetValue(write.Value())
-				references := write.References()
-				clientReferences := seg.NewDataList(references.Len())
-				clientWrite.SetReferences(clientReferences)
-				for idz, n := 0, references.Len(); idz < n; idz++ {
-					ref := references.At(idz)
-					clientReferences.Set(idz, ref.Id())
-					positions := common.Positions(ref.Positions())
-					cts.hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
-				}
-			default:
-				panic(fmt.Sprintf("Unexpected action type: %v", action.Which()))
-			}
+			action.AddToClientAction(cts.hashCache, seg, &clientAction)
 		}
 	}
 	return clientUpdates

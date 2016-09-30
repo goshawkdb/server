@@ -41,8 +41,8 @@ struct Fingerprint {
 }
 
 struct Root {
-  name         @0: Text;
-  capabilities @1: Common.Capabilities;
+  name       @0: Text;
+  capability @1: Common.Capability;
 }
 
 struct ConditionPair {
