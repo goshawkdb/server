@@ -111,6 +111,7 @@ func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outc
 	// worry about that here.
 	tOut.outcomeReceivedCount++
 	tOut.acceptors[acceptorOutcome.idx] = acceptorId
+	acceptorOutcome.tOut = tOut
 
 	allAgreed := tOut.outcomeReceivedCount == len(oa.acceptorOutcomes)
 	if oa.winningOutcome == nil && oa.fInc == tOut.outcomeReceivedCount {
