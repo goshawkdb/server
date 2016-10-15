@@ -401,6 +401,7 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		// frame write clock elem.
 		if actClockElem < reqClockElem {
 			server.Log(fo.frame, "ReadLearnt", txn, "ignored, too old")
+			fo.maybeStartRoll()
 			return false
 		} else {
 			server.Log(fo.frame, "ReadLearnt", txn, "of future frame")
@@ -448,10 +449,12 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
 	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
 		server.Log(fo.frame, "WriteLearnt", txn, "ignored, too old")
+		fo.maybeStartRoll()
 		return false
 	}
 	if action.Id.Compare(fo.frameTxnId) == common.EQ {
 		server.Log(fo.frame, "WriteLearnt", txn, "is duplicate of current frame")
+		fo.maybeStartRoll()
 		return false
 	}
 	if actClockElem == reqClockElem {
@@ -715,8 +718,10 @@ func (fo *frameOpen) maybeCreateChild() {
 	}
 
 	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.writeTxnActions, winner.outcomeClock.AsMutable(), written)
+	fo.v.SetCurFrame(fo.child, winner, positions)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
+		server.Log(fo.frame, "new frame learning future reads")
 		if !fo.child.ReadLearnt(action) {
 			action.LocallyComplete()
 		}
@@ -727,7 +732,6 @@ func (fo *frameOpen) maybeCreateChild() {
 	fo.writeVoteClock = nil
 	fo.clientWrites = nil
 	fo.rollTxn = nil
-	fo.v.SetCurFrame(fo.child, winner, positions)
 }
 
 func (fo *frameOpen) basicRollCondition() bool {
@@ -754,6 +758,7 @@ func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 			// fmt.Printf("r%v\n", fo.v.UUId)
 			fo.startRoll()
 		} else {
+			server.Log(fo.frame, "Roll callback scheduled")
 			if then == nil {
 				then = &now
 			}
