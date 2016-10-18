@@ -111,13 +111,13 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			newCtxnCap.SetRetry(ctxnCap.Retry())
 			newCtxnCap.SetActions(ctxnCap.Actions())
 
-			return cts.SimpleTxnSubmitter.SubmitClientTransaction(&newCtxnCap, curTxnId, cont, delay, false, cts.versionCache)
+			return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, &newCtxnCap, curTxnId, cont, delay, false, cts.versionCache)
 		}
 	}
 
 	cts.txnLive = true
 	// fmt.Printf("%v ", delay)
-	return cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, curTxnId, cont, delay, false, cts.versionCache)
+	return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, ctxnCap, curTxnId, cont, delay, false, cts.versionCache)
 }
 
 func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {

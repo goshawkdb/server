@@ -754,9 +754,13 @@ func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 		now := time.Now()
 		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
 		probOfZero := fo.v.poisson.P(quietDuration, 0, now)
-		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (then != nil && now.Sub(*then) > server.VarRollDelayMax)) {
+		elapsed := now.Sub(*then)
+		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (then != nil && elapsed > server.VarRollDelayMax)) {
 			// fmt.Printf("r%v\n", fo.v.UUId)
-			fo.startRoll()
+			fo.startRoll(rollCallback{
+				frameOpen: fo,
+				forceRoll: elapsed > server.VarRollForceNotFirstAfter,
+			})
 		} else {
 			server.Log(fo.frame, "Roll callback scheduled")
 			if then == nil {
@@ -778,13 +782,13 @@ func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 	}
 }
 
-func (fo *frameOpen) startRoll() {
+func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	fo.rollActive = true
 	// must do roll txn creation in the main go-routine
 	ctxn, varPosMap := fo.createRollClientTxn()
 	go func() {
 		server.Log(fo.frame, "Starting roll")
-		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap)
+		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, rollCB.rollTranslationCallback)
 		ow := ""
 		if outcome != nil {
 			ow = fmt.Sprint(outcome.Which())
@@ -808,6 +812,35 @@ func (fo *frameOpen) startRoll() {
 			}
 		})
 	}()
+}
+
+type rollCallback struct {
+	*frameOpen
+	forceRoll bool
+}
+
+// careful in here: we'll be running this inside localConnection's actor.
+func (rc rollCallback) rollTranslationCallback(cAction *cmsgs.ClientAction, action *msgs.Action, hashCodes []common.RMId, connections map[common.RMId]bool) error {
+	// We cannot roll for anyone else. This could try to happen during
+	// immigration, which is very bad because we will probably have the
+	// wrong hashcodes so could cause divergence.
+	found := false
+	for _, rmId := range hashCodes {
+		if found = rmId == rc.v.vm.RMId; found {
+			break
+		}
+	}
+	if !found {
+		return AbortRollNotInPermutation
+	}
+
+	// If we're not first then first must not be active
+	if !rc.forceRoll && hashCodes[0] != rc.v.vm.RMId {
+		if connections[hashCodes[0]] {
+			return AbortRollNotFirst
+		}
+	}
+	return nil
 }
 
 func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions) {

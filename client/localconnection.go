@@ -86,10 +86,11 @@ func (lcmsq *localConnectionMsgSyncQuery) maybeClose() {
 type localConnectionMsgRunClientTxn struct {
 	localConnectionMsgBasic
 	localConnectionMsgSyncQuery
-	txn       *cmsgs.ClientTxn
-	varPosMap map[common.VarUUId]*common.Positions
-	txnReader *eng.TxnReader
-	outcome   *msgs.Outcome
+	txn                 *cmsgs.ClientTxn
+	varPosMap           map[common.VarUUId]*common.Positions
+	translationCallback eng.TranslationCallback
+	txnReader           *eng.TxnReader
+	outcome             *msgs.Outcome
 }
 
 func (lcmrct *localConnectionMsgRunClientTxn) consumer(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
@@ -189,10 +190,11 @@ func (lc *LocalConnection) TopologyChanged(topology *configuration.Topology, don
 	}
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions) (*eng.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*eng.TxnReader, *msgs.Outcome, error) {
 	query := &localConnectionMsgRunClientTxn{
-		txn:       txn,
-		varPosMap: varPosMap,
+		txn:                 txn,
+		varPosMap:           varPosMap,
+		translationCallback: translationCallback,
 	}
 	query.init()
 	if lc.enqueueQuerySync(query, query.resultChan) {
@@ -323,7 +325,7 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
-	return lc.submitter.SubmitClientTransaction(txn, txnId, txnQuery.consumer, 0, true, nil)
+	return lc.submitter.SubmitClientTransaction(txnQuery.translationCallback, txn, txnId, txnQuery.consumer, 0, true, nil)
 }
 
 func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {
