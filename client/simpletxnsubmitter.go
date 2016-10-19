@@ -21,6 +21,7 @@ type SimpleTxnSubmitter struct {
 	bootCount           uint32
 	disabledHashCodes   map[common.RMId]server.EmptyStruct
 	connections         map[common.RMId]paxos.Connection
+	connectionsBool     map[common.RMId]bool
 	connPub             paxos.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
 	onShutdown          map[*func(bool) error]server.EmptyStruct
@@ -150,11 +151,11 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool, vc versionCache) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool, vc versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
 		fun := func() error {
-			return sts.SubmitClientTransaction(ctxnCap, txnId, continuation, delay, useNextVersion, vc)
+			return sts.SubmitClientTransaction(translationCallback, ctxnCap, txnId, continuation, delay, useNextVersion, vc)
 		}
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func() error{fun}
@@ -167,7 +168,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	if next := sts.topology.Next(); next != nil && useNextVersion {
 		version = next.Version
 	}
-	txnCap, activeRMs, _, err := sts.clientToServerTxn(ctxnCap, version, vc)
+	txnCap, activeRMs, _, err := sts.clientToServerTxn(translationCallback, ctxnCap, version, vc)
 	if err != nil {
 		return continuation(nil, nil, err)
 	}
@@ -196,6 +197,10 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
 	server.Log("STS ServerConnectionsChanged", servers)
 	sts.connections = servers
+	sts.connectionsBool = make(map[common.RMId]bool, len(servers))
+	for k := range servers {
+		sts.connectionsBool[k] = true
+	}
 	return sts.calculateDisabledHashcodes()
 }
 
@@ -232,7 +237,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
@@ -250,7 +255,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(clientTxnCap *cmsgs.ClientTxn, 
 	actionsWrapper.SetActions(actions)
 	picker := ch.NewCombinationPicker(int(sts.topology.FInc), sts.disabledHashCodes)
 
-	rmIdToActionIndices, err := sts.translateActions(actionsListSeg, picker, &actions, &clientActions, vc)
+	rmIdToActionIndices, err := sts.translateActions(translationCallback, actionsListSeg, picker, &actions, &clientActions, vc)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -291,7 +296,7 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 }
 
 // translate from client representation to server representation
-func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc versionCache) (map[common.RMId]*[]int, error) {
+func (sts *SimpleTxnSubmitter) translateActions(translationCallback eng.TranslationCallback, outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc versionCache) (map[common.RMId]*[]int, error) {
 
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
@@ -338,24 +343,10 @@ func (sts *SimpleTxnSubmitter) translateActions(outgoingSeg *capn.Segment, picke
 				return nil, err
 			}
 		}
-		if clientAction.Which() == cmsgs.CLIENTACTION_ROLL {
-			// We cannot roll for anyone else. This could try to happen
-			// during immigration.
-			found := false
-			for _, rmId := range hashCodes {
-				if found = rmId == sts.rmId; found {
-					break
-				}
-			}
-			if !found {
-				return nil, eng.AbortRollNotInPermutation
-			}
 
-			// If we're not first then first must not be active
-			if hashCodes[0] != sts.rmId {
-				if _, found := sts.connections[hashCodes[0]]; found {
-					return nil, eng.AbortRollNotFirst
-				}
+		if translationCallback != nil {
+			if err = translationCallback(&clientAction, &action, hashCodes, sts.connectionsBool); err != nil {
+				return nil, err
 			}
 		}
 

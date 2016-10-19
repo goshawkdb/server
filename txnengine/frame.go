@@ -734,17 +734,17 @@ func (fo *frameOpen) maybeCreateChild() {
 	fo.rollTxn = nil
 }
 
-func (fo *frameOpen) basicRollCondition() bool {
-	return fo.rollScheduled == nil && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
+func (fo *frameOpen) basicRollCondition(rescheduling bool) bool {
+	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
 		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	fo.maybeStartRollFrom(nil)
+	fo.maybeStartRollFrom(false)
 }
 
-func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
-	if fo.basicRollCondition() {
+func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
+	if fo.basicRollCondition(rescheduling) {
 		multiplier := 0
 		for node := fo.reads.First(); node != nil; node = node.Next() {
 			if node.Value == committed {
@@ -754,37 +754,45 @@ func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 		now := time.Now()
 		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
 		probOfZero := fo.v.poisson.P(quietDuration, 0, now)
-		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (then != nil && now.Sub(*then) > server.VarRollDelayMax)) {
-			// fmt.Printf("r%v\n", fo.v.UUId)
-			fo.startRoll()
+		elapsed := time.Duration(0)
+		if fo.rollScheduled == nil {
+			fo.rollScheduled = &now
 		} else {
-			server.Log(fo.frame, "Roll callback scheduled")
-			if then == nil {
-				then = &now
-			}
-			fo.rollScheduled = then
-			// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
-			fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
-				fo.v.applyToVar(func() {
-					fo.rollScheduled = nil
-					fo.maybeStartRollFrom(then)
-				})
+			elapsed = now.Sub(*fo.rollScheduled)
+		}
+		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (elapsed > server.VarRollDelayMax)) {
+			// fmt.Printf("%v r%v %v\n", now, fo.v.UUId, elapsed)
+			fo.startRoll(rollCallback{
+				frameOpen: fo,
+				forceRoll: elapsed > server.VarRollForceNotFirstAfter,
 			})
-			fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarRollDelayMin)))
-			if fo.scheduleInterval > server.VarRollDelayMax {
-				fo.scheduleInterval = fo.scheduleInterval / 2
-			}
+		} else {
+			fo.scheduleRoll()
 		}
 	}
 }
 
-func (fo *frameOpen) startRoll() {
+func (fo *frameOpen) scheduleRoll() {
+	server.Log(fo.frame, "Roll callback scheduled")
+	// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
+	fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
+		fo.v.applyToVar(func() {
+			fo.maybeStartRollFrom(true)
+		})
+	})
+	fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarRollDelayMin)))
+	if fo.scheduleInterval > server.VarRollDelayMax {
+		fo.scheduleInterval = fo.scheduleInterval / 2
+	}
+}
+
+func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	fo.rollActive = true
 	// must do roll txn creation in the main go-routine
 	ctxn, varPosMap := fo.createRollClientTxn()
 	go func() {
 		server.Log(fo.frame, "Starting roll")
-		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap)
+		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, rollCB.rollTranslationCallback)
 		ow := ""
 		if outcome != nil {
 			ow = fmt.Sprint(outcome.Which())
@@ -795,19 +803,49 @@ func (fo *frameOpen) startRoll() {
 		// fmt.Printf("%v r%v (%v)\n", fo.v.UUId, ow, err == AbortRollNotFirst)
 		server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
 		fo.v.applyToVar(func() {
-			fo.rollActive = false
 			if fo.v.curFrame != fo.frame {
 				return
 			}
+			fo.rollActive = false
 			if (outcome == nil && err != nil) || (outcome != nil && outcome.Which() != msgs.OUTCOME_COMMIT) {
 				if err == AbortRollNotInPermutation {
+					// we need to go to sleep - this var has been removed from this RM
+					fo.rollScheduled = nil
 					fo.v.maybeMakeInactive()
 				} else {
-					fo.maybeStartRoll()
+					fo.scheduleRoll()
 				}
 			}
 		})
 	}()
+}
+
+type rollCallback struct {
+	*frameOpen
+	forceRoll bool
+}
+
+// careful in here: we'll be running this inside localConnection's actor.
+func (rc rollCallback) rollTranslationCallback(cAction *cmsgs.ClientAction, action *msgs.Action, hashCodes []common.RMId, connections map[common.RMId]bool) error {
+	// We cannot roll for anyone else. This could try to happen during
+	// immigration, which is very bad because we will probably have the
+	// wrong hashcodes so could cause divergence.
+	found := false
+	for _, rmId := range hashCodes {
+		if found = rmId == rc.v.vm.RMId; found {
+			break
+		}
+	}
+	if !found {
+		return AbortRollNotInPermutation
+	}
+	// If we're not first then first must not be active
+	if !rc.forceRoll && hashCodes[0] != rc.v.vm.RMId {
+		if connections[hashCodes[0]] {
+			return AbortRollNotFirst
+		}
+	}
+	return nil
 }
 
 func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions) {
