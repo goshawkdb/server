@@ -734,17 +734,17 @@ func (fo *frameOpen) maybeCreateChild() {
 	fo.rollTxn = nil
 }
 
-func (fo *frameOpen) basicRollCondition() bool {
-	return fo.rollScheduled == nil && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
+func (fo *frameOpen) basicRollCondition(rescheduling bool) bool {
+	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
 		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
-	fo.maybeStartRollFrom(nil)
+	fo.maybeStartRollFrom(false)
 }
 
-func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
-	if fo.basicRollCondition() {
+func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
+	if fo.basicRollCondition(rescheduling) {
 		multiplier := 0
 		for node := fo.reads.First(); node != nil; node = node.Next() {
 			if node.Value == committed {
@@ -754,31 +754,35 @@ func (fo *frameOpen) maybeStartRollFrom(then *time.Time) {
 		now := time.Now()
 		quietDuration := server.VarRollTimeExpectation * time.Duration(multiplier)
 		probOfZero := fo.v.poisson.P(quietDuration, 0, now)
-		elapsed := now.Sub(*then)
-		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (then != nil && elapsed > server.VarRollDelayMax)) {
-			// fmt.Printf("r%v\n", fo.v.UUId)
+		elapsed := time.Duration(0)
+		if fo.rollScheduled == nil {
+			fo.rollScheduled = &now
+		} else {
+			elapsed = now.Sub(*fo.rollScheduled)
+		}
+		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (elapsed > server.VarRollDelayMax)) {
+			// fmt.Printf("%v r%v %v\n", now, fo.v.UUId, elapsed)
 			fo.startRoll(rollCallback{
 				frameOpen: fo,
 				forceRoll: elapsed > server.VarRollForceNotFirstAfter,
 			})
 		} else {
-			server.Log(fo.frame, "Roll callback scheduled")
-			if then == nil {
-				then = &now
-			}
-			fo.rollScheduled = then
-			// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
-			fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
-				fo.v.applyToVar(func() {
-					fo.rollScheduled = nil
-					fo.maybeStartRollFrom(then)
-				})
-			})
-			fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarRollDelayMin)))
-			if fo.scheduleInterval > server.VarRollDelayMax {
-				fo.scheduleInterval = fo.scheduleInterval / 2
-			}
+			fo.scheduleRoll()
 		}
+	}
+}
+
+func (fo *frameOpen) scheduleRoll() {
+	server.Log(fo.frame, "Roll callback scheduled")
+	// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
+	fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
+		fo.v.applyToVar(func() {
+			fo.maybeStartRollFrom(true)
+		})
+	})
+	fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarRollDelayMin)))
+	if fo.scheduleInterval > server.VarRollDelayMax {
+		fo.scheduleInterval = fo.scheduleInterval / 2
 	}
 }
 
@@ -799,15 +803,17 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 		// fmt.Printf("%v r%v (%v)\n", fo.v.UUId, ow, err == AbortRollNotFirst)
 		server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
 		fo.v.applyToVar(func() {
-			fo.rollActive = false
 			if fo.v.curFrame != fo.frame {
 				return
 			}
+			fo.rollActive = false
 			if (outcome == nil && err != nil) || (outcome != nil && outcome.Which() != msgs.OUTCOME_COMMIT) {
 				if err == AbortRollNotInPermutation {
+					// we need to go to sleep - this var has been removed from this RM
+					fo.rollScheduled = nil
 					fo.v.maybeMakeInactive()
 				} else {
-					fo.maybeStartRoll()
+					fo.scheduleRoll()
 				}
 			}
 		})
@@ -833,7 +839,6 @@ func (rc rollCallback) rollTranslationCallback(cAction *cmsgs.ClientAction, acti
 	if !found {
 		return AbortRollNotInPermutation
 	}
-
 	// If we're not first then first must not be active
 	if !rc.forceRoll && hashCodes[0] != rc.v.vm.RMId {
 		if connections[hashCodes[0]] {
