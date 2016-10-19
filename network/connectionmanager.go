@@ -26,7 +26,7 @@ type ConnectionManager struct {
 	sync.RWMutex
 	localHost                     string
 	RMId                          common.RMId
-	BootCount                     uint32
+	bootcount                     uint32
 	NodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
 	Transmogrifier                *TopologyTransmogrifier
 	topology                      *configuration.Topology
@@ -50,6 +50,10 @@ type serverConnSubscribers struct {
 type topologySubscribers struct {
 	*ConnectionManager
 	subscribers []map[eng.TopologySubscriber]server.EmptyStruct
+}
+
+func (cm *ConnectionManager) BootCount() uint32 {
+	return cm.bootcount
 }
 
 func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg msgs.Message) {
@@ -252,7 +256,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConn
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
-	if bootNumber != cm.BootCount && bootNumber != 0 {
+	if bootNumber != cm.bootcount && bootNumber != 0 {
 		return nil
 	}
 	cm.RLock()
@@ -332,7 +336,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
 	cm := &ConnectionManager{
 		RMId:                          rmId,
-		BootCount:                     bootCount,
+		bootcount:                     bootCount,
 		NodeCertificatePrivateKeyPair: nodeCertPrivKeyPair,
 		servers:           make(map[string]*connectionManagerMsgServerEstablished),
 		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
@@ -624,7 +628,7 @@ func (cm *ConnectionManager) cloneRMToServer() map[common.RMId]paxos.Connection 
 
 func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Address: %v", cm.localHost))
-	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.BootCount))
+	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.bootcount))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", cm.topology))
 	if cm.topology != nil && cm.topology.Next() != nil {
 		sc.Emit(fmt.Sprintf("Next Topology: %v", cm.topology.Next()))

@@ -631,7 +631,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer() *capn.Se
 	localHost := cash.connectionManager.LocalHost()
 	hello.SetLocalHost(localHost)
 	hello.SetRmId(uint32(cash.connectionManager.RMId))
-	hello.SetBootCount(cash.connectionManager.BootCount)
+	hello.SetBootCount(cash.connectionManager.BootCount())
 	tieBreak := cash.rng.Uint32()
 	cash.combinedTieBreak = tieBreak
 	hello.SetTieBreak(tieBreak)
@@ -704,7 +704,7 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer() *capn.Se
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], cach.ConnectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], cach.connectionManager.BootCount)
+	binary.BigEndian.PutUint32(namespace[4:8], cach.connectionManager.BootCount())
 	binary.BigEndian.PutUint32(namespace[8:], uint32(cach.connectionManager.RMId))
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(cach.roots))
@@ -780,7 +780,7 @@ func (cr *connectionRun) start() (bool, error) {
 	}
 	if cr.isClient {
 		servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
-		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount, cr.rootsVar, cr.connectionManager)
+		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount(), cr.rootsVar, cr.connectionManager)
 		cr.submitter.TopologyChanged(cr.topology)
 		cr.submitter.ServerConnectionsChanged(servers)
 	}
