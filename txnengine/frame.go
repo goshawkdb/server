@@ -792,8 +792,8 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	fo.rollActive = true
 	// must do roll txn creation in the main go-routine
 	ctxn, varPosMap := fo.createRollClientTxn()
+	server.Log(fo.frame, "Starting roll")
 	go func() {
-		server.Log(fo.frame, "Starting roll")
 		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, rollCB.rollTranslationCallback)
 		ow := ""
 		if outcome != nil {
@@ -803,8 +803,8 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 			}
 		}
 		// fmt.Printf("%v r%v (%v)\n", fo.v.UUId, ow, err == AbortRollNotFirst)
-		server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
 		fo.v.applyToVar(func() {
+			server.Log(fo.frame, "Roll finished: outcome", ow, "; err:", err)
 			if fo.v.curFrame != fo.frame {
 				return
 			}
