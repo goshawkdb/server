@@ -769,6 +769,8 @@ func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
 		} else {
 			fo.scheduleRoll()
 		}
+	} else if rescheduling {
+		fo.rollScheduled = nil
 	}
 }
 
