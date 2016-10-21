@@ -1796,7 +1796,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 		root.VarUUId = vUUId
 	}
 	ctxn.SetActions(actions)
-	txnReader, result, err := task.localConnection.RunClientTransaction(&ctxn, nil)
+	txnReader, result, err := task.localConnection.RunClientTransaction(&ctxn, nil, nil)
 	log.Println("Create root result", result, err)
 	if err != nil {
 		return false, nil, err
