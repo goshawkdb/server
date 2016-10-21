@@ -212,6 +212,9 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	} else {
 		outcome.SetTxn(ba.txn.Data)
 		outcome.SetCommit(combinedClock.AsData())
+		if len(ba.vUUIdToBallots) > combinedClock.Len() {
+			panic(fmt.Sprintf("wha... %v, %v, %v", ba.txn.Id, ba.vUUIdToBallots, combinedClock))
+		}
 	}
 
 	ba.outcome = (*outcomeEqualId)(&outcome)
