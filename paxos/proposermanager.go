@@ -29,6 +29,7 @@ type instanceIdPrefix [instanceIdPrefixLen]byte
 type ProposerManager struct {
 	ServerConnectionPublisher
 	RMId          common.RMId
+	BootCount     uint32
 	VarDispatcher *eng.VarDispatcher
 	Exe           *dispatcher.Executor
 	DB            *db.Databases
@@ -41,6 +42,7 @@ func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm Connectio
 	pm := &ProposerManager{
 		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
 		RMId:          rmId,
+		BootCount:     cm.BootCount(),
 		proposals:     make(map[instanceIdPrefix]*proposal),
 		proposers:     make(map[common.TxnId]*Proposer),
 		VarDispatcher: varDispatcher,
@@ -118,6 +120,25 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 			if accept {
 				_, found := pm.topology.RMsRemoved()[sender]
 				accept = !found
+				if accept {
+					accept = false
+					allocations := txn.Txn.Allocations()
+					for idx, l := 0, allocations.Len(); idx < l; idx++ {
+						alloc := allocations.At(idx)
+						rmId := common.RMId(alloc.RmId())
+						if rmId == pm.RMId {
+							accept = alloc.Active() == pm.BootCount
+							break
+						}
+					}
+					if !accept {
+						server.Log(txnId, "Aborting received txn as it was submitted for an older version of us so we may have already voted on it.", pm.BootCount)
+					}
+				} else {
+					server.Log(txnId, "Aborting received txn as sender has been removed from topology.", sender)
+				}
+			} else {
+				server.Log(txnId, "Aborting received txn due to non-matching topology.", txnCap.TopologyVersion())
 			}
 		}
 		if accept {
@@ -126,7 +147,6 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 			proposer.Start()
 
 		} else {
-			server.Log(txnId, "Aborting received txn due to non-matching topology.", txnCap.TopologyVersion())
 			acceptors := GetAcceptorsFromTxn(txnCap)
 			fInc := int(txnCap.FInc())
 			alloc := AllocForRMId(txnCap, pm.RMId)

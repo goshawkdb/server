@@ -21,6 +21,7 @@ type ConnectionManager interface {
 	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
+	BootCount() uint32
 }
 
 type ServerConnectionPublisher interface {

@@ -113,8 +113,7 @@ func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, inst
 }
 
 // For every vUUId involved in this txn, we should see fInc * ballots:
-// one from each RM voting for each vUUId. rmId is the paxos
-// instanceRMId.
+// one from each RM voting for each vUUId.
 func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *eng.TxnReader) *outcomeEqualId {
 	ba.txn = ba.txn.Combine(txn)
 
@@ -175,6 +174,8 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 		vUUIds = append(vUUIds, vBallot.vUUId)
 		if vBallot.result == nil {
 			vBallot.CalculateResult(br, combinedClock)
+		} else if !vBallot.result.Aborted() {
+			combinedClock.MergeInMax(vBallot.result.Clock)
 		}
 		aborted = aborted || vBallot.result.Aborted()
 		deadlock = deadlock || vBallot.result.Vote == eng.AbortDeadlock
@@ -212,6 +213,9 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	} else {
 		outcome.SetTxn(ba.txn.Data)
 		outcome.SetCommit(combinedClock.AsData())
+		if len(ba.vUUIdToBallots) > combinedClock.Len() {
+			panic(fmt.Sprintf("Ballot outcome clock too short! %v, %v, %v", ba.txn.Id, ba.vUUIdToBallots, combinedClock))
+		}
 	}
 
 	ba.outcome = (*outcomeEqualId)(&outcome)
