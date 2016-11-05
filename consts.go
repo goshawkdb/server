@@ -8,7 +8,6 @@ const (
 	ServerVersion                 = "dev"
 	MDBInitialSize                = 1048576
 	TwoToTheSixtyThree            = 9223372036854775808
-	SubmissionInitialBackoff      = 2 * time.Microsecond
 	SubmissionMaxSubmitDelay      = 2 * time.Second
 	VarRollDelayMin               = 50 * time.Millisecond
 	VarRollDelayMax               = 500 * time.Millisecond

@@ -84,38 +84,38 @@ func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn
 }
 
 // txnCap must be a root
-func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay time.Duration) {
+func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine) {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTxnSubmission(server.SegToBytes(txnCap.Segment))
 
 	server.Log(txnId, "Submitting txn")
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
+	sleeping := delay != nil && delay.Cur > 0
 	var removeSenderCh chan chan server.EmptyStruct
-	if delay == 0 {
-		sts.connPub.AddServerConnectionSubscriber(txnSender)
-	} else {
+	if sleeping {
 		removeSenderCh = make(chan chan server.EmptyStruct)
-		go func() {
-			// fmt.Printf("%v ", delay)
-			time.Sleep(delay)
+		// fmt.Printf("%v ", delay.Cur)
+		delay.After(func() {
 			sts.connPub.AddServerConnectionSubscriber(txnSender)
 			doneChan := <-removeSenderCh
 			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 			close(doneChan)
-		}()
+		})
+	} else {
+		sts.connPub.AddServerConnectionSubscriber(txnSender)
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(*txnCap)
 
 	shutdownFun := func(shutdown bool) error {
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
-		if delay == 0 {
-			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
-		} else {
+		if sleeping {
 			txnSenderRemovedChan := make(chan server.EmptyStruct)
 			removeSenderCh <- txnSenderRemovedChan
 			<-txnSenderRemovedChan
+		} else {
+			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		}
 		// OSS is safe here - see above.
 		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
@@ -151,7 +151,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay time.Duration, useNextVersion bool, vc versionCache) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine, useNextVersion bool, vc versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
 		fun := func() error {

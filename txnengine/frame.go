@@ -28,7 +28,7 @@ type frame struct {
 	readVoteClock    *VectorClockMutable
 	positionsFound   bool
 	mask             *VectorClockMutable
-	scheduleInterval time.Duration
+	scheduleBackoff  *server.BinaryBackoffEngine
 	frameOpen
 	frameClosed
 	frameErase
@@ -47,13 +47,11 @@ func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions
 	}
 	if parent == nil {
 		f.mask = NewVectorClock().AsMutable()
-		f.scheduleInterval = server.VarRollDelayMin + time.Duration(v.rng.Intn(int(server.VarRollDelayMin)))
+		f.scheduleBackoff = server.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
 	} else {
 		f.mask = parent.mask
-		f.scheduleInterval = parent.scheduleInterval / 2
-		if f.scheduleInterval < server.VarRollDelayMin {
-			f.scheduleInterval = server.VarRollDelayMin + time.Duration(v.rng.Intn(int(server.VarRollDelayMin)))
-		}
+		f.scheduleBackoff = parent.scheduleBackoff
+		f.scheduleBackoff.Shrink(0)
 	}
 	f.init()
 	server.Log(f, "NewFrame")
@@ -776,16 +774,12 @@ func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
 
 func (fo *frameOpen) scheduleRoll() {
 	server.Log(fo.frame, "Roll callback scheduled")
-	// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleInterval)
-	fo.v.vm.ScheduleCallback(fo.scheduleInterval, func(*time.Time) {
+	// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleBackoff.Cur)
+	fo.v.vm.ScheduleCallback(fo.scheduleBackoff.Advance(), func(*time.Time) {
 		fo.v.applyToVar(func() {
 			fo.maybeStartRollFrom(true)
 		})
 	})
-	fo.scheduleInterval += time.Duration(fo.v.rng.Intn(int(server.VarRollDelayMin)))
-	if fo.scheduleInterval > server.VarRollDelayMax {
-		fo.scheduleInterval = fo.scheduleInterval / 2
-	}
 }
 
 func (fo *frameOpen) startRoll(rollCB rollCallback) {

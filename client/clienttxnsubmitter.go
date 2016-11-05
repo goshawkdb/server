@@ -19,15 +19,16 @@ type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
 	versionCache versionCache
 	txnLive      bool
-	initialDelay time.Duration
+	backoff      *server.BinaryBackoffEngine
 }
 
 func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm)
 	return &ClientTxnSubmitter{
-		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
+		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots),
 		txnLive:            false,
-		initialDelay:       time.Duration(0),
+		backoff:            server.NewBinaryBackoffEngine(sts.rng, 0, server.SubmissionMaxSubmitDelay),
 	}
 }
 
@@ -51,11 +52,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	clientOutcome.SetId(ctxnCap.Id())
 
 	curTxnId := common.MakeTxnId(ctxnCap.Id())
-
-	delay := cts.initialDelay
-	if delay < time.Millisecond {
-		delay = time.Duration(0)
-	}
+	cts.backoff.Shrink(time.Millisecond)
 	start := time.Now()
 
 	var cont TxnCompletionConsumer
@@ -75,7 +72,6 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			clientOutcome.SetCommit()
 			cts.addCreatesToCache(txn)
 			cts.txnLive = false
-			cts.initialDelay = delay >> 1
 			return continuation(&clientOutcome, nil)
 
 		default:
@@ -90,17 +86,13 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetFinalId(txnId[:])
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
-					cts.initialDelay = delay >> 1
 					return continuation(&clientOutcome, nil)
 				}
 			}
 			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
 
-			delay = delay + time.Duration(cts.rng.Intn(int(elapsed)))
-			if delay > server.SubmissionMaxSubmitDelay {
-				delay = server.SubmissionMaxSubmitDelay + time.Duration(cts.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
-			}
-			//fmt.Printf("%v ", delay)
+			cts.backoff.AdvanceBy(elapsed)
+			//fmt.Printf("%v ", cts.backoff.Cur)
 
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
 			curTxnIdNum += 1 + uint64(cts.rng.Intn(8))
@@ -111,13 +103,13 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			newCtxnCap.SetRetry(ctxnCap.Retry())
 			newCtxnCap.SetActions(ctxnCap.Actions())
 
-			return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, &newCtxnCap, curTxnId, cont, delay, false, cts.versionCache)
+			return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, &newCtxnCap, curTxnId, cont, cts.backoff, false, cts.versionCache)
 		}
 	}
 
 	cts.txnLive = true
 	// fmt.Printf("%v ", delay)
-	return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, ctxnCap, curTxnId, cont, delay, false, cts.versionCache)
+	return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, ctxnCap, curTxnId, cont, cts.backoff, false, cts.versionCache)
 }
 
 func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {

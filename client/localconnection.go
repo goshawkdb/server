@@ -104,9 +104,10 @@ func (lcmrct *localConnectionMsgRunClientTxn) consumer(txn *eng.TxnReader, outco
 type localConnectionMsgRunTxn struct {
 	localConnectionMsgBasic
 	localConnectionMsgSyncQuery
-	txnCap    *msgs.Txn
+	txn       *msgs.Txn
 	txnId     *common.TxnId
 	activeRMs []common.RMId
+	backoff   *server.BinaryBackoffEngine
 	txnReader *eng.TxnReader
 	outcome   *msgs.Outcome
 }
@@ -204,11 +205,12 @@ func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap 
 	}
 }
 
-// txnCap must be root in its segment
-func (lc *LocalConnection) RunTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs ...common.RMId) (*eng.TxnReader, *msgs.Outcome, error) {
+// txn must be root in its segment
+func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *server.BinaryBackoffEngine, activeRMs ...common.RMId) (*eng.TxnReader, *msgs.Outcome, error) {
 	query := &localConnectionMsgRunTxn{
-		txnCap:    txnCap,
+		txn:       txn,
 		txnId:     txnId,
+		backoff:   backoff,
 		activeRMs: activeRMs,
 	}
 	query.init()
@@ -325,18 +327,18 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
-	return lc.submitter.SubmitClientTransaction(txnQuery.translationCallback, txn, txnId, txnQuery.consumer, 0, true, nil)
+	return lc.submitter.SubmitClientTransaction(txnQuery.translationCallback, txn, txnId, txnQuery.consumer, nil, true, nil)
 }
 
 func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {
 	txnId := txnQuery.txnId
-	txnCap := txnQuery.txnCap
+	txn := txnQuery.txn
 	if txnId == nil {
 		txnId = lc.getNextTxnId()
-		txnCap.SetId(txnId[:])
+		txn.SetId(txnId[:])
 		server.Log("LC starting txn", txnId)
 	}
-	lc.submitter.SubmitTransaction(txnCap, txnId, txnQuery.activeRMs, txnQuery.consumer, 0)
+	lc.submitter.SubmitTransaction(txn, txnId, txnQuery.activeRMs, txnQuery.consumer, txnQuery.backoff)
 }
 
 func (lc *LocalConnection) getNextTxnId() *common.TxnId {
