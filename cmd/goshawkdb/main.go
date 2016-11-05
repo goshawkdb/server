@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
@@ -30,7 +31,7 @@ import (
 func main() {
 	log.SetPrefix(common.ProductName + " ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
+	log.Printf("GoshawkDB Version %s with %s; %v", goshawk.ServerVersion, mdb.Version(), os.Args)
 
 	if s, err := newServer(); err != nil {
 		fmt.Printf("\n%v\n\n", err)
