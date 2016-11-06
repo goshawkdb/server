@@ -67,7 +67,10 @@ func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configurati
 	tt.enqueueQuery(topologyTransmogrifierMsgRequestConfigChange{config: config})
 }
 
-type topologyTransmogrifierMsgSetActiveConnections map[common.RMId]paxos.Connection
+type topologyTransmogrifierMsgSetActiveConnections struct {
+	servers map[common.RMId]paxos.Connection
+	done    func()
+}
 
 func (ttmsac topologyTransmogrifierMsgSetActiveConnections) witness() topologyTransmogrifierMsg {
 	return ttmsac
@@ -159,15 +162,18 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 }
 
 func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{servers: conns})
 }
 
 func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{servers: conns})
 }
 
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{
+		servers: conns,
+		done:    done,
+	})
 }
 
 func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
@@ -215,7 +221,10 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 			case topologyTransmogrifierMsgShutdown:
 				terminate = true
 			case topologyTransmogrifierMsgSetActiveConnections:
-				err = tt.activeConnectionsChange(msgT)
+				err = tt.activeConnectionsChange(msgT.servers)
+				if msgT.done != nil {
+					msgT.done()
+				}
 			case topologyTransmogrifierMsgTopologyObserved:
 				server.Log("Topology: New topology observed:", msgT.topology)
 				err = tt.setActive(msgT.topology)
@@ -1920,7 +1929,8 @@ func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos
 	delete(e.activeBatches, rmId)
 }
 
-func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
+func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+	defer done()
 	if rmId == e.connectionManager.RMId {
 		return
 	}
@@ -2111,7 +2121,8 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	}
 }
 func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]paxos.Connection) {}
-func (it *dbIterator) ConnectionEstablished(common.RMId, paxos.Connection, map[common.RMId]paxos.Connection) {
+func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	done()
 }
 
 type sendBatch struct {

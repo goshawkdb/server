@@ -128,18 +128,24 @@ func (conn *Connection) Status(sc *server.StatusConsumer) {
 	conn.enqueueQuery(connectionMsgStatus{StatusConsumer: sc})
 }
 
-type connectionMsgServerConnectionsChanged map[common.RMId]paxos.Connection
+type connectionMsgServerConnectionsChanged struct {
+	servers map[common.RMId]paxos.Connection
+	done    func()
+}
 
 func (cmdhc connectionMsgServerConnectionsChanged) witness() connectionMsg { return cmdhc }
 
 func (conn *Connection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(connectionMsgServerConnectionsChanged(servers))
+	conn.enqueueQuery(connectionMsgServerConnectionsChanged{servers: servers})
 }
 func (conn *Connection) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(connectionMsgServerConnectionsChanged(servers))
+	conn.enqueueQuery(connectionMsgServerConnectionsChanged{servers: servers})
 }
-func (conn *Connection) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection) {
-	conn.enqueueQuery(connectionMsgServerConnectionsChanged(servers))
+func (conn *Connection) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	conn.enqueueQuery(connectionMsgServerConnectionsChanged{
+		servers: servers,
+		done:    done,
+	})
 }
 
 func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
@@ -267,7 +273,10 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 	case *connectionMsgTopologyChanged:
 		err = conn.topologyChanged(msgT)
 	case connectionMsgServerConnectionsChanged:
-		err = conn.serverConnectionsChanged(msgT)
+		err = conn.serverConnectionsChanged(msgT.servers)
+		if msgT.done != nil {
+			msgT.done()
+		}
 	case connectionMsgStatus:
 		conn.status(msgT.StatusConsumer)
 	default:
@@ -776,10 +785,17 @@ func (cr *connectionRun) start() (bool, error) {
 	cr.beatBytes = server.SegToBytes(seg)
 
 	if cr.isServer {
-		cr.connectionManager.ServerEstablished(cr.Connection, cr.remoteHost, cr.remoteRMId, cr.remoteBootCount, cr.combinedTieBreak, cr.remoteClusterUUId)
+		flushSeg := capn.NewBuffer(nil)
+		flushMsg := msgs.NewRootMessage(flushSeg)
+		flushMsg.SetFlushed()
+		flushBytes := server.SegToBytes(flushSeg)
+		cr.connectionManager.ServerEstablished(cr.Connection, cr.remoteHost, cr.remoteRMId, cr.remoteBootCount, cr.combinedTieBreak, cr.remoteClusterUUId, func() { cr.Send(flushBytes) })
 	}
 	if cr.isClient {
 		servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
+		if servers == nil {
+			return false, fmt.Errorf("Not ready for client connections")
+		}
 		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount(), cr.rootsVar, cr.connectionManager)
 		cr.submitter.TopologyChanged(cr.topology)
 		cr.submitter.ServerConnectionsChanged(servers)

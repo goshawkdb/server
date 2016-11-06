@@ -418,7 +418,7 @@ func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]Connection) {
 
 func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
 
-func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
 	for _, recipient := range s.recipients {
 		if recipient == rmId {
 			conn.Send(s.msg)
@@ -428,4 +428,5 @@ func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn Connec
 	if s.submitter == rmId {
 		conn.Send(s.submitterMsg)
 	}
+	done()
 }

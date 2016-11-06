@@ -546,7 +546,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 	})
 }
 
-func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
 	for _, acc := range s.proposal.acceptors {
 		if acc == rmId {
 			conn.Send(s.msg)
@@ -556,4 +556,5 @@ func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection
 	if bootCount, found := s.proposal.activeRMIds[rmId]; found && bootCount != conn.BootCount() {
 		s.ConnectionLost(rmId, conns)
 	}
+	done()
 }
