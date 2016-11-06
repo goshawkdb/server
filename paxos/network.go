@@ -32,7 +32,7 @@ type ServerConnectionPublisher interface {
 type ServerConnectionSubscriber interface {
 	ConnectedRMs(map[common.RMId]Connection)
 	ConnectionLost(common.RMId, map[common.RMId]Connection)
-	ConnectionEstablished(common.RMId, Connection, map[common.RMId]Connection)
+	ConnectionEstablished(common.RMId, Connection, map[common.RMId]Connection, func())
 }
 
 type Connection interface {
@@ -100,12 +100,23 @@ func (pub *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, serv
 	})
 }
 
-func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn Connection, servers map[common.RMId]Connection) {
+func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn Connection, servers map[common.RMId]Connection, callback func()) {
 	pub.exe.Enqueue(func() {
 		pub.servers = servers
+		resultChan := make(chan server.EmptyStruct, len(pub.subs))
+		done := func() { resultChan <- server.EmptyStructVal }
+		expected := 0
 		for sub := range pub.subs {
-			sub.ConnectionEstablished(gained, conn, servers)
+			expected++
+			sub.ConnectionEstablished(gained, conn, servers, done)
 		}
+		go func() {
+			for expected > 0 {
+				<-resultChan
+				expected--
+			}
+			callback()
+		}()
 	})
 }
 
@@ -145,7 +156,7 @@ func (s *OneShotSender) ConnectedRMs(conns map[common.RMId]Connection) {
 
 func (s *OneShotSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
 
-func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
 	if _, found := s.remaining[rmId]; found {
 		delete(s.remaining, rmId)
 		conn.Send(s.msg)
@@ -154,6 +165,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 			s.connPub.RemoveServerConnectionSubscriber(s)
 		}
 	}
+	done()
 }
 
 type RepeatingSender struct {
@@ -178,7 +190,8 @@ func (s *RepeatingSender) ConnectedRMs(conns map[common.RMId]Connection) {
 
 func (s *RepeatingSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
 
-func (s *RepeatingSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (s *RepeatingSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
+	defer done()
 	for _, recipient := range s.recipients {
 		if recipient == rmId {
 			conn.Send(s.msg)
@@ -205,6 +218,7 @@ func (s *RepeatingAllSender) ConnectedRMs(conns map[common.RMId]Connection) {
 
 func (s *RepeatingAllSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
 
-func (s *RepeatingAllSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (s *RepeatingAllSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
 	conn.Send(s.msg)
+	done()
 }

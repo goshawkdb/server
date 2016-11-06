@@ -221,18 +221,24 @@ func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, ba
 	}
 }
 
-type localConnectionMsgServerConnectionsChanged map[common.RMId]paxos.Connection
+type localConnectionMsgServerConnectionsChanged struct {
+	servers map[common.RMId]paxos.Connection
+	done    func()
+}
 
 func (lcmscc localConnectionMsgServerConnectionsChanged) witness() localConnectionMsg { return lcmscc }
 
 func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged(servers))
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers})
 }
 func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged(servers))
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers})
 }
-func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged(servers))
+func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{
+		servers: servers,
+		done:    done,
+	})
 }
 
 func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *LocalConnection {
@@ -275,6 +281,9 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	topology := lc.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, lc)
 	defer lc.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, lc)
 	servers := lc.connectionManager.ClientEstablished(0, lc)
+	if servers == nil {
+		panic("LocalConnection failed to register with ConnectionManager!")
+	}
 	defer lc.connectionManager.ClientLost(0, lc)
 	lc.submitter.TopologyChanged(topology)
 	lc.submitter.ServerConnectionsChanged(servers)
@@ -301,7 +310,10 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 			case localConnectionMsgOutcomeReceived:
 				err = lc.submitter.SubmissionOutcomeReceived(msgT.sender, msgT.txn, msgT.outcome)
 			case localConnectionMsgServerConnectionsChanged:
-				err = lc.submitter.ServerConnectionsChanged((map[common.RMId]paxos.Connection)(msgT))
+				err = lc.submitter.ServerConnectionsChanged(msgT.servers)
+				if msgT.done != nil {
+					msgT.done()
+				}
 			case localConnectionMsgStatus:
 				lc.status(msgT.StatusConsumer)
 			default:

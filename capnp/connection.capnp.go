@@ -331,20 +331,21 @@ type Message_Which uint16
 
 const (
 	MESSAGE_HEARTBEAT             Message_Which = 0
-	MESSAGE_CONNECTIONERROR       Message_Which = 1
-	MESSAGE_TXNSUBMISSION         Message_Which = 2
-	MESSAGE_SUBMISSIONOUTCOME     Message_Which = 3
-	MESSAGE_SUBMISSIONCOMPLETE    Message_Which = 4
-	MESSAGE_SUBMISSIONABORT       Message_Which = 5
-	MESSAGE_ONEATXNVOTES          Message_Which = 6
-	MESSAGE_ONEBTXNVOTES          Message_Which = 7
-	MESSAGE_TWOATXNVOTES          Message_Which = 8
-	MESSAGE_TWOBTXNVOTES          Message_Which = 9
-	MESSAGE_TXNLOCALLYCOMPLETE    Message_Which = 10
-	MESSAGE_TXNGLOBALLYCOMPLETE   Message_Which = 11
-	MESSAGE_TOPOLOGYCHANGEREQUEST Message_Which = 12
-	MESSAGE_MIGRATION             Message_Which = 13
-	MESSAGE_MIGRATIONCOMPLETE     Message_Which = 14
+	MESSAGE_FLUSHED               Message_Which = 1
+	MESSAGE_CONNECTIONERROR       Message_Which = 2
+	MESSAGE_TXNSUBMISSION         Message_Which = 3
+	MESSAGE_SUBMISSIONOUTCOME     Message_Which = 4
+	MESSAGE_SUBMISSIONCOMPLETE    Message_Which = 5
+	MESSAGE_SUBMISSIONABORT       Message_Which = 6
+	MESSAGE_ONEATXNVOTES          Message_Which = 7
+	MESSAGE_ONEBTXNVOTES          Message_Which = 8
+	MESSAGE_TWOATXNVOTES          Message_Which = 9
+	MESSAGE_TWOBTXNVOTES          Message_Which = 10
+	MESSAGE_TXNLOCALLYCOMPLETE    Message_Which = 11
+	MESSAGE_TXNGLOBALLYCOMPLETE   Message_Which = 12
+	MESSAGE_TOPOLOGYCHANGEREQUEST Message_Which = 13
+	MESSAGE_MIGRATION             Message_Which = 14
+	MESSAGE_MIGRATIONCOMPLETE     Message_Which = 15
 )
 
 func NewMessage(s *C.Segment) Message          { return Message(s.NewStruct(8, 1)) }
@@ -353,87 +354,88 @@ func AutoNewMessage(s *C.Segment) Message      { return Message(s.NewStructAR(8,
 func ReadRootMessage(s *C.Segment) Message     { return Message(s.Root(0).ToStruct()) }
 func (s Message) Which() Message_Which         { return Message_Which(C.Struct(s).Get16(0)) }
 func (s Message) SetHeartbeat()                { C.Struct(s).Set16(0, 0) }
+func (s Message) SetFlushed()                  { C.Struct(s).Set16(0, 1) }
 func (s Message) ConnectionError() string      { return C.Struct(s).GetObject(0).ToText() }
 func (s Message) ConnectionErrorBytes() []byte { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
 func (s Message) SetConnectionError(v string) {
-	C.Struct(s).Set16(0, 1)
+	C.Struct(s).Set16(0, 2)
 	C.Struct(s).SetObject(0, s.Segment.NewText(v))
 }
 func (s Message) TxnSubmission() []byte { return C.Struct(s).GetObject(0).ToData() }
 func (s Message) SetTxnSubmission(v []byte) {
-	C.Struct(s).Set16(0, 2)
+	C.Struct(s).Set16(0, 3)
 	C.Struct(s).SetObject(0, s.Segment.NewData(v))
 }
 func (s Message) SubmissionOutcome() Outcome { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetSubmissionOutcome(v Outcome) {
-	C.Struct(s).Set16(0, 3)
+	C.Struct(s).Set16(0, 4)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) SubmissionComplete() TxnSubmissionComplete {
 	return TxnSubmissionComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetSubmissionComplete(v TxnSubmissionComplete) {
-	C.Struct(s).Set16(0, 4)
+	C.Struct(s).Set16(0, 5)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) SubmissionAbort() TxnSubmissionAbort {
 	return TxnSubmissionAbort(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetSubmissionAbort(v TxnSubmissionAbort) {
-	C.Struct(s).Set16(0, 5)
+	C.Struct(s).Set16(0, 6)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) OneATxnVotes() OneATxnVotes { return OneATxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetOneATxnVotes(v OneATxnVotes) {
-	C.Struct(s).Set16(0, 6)
+	C.Struct(s).Set16(0, 7)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) OneBTxnVotes() OneBTxnVotes { return OneBTxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetOneBTxnVotes(v OneBTxnVotes) {
-	C.Struct(s).Set16(0, 7)
+	C.Struct(s).Set16(0, 8)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TwoATxnVotes() TwoATxnVotes { return TwoATxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetTwoATxnVotes(v TwoATxnVotes) {
-	C.Struct(s).Set16(0, 8)
+	C.Struct(s).Set16(0, 9)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TwoBTxnVotes() TwoBTxnVotes { return TwoBTxnVotes(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetTwoBTxnVotes(v TwoBTxnVotes) {
-	C.Struct(s).Set16(0, 9)
+	C.Struct(s).Set16(0, 10)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TxnLocallyComplete() TxnLocallyComplete {
 	return TxnLocallyComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetTxnLocallyComplete(v TxnLocallyComplete) {
-	C.Struct(s).Set16(0, 10)
+	C.Struct(s).Set16(0, 11)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TxnGloballyComplete() TxnGloballyComplete {
 	return TxnGloballyComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetTxnGloballyComplete(v TxnGloballyComplete) {
-	C.Struct(s).Set16(0, 11)
+	C.Struct(s).Set16(0, 12)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) TopologyChangeRequest() Configuration {
 	return Configuration(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetTopologyChangeRequest(v Configuration) {
-	C.Struct(s).Set16(0, 12)
+	C.Struct(s).Set16(0, 13)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) Migration() Migration { return Migration(C.Struct(s).GetObject(0).ToStruct()) }
 func (s Message) SetMigration(v Migration) {
-	C.Struct(s).Set16(0, 13)
+	C.Struct(s).Set16(0, 14)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) MigrationComplete() MigrationComplete {
 	return MigrationComplete(C.Struct(s).GetObject(0).ToStruct())
 }
 func (s Message) SetMigrationComplete(v MigrationComplete) {
-	C.Struct(s).Set16(0, 14)
+	C.Struct(s).Set16(0, 15)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
 func (s Message) WriteJSON(w io.Writer) error {
@@ -447,6 +449,17 @@ func (s Message) WriteJSON(w io.Writer) error {
 	}
 	if s.Which() == MESSAGE_HEARTBEAT {
 		_, err = b.WriteString("\"heartbeat\":")
+		if err != nil {
+			return err
+		}
+		_ = s
+		_, err = b.WriteString("null")
+		if err != nil {
+			return err
+		}
+	}
+	if s.Which() == MESSAGE_FLUSHED {
+		_, err = b.WriteString("\"flushed\":")
 		if err != nil {
 			return err
 		}
@@ -669,6 +682,17 @@ func (s Message) WriteCapLit(w io.Writer) error {
 	}
 	if s.Which() == MESSAGE_HEARTBEAT {
 		_, err = b.WriteString("heartbeat = ")
+		if err != nil {
+			return err
+		}
+		_ = s
+		_, err = b.WriteString("null")
+		if err != nil {
+			return err
+		}
+	}
+	if s.Which() == MESSAGE_FLUSHED {
+		_, err = b.WriteString("flushed = ")
 		if err != nil {
 			return err
 		}
