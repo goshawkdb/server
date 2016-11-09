@@ -103,16 +103,52 @@ type acceptorStateMachineComponent interface {
 
 type acceptorReceiveBallots struct {
 	*Acceptor
-	ballotAccumulator *BallotAccumulator
-	outcome           *outcomeEqualId
+	ballotAccumulator     *BallotAccumulator
+	outcome               *outcomeEqualId
+	txn                   *eng.TxnReader
+	txnSubmitter          common.RMId
+	txnSubmitterBootCount uint32
+	txnSender             *RepeatingSender
 }
 
 func (arb *acceptorReceiveBallots) init(a *Acceptor, txn *eng.TxnReader) {
 	arb.Acceptor = a
 	arb.ballotAccumulator = NewBallotAccumulator(txn)
+	arb.txn = txn
+	arb.txnSubmitter = common.RMId(txn.Txn.Submitter())
+	arb.txnSubmitterBootCount = txn.Txn.SubmitterBootCount()
 }
 
-func (arb *acceptorReceiveBallots) start()                                {}
+func (arb *acceptorReceiveBallots) start() {
+	// We need to watch to see if the submitter dies. If it does, there
+	// is a chance that we might be the only remaining record of this
+	// txn and so we need to ensure progress somehow. To see how this
+	// happens, consider the following scenario:
+	//
+	// 1. Provided the submitter stays up, its repeating sender will
+	// make sure that the txn gets to all proposers, and progress
+	// continues to be made.
+	//
+	// 2. But consider what happens if the submitter and a proposer are
+	// on the same node which fails: That proposer has local votes and
+	// has sent those votes to us, so we now contain state. But that
+	// node now goes now. The txn never made it to any other node (we
+	// must be an acceptor, and a learner), so when the node comes back
+	// up, there is no record of it anywhere, other than in any such
+	// acceptor.
+	//
+	// Once we've gone to disk, we will then have a repeating 2B sender
+	// which will ensure progress, so we have no risk once we've
+	// started going to disk.
+	//
+	// However, if we are a learner, then we cannot start an abort
+	// proposer as we're not allowed to vote. So our response in this
+	// scenario is actually to start a repeating sender of the txn
+	// itself to the other active RMs, thus taking the role of the
+	// submitter.
+	arb.acceptorManager.AddServerConnectionSubscriber(arb)
+}
+
 func (arb *acceptorReceiveBallots) acceptorStateMachineComponentWitness() {}
 func (arb *acceptorReceiveBallots) String() string {
 	return "acceptorReceiveBallots"
@@ -132,6 +168,49 @@ func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst
 	}
 }
 
+func (arb *acceptorReceiveBallots) ConnectedRMs(conns map[common.RMId]Connection) {
+	if conn, found := conns[arb.txnSubmitter]; !found || conn.BootCount() != arb.txnSubmitterBootCount {
+		arb.enqueueCreateTxnSender()
+	}
+}
+func (arb *acceptorReceiveBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]Connection) {
+	if rmId == arb.txnSubmitter {
+		arb.enqueueCreateTxnSender()
+	}
+}
+func (arb *acceptorReceiveBallots) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
+	if rmId == arb.txnSubmitter && conn.BootCount() != arb.txnSubmitterBootCount {
+		arb.enqueueCreateTxnSender()
+	}
+	done()
+}
+
+func (arb *acceptorReceiveBallots) enqueueCreateTxnSender() {
+	arb.acceptorManager.Exe.Enqueue(arb.createTxnSender)
+}
+
+func (arb *acceptorReceiveBallots) createTxnSender() {
+	if arb.currentState == arb && arb.txnSender == nil {
+		arb.acceptorManager.RemoveServerConnectionSubscriber(arb)
+		seg := capn.NewBuffer(nil)
+		msg := msgs.NewRootMessage(seg)
+		msg.SetTxnSubmission(arb.txn.Data)
+		activeRMs := make([]common.RMId, 0, arb.txn.Txn.FInc()*2-1)
+		allocs := arb.txn.Txn.Allocations()
+		for idx := 0; idx < allocs.Len(); idx++ {
+			alloc := allocs.At(idx)
+			if alloc.Active() == 0 {
+				break
+			} else {
+				activeRMs = append(activeRMs, common.RMId(alloc.RmId()))
+			}
+		}
+		server.Log(arb.txnId, "Starting extra txn sender with actives:", activeRMs)
+		arb.txnSender = NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
+		arb.acceptorManager.AddServerConnectionSubscriber(arb.txnSender)
+	}
+}
+
 // write to disk
 
 type acceptorWriteToDisk struct {
@@ -146,6 +225,10 @@ func (awtd *acceptorWriteToDisk) init(a *Acceptor, txn *eng.TxnReader) {
 }
 
 func (awtd *acceptorWriteToDisk) start() {
+	awtd.acceptorManager.RemoveServerConnectionSubscriber(&awtd.acceptorReceiveBallots)
+	if awtd.txnSender != nil {
+		awtd.acceptorManager.RemoveServerConnectionSubscriber(awtd.txnSender)
+	}
 	outcome := awtd.outcome
 	outcomeCap := (*msgs.Outcome)(outcome)
 	awtd.sendToAll = awtd.sendToAll || outcomeCap.Which() == msgs.OUTCOME_COMMIT

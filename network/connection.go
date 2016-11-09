@@ -233,7 +233,12 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	)
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = conn.queryChan, cell }
 	head.WithCell(chanFun)
-	terminate := false
+	if conn.topology == nil {
+		panic("Nil topology on connection start!")
+		err = errors.New("No local topology, not ready for any connections")
+	}
+
+	terminate := err != nil
 	for !terminate {
 		if oldState != conn.currentState {
 			oldState = conn.currentState
@@ -794,7 +799,7 @@ func (cr *connectionRun) start() (bool, error) {
 	if cr.isClient {
 		servers := cr.connectionManager.ClientEstablished(cr.ConnectionNumber, cr.Connection)
 		if servers == nil {
-			return false, fmt.Errorf("Not ready for client connections")
+			return false, errors.New("Not ready for client connections")
 		}
 		cr.submitter = client.NewClientTxnSubmitter(cr.connectionManager.RMId, cr.connectionManager.BootCount(), cr.rootsVar, cr.connectionManager)
 		cr.submitter.TopologyChanged(cr.topology)

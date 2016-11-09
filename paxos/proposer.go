@@ -209,6 +209,9 @@ func (pab *proposerAwaitBallots) start() {
 	pab.submitter = common.RMId(txnCap.Submitter())
 	pab.submitterBootCount = txnCap.SubmitterBootCount()
 	if pab.txn.Retry {
+		// We need to observe whether or not the submitter dies. If it
+		// does die, we should tidy up (abort) asap otherwise we have a
+		// leak which may never trigger.
 		pab.proposerManager.AddServerConnectionSubscriber(pab)
 	}
 }

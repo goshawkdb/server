@@ -143,16 +143,11 @@ func (p *proposal) maybeSendTwoA() {
 	twoACap.SetRmId(uint32(p.instanceRMId))
 	acceptRequests := msgs.NewTxnVoteAcceptRequestList(seg, len(pendingAccepts))
 	twoACap.SetAcceptRequests(acceptRequests)
-	deflate := false
 	for idx, pi := range pendingAccepts {
 		acceptRequest := acceptRequests.At(idx)
-		deflate = pi.addTwoAToAcceptRequest(seg, &acceptRequest, sender) || deflate
+		pi.addTwoAToAcceptRequest(seg, &acceptRequest, sender)
 	}
-	if deflate {
-		twoACap.SetTxn(p.txn.AsDeflated().Data)
-	} else {
-		twoACap.SetTxn(p.txn.Data)
-	}
+	twoACap.SetTxn(p.txn.Data)
 	sender.msg = server.SegToBytes(seg)
 	server.Log(p.txn.Id, "Adding sender for 2A")
 	p.proposerManager.AddServerConnectionSubscriber(sender)
@@ -363,7 +358,7 @@ func (twoA *proposalTwoA) init(pi *proposalInstance) {
 
 func (twoA *proposalTwoA) start() {}
 
-func (twoA *proposalTwoA) addTwoAToAcceptRequest(seg *capn.Segment, acceptRequest *msgs.TxnVoteAcceptRequest, sender *proposalSender) bool {
+func (twoA *proposalTwoA) addTwoAToAcceptRequest(seg *capn.Segment, acceptRequest *msgs.TxnVoteAcceptRequest, sender *proposalSender) {
 	var ballotData []byte
 	if twoA.winningBallot == nil { // free choice from everyone
 		ballotData = twoA.ballot.Data
@@ -375,7 +370,6 @@ func (twoA *proposalTwoA) addTwoAToAcceptRequest(seg *capn.Segment, acceptReques
 	acceptRequest.SetRoundNumber(uint64(twoA.currentRoundNumber))
 	twoA.twoASender = sender
 	twoA.nextState(nil)
-	return eng.BallotFromData(ballotData).Vote != eng.Commit
 }
 
 // twoB

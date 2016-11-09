@@ -89,7 +89,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTxnSubmission(server.SegToBytes(txnCap.Segment))
 
-	server.Log(txnId, "Submitting txn")
+	server.Log(txnId, "Submitting txn with actives:", activeRMs)
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
 	sleeping := delay != nil && delay.Cur > 0
 	var removeSenderCh chan chan server.EmptyStruct
