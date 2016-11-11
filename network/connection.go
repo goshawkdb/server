@@ -630,11 +630,7 @@ func (cash *connectionAwaitServerHandshake) verifyTopology(remote *msgs.HelloSer
 	if cash.topology.ClusterId == remote.ClusterId() {
 		remoteUUId := remote.ClusterUUId()
 		localUUId := cash.topology.ClusterUUId()
-		if remoteUUId == 0 || localUUId == 0 {
-			return true
-		} else {
-			return remoteUUId == localUUId
-		}
+		return remoteUUId == 0 || localUUId == 0 || remoteUUId == localUUId
 	}
 	return false
 }
