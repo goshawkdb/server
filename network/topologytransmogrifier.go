@@ -389,7 +389,10 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
 			return
 		}
-		goal.SetClusterUUId(activeClusterUUId)
+
+		if activeClusterUUId != 0 {
+			goal.SetClusterUUId(activeClusterUUId)
+		}
 	}
 
 	if tt.task != nil {
@@ -908,6 +911,9 @@ func (task *installTargetOld) tick() error {
 		}
 		targetTopology.Roots = append(targetTopology.Roots, roots...)
 	}
+
+	targetTopology.SetClusterUUId(task.active.ClusterUUId())
+	log.Println("Set cluster uuid", targetTopology.ClusterUUId())
 
 	start := time.Now()
 	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
