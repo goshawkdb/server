@@ -235,7 +235,7 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	head.WithCell(chanFun)
 	if conn.topology == nil {
 		panic("Nil topology on connection start!")
-		err = errors.New("No local topology, not ready for any connections")
+		// err = errors.New("No local topology, not ready for any connections")
 	}
 
 	terminate := err != nil
@@ -506,7 +506,7 @@ func (cah *connectionAwaitHandshake) verifyHello(hello *cmsgs.Hello) bool {
 }
 
 func (cah *connectionAwaitHandshake) maybeRestartConnection(err error) (bool, error) {
-	if cah.remoteHost == "" {
+	if len(cah.remoteHost) == 0 {
 		// we came from the listener and don't know who the remote is, so have to shutdown
 		return false, err
 	} else {
@@ -554,7 +554,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 	// end as the server even though in a server-server connection we
 	// really don't care which is which.
 	config := cash.commonTLSConfig()
-	if cash.remoteHost == "" {
+	if len(cash.remoteHost) == 0 {
 		// We came from the listener, so we're going to act as the server.
 		config.ClientAuth = tls.RequireAndVerifyClientCert
 		socket := tls.Server(cash.socket, config)
@@ -619,7 +619,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 			cash.nextState(nil)
 			return false, nil
 		} else {
-			return cash.connectionAwaitHandshake.maybeRestartConnection(fmt.Errorf("Unequal remote topology"))
+			return cash.connectionAwaitHandshake.maybeRestartConnection(fmt.Errorf("Unequal remote topology (%v, %v)", cash.remoteHost, cash.remoteRMId))
 		}
 	} else {
 		return cash.connectionAwaitHandshake.maybeRestartConnection(err)
