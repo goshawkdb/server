@@ -379,7 +379,18 @@ func (i *instance) TwoATxnVotesReceived(roundNumber paxosNumber, ballot *eng.Bal
 	if roundNumber == i.acceptedNum && i.accepted != nil {
 		// duplicate 2a. Don't issue any response.
 		return
-	} else if roundNumber >= i.promiseNum || i.promiseNum == 0 {
+	} else if roundNumber >= i.promiseNum {
+		// There is a danger here: there could be a race between the
+		// voter and abort proposers. In theory, the abort proposers
+		// could do the 1a, 1b and 2a msgs before the acceptor receives
+		// the direct 2a from the voter. In that case, we must make sure
+		// that the 2a from the voter does not overwrite the abort 2a
+		// otherwise we could witness a change in consensus from abort
+		// to commit. It is for this reason that the voter uses a round
+		// number of 0, whilst the abort proposors always start their 1a
+		// from a round number of 1. Thus in the above race, the late
+		// arriving 2a from the voter will never have a higher round
+		// number than the 1a/2a from the abort proposer.
 		i.promiseNum = roundNumber
 		i.acceptedNum = roundNumber
 		i.accepted = ballot
