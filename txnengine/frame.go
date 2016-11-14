@@ -51,7 +51,7 @@ func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions
 	} else {
 		f.mask = parent.mask
 		f.scheduleBackoff = parent.scheduleBackoff
-		f.scheduleBackoff.Shrink(0)
+		f.scheduleBackoff.Shrink(server.VarRollDelayMin)
 	}
 	f.init()
 	server.Log(f, "NewFrame")

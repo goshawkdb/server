@@ -44,37 +44,33 @@ var EmptyStructVal = EmptyStruct{}
 func (es EmptyStruct) String() string { return "" }
 
 type BinaryBackoffEngine struct {
-	rng *rand.Rand
-	min time.Duration
-	max time.Duration
-	Cur time.Duration
+	rng    *rand.Rand
+	min    time.Duration
+	max    time.Duration
+	period time.Duration
+	Cur    time.Duration
 }
 
 func NewBinaryBackoffEngine(rng *rand.Rand, min, max time.Duration) *BinaryBackoffEngine {
-	cur := time.Duration(0)
-	if min > 0 {
-		cur = min + time.Duration(rng.Intn(int(min)))
+	if min <= 0 {
+		return nil
 	}
 	return &BinaryBackoffEngine{
-		rng: rng,
-		min: min,
-		max: max,
-		Cur: cur,
+		rng:    rng,
+		min:    min,
+		max:    max,
+		period: min,
+		Cur:    0,
 	}
 }
 
-// returns the old delay, prior to change
 func (bbe *BinaryBackoffEngine) Advance() time.Duration {
-	return bbe.AdvanceBy(bbe.Cur)
-}
-
-// returns the old delay, prior to change
-func (bbe *BinaryBackoffEngine) AdvanceBy(d time.Duration) time.Duration {
 	oldCur := bbe.Cur
-	bbe.Cur += time.Duration(bbe.rng.Intn(int(d)))
-	for bbe.max > bbe.min && bbe.Cur > bbe.max {
-		bbe.Cur = bbe.Cur / 2
+	bbe.period *= 2
+	if bbe.period > bbe.max {
+		bbe.period = bbe.max
 	}
+	bbe.Cur = time.Duration(bbe.rng.Intn(int(bbe.period)))
 	return oldCur
 }
 
@@ -88,11 +84,13 @@ func (bbe *BinaryBackoffEngine) After(fun func()) {
 	}()
 }
 
-func (bbe *BinaryBackoffEngine) Shrink(roundToMin time.Duration) {
-	bbe.Cur = bbe.Cur / 2
-	if bbe.Cur < bbe.min {
-		bbe.Cur = bbe.min + time.Duration(bbe.rng.Intn(int(bbe.min)))
-	} else if bbe.Cur < bbe.min+roundToMin {
-		bbe.Cur = bbe.min
+func (bbe *BinaryBackoffEngine) Shrink(roundToZero time.Duration) {
+	bbe.period /= 2
+	if bbe.period < bbe.min {
+		bbe.period = bbe.min
+	}
+	bbe.Cur = time.Duration(bbe.rng.Intn(int(bbe.period)))
+	if bbe.Cur <= roundToZero {
+		bbe.Cur = 0
 	}
 }

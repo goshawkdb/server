@@ -550,11 +550,13 @@ type topologyTask interface {
 
 type targetConfig struct {
 	*TopologyTransmogrifier
-	config *configuration.NextConfiguration
-	sender paxos.ServerConnectionSubscriber
+	config  *configuration.NextConfiguration
+	sender  paxos.ServerConnectionSubscriber
+	backoff *server.BinaryBackoffEngine
 }
 
 func (task *targetConfig) tick() error {
+	task.backoff = nil
 	switch {
 	case task.active == nil:
 		log.Println("Topology: Ensuring local topology.")
@@ -707,6 +709,14 @@ func (task *targetConfig) isInRMs(rmIds common.RMIds) bool {
 	return false
 }
 
+func (task *targetConfig) createOrAdvanceBackoff() {
+	if task.backoff == nil {
+		task.backoff = server.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
+	} else {
+		task.backoff.Advance()
+	}
+}
+
 // ensureLocalTopology
 
 type ensureLocalTopology struct {
@@ -856,7 +866,6 @@ func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
 
 type installTargetOld struct {
 	*targetConfig
-	backoff *server.BinaryBackoffEngine
 }
 
 func (task *installTargetOld) tick() error {
@@ -894,18 +903,13 @@ func (task *installTargetOld) tick() error {
 
 	log.Printf("Topology: Calculated target topology: %v (new rootsRequired: %v, active: %v, passive: %v)", targetTopology.Next(), rootsRequired, active, passive)
 
-	if task.backoff == nil {
-		task.backoff = server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-	}
-
 	if rootsRequired != 0 {
-		start := time.Now()
 		resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
 		if err != nil {
 			return task.fatal(err)
 		}
 		if resubmit {
-			task.backoff.AdvanceBy(time.Now().Sub(start))
+			task.createOrAdvanceBackoff()
 			task.enqueueTick(task, task.backoff)
 			return nil
 		}
@@ -915,13 +919,12 @@ func (task *installTargetOld) tick() error {
 	targetTopology.SetClusterUUId(task.active.ClusterUUId())
 	log.Println("Set cluster uuid", targetTopology.ClusterUUId())
 
-	start := time.Now()
 	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.backoff.AdvanceBy(time.Now().Sub(start))
+		task.createOrAdvanceBackoff()
 		task.enqueueTick(task, task.backoff)
 		return nil
 	}
@@ -1159,7 +1162,6 @@ func calculateMigrationConditions(added, lost, survived []common.RMId, from, to 
 
 type installTargetNew struct {
 	*targetConfig
-	backoff *server.BinaryBackoffEngine
 }
 
 func (task *installTargetNew) tick() error {
@@ -1214,18 +1216,13 @@ func (task *installTargetNew) tick() error {
 	topology := task.active.Clone()
 	topology.Next().InstalledOnNew = true
 
-	if task.backoff == nil {
-		task.backoff = server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-	}
-
-	start := time.Now()
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
 		server.Log("Topology: Topology extension requires resubmit.")
-		task.backoff.AdvanceBy(time.Now().Sub(start))
+		task.createOrAdvanceBackoff()
 		task.enqueueTick(task, task.backoff)
 	}
 	return nil
@@ -1235,7 +1232,6 @@ func (task *installTargetNew) tick() error {
 
 type awaitBarrier1 struct {
 	*targetConfig
-	backoff                         *server.BinaryBackoffEngine
 	varBarrierReached               *configuration.Configuration
 	proposerBarrierReached          *configuration.Configuration
 	connectionBarrierReached        *configuration.Configuration
@@ -1287,18 +1283,13 @@ func (task *awaitBarrier1) tick() error {
 		next = topology.Next()
 		next.BarrierReached1 = append(next.BarrierReached1, task.connectionManager.RMId)
 
-		if task.backoff == nil {
-			task.backoff = server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-		}
-
-		start := time.Now()
 		_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 		if err != nil {
 			return task.fatal(err)
 		}
 		if resubmit {
 			server.Log("Topology: Barrier1 reached. Requires resubmit.")
-			task.backoff.AdvanceBy(time.Now().Sub(start))
+			task.createOrAdvanceBackoff()
 			task.enqueueTick(task, task.backoff)
 		}
 
@@ -1358,7 +1349,6 @@ func (task *awaitBarrier1) tick() error {
 
 type awaitBarrier2 struct {
 	*targetConfig
-	backoff           *server.BinaryBackoffEngine
 	varBarrierReached *configuration.Configuration
 	installing        *configuration.Configuration
 }
@@ -1403,18 +1393,13 @@ func (task *awaitBarrier2) tick() error {
 		next = topology.Next()
 		next.BarrierReached2 = append(next.BarrierReached2, task.connectionManager.RMId)
 
-		if task.backoff == nil {
-			task.backoff = server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-		}
-
-		start := time.Now()
 		_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 		if err != nil {
 			return task.fatal(err)
 		}
 		if resubmit {
 			server.Log("Topology: Barrier2 reached. Requires resubmit.")
-			task.backoff.AdvanceBy(time.Now().Sub(start))
+			task.createOrAdvanceBackoff()
 			task.enqueueTick(task, task.backoff)
 		}
 
@@ -1444,7 +1429,6 @@ func (task *awaitBarrier2) tick() error {
 
 type migrate struct {
 	*targetConfig
-	backoff   *server.BinaryBackoffEngine
 	emigrator *emigrator
 }
 
@@ -1512,17 +1496,12 @@ func (task *migrate) tick() error {
 
 	log.Printf("Topology: Recording local immigration progress (%v). Active: %v, Passive: %v", next.Pending, active, passive)
 
-	if task.backoff == nil {
-		task.backoff = server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-	}
-
-	start := time.Now()
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.backoff.AdvanceBy(time.Now().Sub(start))
+		task.createOrAdvanceBackoff()
 		task.enqueueTick(task, task.backoff)
 		return nil
 	}
@@ -1558,7 +1537,6 @@ func (task *migrate) ensureStopEmigrator() {
 
 type installCompletion struct {
 	*targetConfig
-	backoff *server.BinaryBackoffEngine
 }
 
 func (task *installCompletion) tick() error {
@@ -1604,17 +1582,12 @@ func (task *installCompletion) tick() error {
 	}
 	topology.Roots = newRoots
 
-	if task.backoff == nil {
-		task.backoff = server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-	}
-
-	start := time.Now()
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.backoff.AdvanceBy(time.Now().Sub(start))
+		task.createOrAdvanceBackoff()
 		task.enqueueTick(task, task.backoff)
 		return nil
 	}
@@ -1720,8 +1693,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 		return nil, err
 	}
 
-	backoff := server.NewBinaryBackoffEngine(task.rng, 0, server.SubmissionMaxSubmitDelay)
-	start := time.Now()
+	backoff := server.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
 	for {
 		txn := task.createTopologyTransaction(nil, nil, []common.RMId{task.connectionManager.RMId}, nil)
 
@@ -1737,9 +1709,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 		}
 		abort := result.Abort()
 		if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-			end := time.Now()
-			backoff.AdvanceBy(end.Sub(start))
-			start = end
+			backoff.Advance()
 			continue
 		}
 		abortUpdates := abort.Rerun()

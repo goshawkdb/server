@@ -10,7 +10,6 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"time"
 )
 
 type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error) error
@@ -28,7 +27,7 @@ func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.
 		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots),
 		txnLive:            false,
-		backoff:            server.NewBinaryBackoffEngine(sts.rng, 0, server.SubmissionMaxSubmitDelay),
+		backoff:            server.NewBinaryBackoffEngine(sts.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 	}
 }
 
@@ -52,8 +51,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	clientOutcome.SetId(ctxnCap.Id())
 
 	curTxnId := common.MakeTxnId(ctxnCap.Id())
-	cts.backoff.Shrink(time.Millisecond)
-	start := time.Now()
+	cts.backoff.Shrink(server.SubmissionMinSubmitDelay)
 
 	var cont TxnCompletionConsumer
 	cont = func(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
@@ -62,9 +60,6 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			return continuation(nil, err)
 		}
 		txnId := txn.Id
-		end := time.Now()
-		elapsed := end.Sub(start)
-		start = end
 		switch outcome.Which() {
 		case msgs.OUTCOME_COMMIT:
 			cts.versionCache.UpdateFromCommit(txn, outcome)
@@ -91,7 +86,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			}
 			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
 
-			cts.backoff.AdvanceBy(elapsed)
+			cts.backoff.Advance()
 			//fmt.Printf("%v ", cts.backoff.Cur)
 
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
