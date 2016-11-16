@@ -7,12 +7,9 @@ Ashley Hewson <ash@lshift.net>
 By default, code in this repository is:
 Copyright (C) 2015-2016 Matthew Sackman <matthew@goshawkdb.io>
 
-Some patches have different copyright assignments, and on each release
-of GoshawkDB server, this file will be adjusted to contain those
-details in full.
+The following files are:
 
-Where the copyright of a patch differs from the default, the patch and
-its copyright can be found by running the following command in this
-repository:
+Copyright (C) 2015-2016 Matthew Sackman <matthew@goshawkdb.io>
+Copyright (C) 2016 LShift Ltd <opensource@lshift.net>
 
-$ hg log -k copyright -v
+client/clienttxnsubmitter.go
