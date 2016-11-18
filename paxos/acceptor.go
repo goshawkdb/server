@@ -320,7 +320,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 
 	var rmsRemoved map[common.RMId]server.EmptyStruct
 	if aalc.acceptorManager.Topology != nil {
-		rmsRemoved = aalc.acceptorManager.Topology.RMsRemoved()
+		rmsRemoved = aalc.acceptorManager.Topology.RMsRemoved
 	}
 
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
@@ -378,7 +378,7 @@ func (aalc *acceptorAwaitLocallyComplete) TopologyChanged(topology *configuratio
 	if topology == nil {
 		return
 	}
-	rmsRemoved := topology.RMsRemoved()
+	rmsRemoved := topology.RMsRemoved
 	if _, found := rmsRemoved[aalc.acceptorManager.RMId]; found {
 		return
 	}

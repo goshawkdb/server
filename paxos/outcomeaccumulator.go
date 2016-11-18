@@ -67,7 +67,7 @@ func (oa *OutcomeAccumulator) TopologyChange(topology *configuration.Topology) b
 	// acceptors and proposers. It's the loss of acceptors that's the
 	// biggest problem because we have no way to replace them.
 
-	for rmId := range topology.RMsRemoved() {
+	for rmId := range topology.RMsRemoved {
 		if acceptorOutcome, found := oa.acceptorOutcomes[rmId]; found {
 			delete(oa.acceptorOutcomes, rmId)
 			server.Log("OutcomeAccumulator deleting acceptor", rmId)

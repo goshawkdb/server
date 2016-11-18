@@ -608,7 +608,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 			cash.remoteHost = hello.LocalHost()
 			cash.remoteRMId = common.RMId(hello.RmId())
 
-			if _, found := cash.topology.RMsRemoved()[cash.remoteRMId]; found {
+			if _, found := cash.topology.RMsRemoved[cash.remoteRMId]; found {
 				return false, cash.serverError(
 					fmt.Errorf("%v has been removed from topology and may not rejoin.", cash.remoteRMId))
 			}
@@ -629,7 +629,7 @@ func (cash *connectionAwaitServerHandshake) start() (bool, error) {
 func (cash *connectionAwaitServerHandshake) verifyTopology(remote *msgs.HelloServerFromServer) bool {
 	if cash.topology.ClusterId == remote.ClusterId() {
 		remoteUUId := remote.ClusterUUId()
-		localUUId := cash.topology.ClusterUUId()
+		localUUId := cash.topology.ClusterUUId
 		return remoteUUId == 0 || localUUId == 0 || remoteUUId == localUUId
 	}
 	return false
@@ -646,7 +646,7 @@ func (cash *connectionAwaitServerHandshake) makeHelloServerFromServer() *capn.Se
 	cash.combinedTieBreak = tieBreak
 	hello.SetTieBreak(tieBreak)
 	hello.SetClusterId(cash.topology.ClusterId)
-	hello.SetClusterUUId(cash.topology.ClusterUUId())
+	hello.SetClusterUUId(cash.topology.ClusterUUId)
 	return seg
 }
 
@@ -675,9 +675,9 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 		return false, err
 	}
 
-	if cach.topology.ClusterUUId() == 0 {
+	if cach.topology.ClusterUUId == 0 {
 		return false, errors.New("Cluster not yet formed")
-	} else if len(cach.topology.RootNames()) == 0 {
+	} else if len(cach.topology.Roots) == 0 {
 		return false, errors.New("No roots: cluster not yet formed")
 	}
 
@@ -699,7 +699,7 @@ func (cach *connectionAwaitClientHandshake) start() (bool, error) {
 }
 
 func (cach *connectionAwaitClientHandshake) verifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capability) {
-	fingerprints := cach.topology.Fingerprints()
+	fingerprints := cach.topology.Fingerprints
 	for _, cert := range peerCerts {
 		hashsum = sha256.Sum256(cert.Raw)
 		if roots, found := fingerprints[hashsum]; found {
@@ -720,11 +720,11 @@ func (cach *connectionAwaitClientHandshake) makeHelloClientFromServer() *capn.Se
 	rootsCap := cmsgs.NewRootList(seg, len(cach.roots))
 	idy := 0
 	rootsVar := make(map[common.VarUUId]*common.Capability, len(cach.roots))
-	for idx, name := range cach.topology.RootNames() {
+	for idx, name := range cach.topology.Roots {
 		if capability, found := cach.roots[name]; found {
 			rootCap := rootsCap.At(idy)
 			idy++
-			vUUId := cach.topology.Roots[idx].VarUUId
+			vUUId := cach.topology.RootVarUUIds[idx].VarUUId
 			rootCap.SetName(name)
 			rootCap.SetVarId(vUUId[:])
 			rootCap.SetCapability(capability.Capability)
@@ -866,7 +866,7 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 		server.Log("Connection", cr.Connection, "topologyChanged", tc, "(isServer)")
 		tc.maybeClose()
 		if topology != nil {
-			if _, found := topology.RMsRemoved()[cr.remoteRMId]; found {
+			if _, found := topology.RMsRemoved[cr.remoteRMId]; found {
 				cr.restart = false
 			}
 		}

@@ -42,7 +42,7 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 	}
 	exe.Enqueue(func() {
 		vm.Topology = tp.AddTopologySubscriber(VarSubscriber, vm)
-		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextBarrierReached1(rmId)
+		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextConfiguration.BarrierReached1For(rmId)
 	})
 	return vm
 }
@@ -57,11 +57,11 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 		vm.Topology = topology
 		oldRollAllowed := vm.RollAllowed
 		if !vm.RollAllowed {
-			vm.RollAllowed = topology == nil || !topology.NextBarrierReached1(vm.RMId)
+			vm.RollAllowed = topology == nil || !topology.NextConfiguration.BarrierReached1For(vm.RMId)
 		}
 		server.Log("VarManager", fmt.Sprintf("%p", vm), "rollAllowed:", oldRollAllowed, "->", vm.RollAllowed, fmt.Sprintf("%p", topology))
 
-		goingToDisk := topology != nil && topology.NextBarrierReached1(vm.RMId) && !topology.NextBarrierReached2(vm.RMId)
+		goingToDisk := topology != nil && topology.NextConfiguration.BarrierReached1For(vm.RMId) && !topology.NextConfiguration.BarrierReached2For(vm.RMId)
 
 		doneWrapped := func(result bool) {
 			close(resultChan)

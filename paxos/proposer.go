@@ -139,7 +139,7 @@ func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 		return
 	}
 	p.topology = topology
-	rmsRemoved := topology.RMsRemoved()
+	rmsRemoved := topology.RMsRemoved
 	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rmsRemoved)
 	if _, found := rmsRemoved[p.proposerManager.RMId]; found {
 		return
