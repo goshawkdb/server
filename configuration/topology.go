@@ -14,10 +14,10 @@ var (
 
 type Topology struct {
 	*Configuration
-	FInc      uint8
-	TwoFInc   uint16
-	DBVersion *common.TxnId
-	Roots     Roots
+	FInc         uint8
+	TwoFInc      uint16
+	DBVersion    *common.TxnId
+	RootVarUUIds Roots
 }
 
 type Roots []Root
@@ -40,22 +40,10 @@ type Root struct {
 
 func BlankTopology() *Topology {
 	return &Topology{
-		Configuration: &Configuration{
-			ClusterId:   "",
-			clusterUUId: 0,
-			Version:     0,
-			Hosts:       []string{},
-			F:           0,
-			MaxRMCount:  0,
-			NoSync:      false,
-			ClientCertificateFingerprints: nil,
-			rms:               []common.RMId{},
-			fingerprints:      nil,
-			nextConfiguration: nil,
-		},
-		FInc:      0,
-		TwoFInc:   0,
-		DBVersion: VersionOne,
+		Configuration: BlankConfiguration(),
+		FInc:          0,
+		TwoFInc:       0,
+		DBVersion:     VersionOne,
 	}
 }
 
@@ -67,15 +55,15 @@ func NewTopology(txnId *common.TxnId, rootsCap *msgs.VarIdPos_List, config *Conf
 		DBVersion:     txnId,
 	}
 	if rootsCap != nil {
-		if rootsCap.Len() < len(config.RootNames()) {
-			panic(fmt.Sprintf("NewTopology expected to find at least %v roots by reference, but actually found %v",
-				len(config.RootNames()), rootsCap.Len()))
+		if rootsCap.Len() < len(config.Roots) {
+			panic(fmt.Sprintf("NewTopology expected to find at least %v roots by reference, but only found %v",
+				len(config.Roots), rootsCap.Len()))
 		}
-		t.Roots = make([]Root, rootsCap.Len())
-		for idx := range t.Roots {
+		t.RootVarUUIds = make([]Root, rootsCap.Len())
+		for idx := range t.RootVarUUIds {
 			rootCap := rootsCap.At(idx)
 			positions := rootCap.Positions()
-			root := &t.Roots[idx]
+			root := &t.RootVarUUIds[idx]
 			root.VarUUId = common.MakeVarUUId(rootCap.Id())
 			root.Positions = (*common.Positions)(&positions)
 		}
@@ -89,9 +77,9 @@ func (t *Topology) Clone() *Topology {
 		FInc:          t.FInc,
 		TwoFInc:       t.TwoFInc,
 		DBVersion:     t.DBVersion,
-		Roots:         make([]Root, len(t.Roots)),
+		RootVarUUIds:  make([]Root, len(t.RootVarUUIds)),
 	}
-	copy(c.Roots, t.Roots)
+	copy(c.RootVarUUIds, t.RootVarUUIds)
 	return c
 }
 
@@ -115,10 +103,10 @@ func (t *Topology) String() string {
 	if t == nil {
 		return "nil"
 	}
-	return fmt.Sprintf("Topology{%v, F+1: %v, 2F+1: %v, DBVersion: %v, Roots: %v}",
-		t.Configuration, t.FInc, t.TwoFInc, t.DBVersion, t.Roots)
+	return fmt.Sprintf("Topology{%v, F+1: %v, 2F+1: %v, DBVersion: %v, RootVarUUIds: %v}",
+		t.Configuration, t.FInc, t.TwoFInc, t.DBVersion, t.RootVarUUIds)
 }
 
 func (t *Topology) IsBlank() bool {
-	return t == nil || t.MaxRMCount == 0 || t.RMs().NonEmptyLen() < int(t.TwoFInc)
+	return t == nil || t.MaxRMCount == 0 || t.RMs.NonEmptyLen() < int(t.TwoFInc)
 }

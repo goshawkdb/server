@@ -633,7 +633,7 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callb
 	cm.topology = topology
 	cm.topologySubscribers.TopologyChanged(topology, callbacks)
 	cd := cm.rmToServer[cm.RMId]
-	if clusterUUId := topology.ClusterUUId(); cd.clusterUUId == 0 && clusterUUId != 0 {
+	if clusterUUId := topology.ClusterUUId; cd.clusterUUId == 0 && clusterUUId != 0 {
 		delete(cm.rmToServer, cd.rmId)
 		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cd = cd.clone()
@@ -652,7 +652,7 @@ func (cm *ConnectionManager) TopologyChanged(topology *configuration.Topology, d
 func (cm *ConnectionManager) checkFlushed(topology *configuration.Topology) {
 	if cm.flushedServers != nil && topology != nil {
 		requiredFlushed := len(topology.Hosts) - int(topology.F)
-		for _, rmId := range topology.RMs() {
+		for _, rmId := range topology.RMs {
 			if _, found := cm.flushedServers[rmId]; found {
 				requiredFlushed--
 			}
@@ -676,8 +676,8 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Address: %v", cm.localHost))
 	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.bootcount))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", cm.topology))
-	if cm.topology != nil && cm.topology.Next() != nil {
-		sc.Emit(fmt.Sprintf("Next Topology: %v", cm.topology.Next()))
+	if cm.topology != nil && cm.topology.NextConfiguration != nil {
+		sc.Emit(fmt.Sprintf("Next Topology: %v", cm.topology.NextConfiguration))
 	}
 	serverConnections := make([]string, 0, len(cm.servers))
 	for server := range cm.servers {

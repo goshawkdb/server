@@ -242,7 +242,11 @@ func (s *server) ensureBootCount() error {
 
 func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	if s.configFile != "" {
-		return configuration.LoadConfigurationFromPath(s.configFile)
+		configJSON, err := configuration.LoadJSONFromPath(s.configFile)
+		if err != nil {
+			return nil, err
+		}
+		return configJSON.ToConfiguration(), nil
 	}
 	return nil, nil
 }
@@ -271,12 +275,12 @@ func (s *server) signalReloadConfig() {
 		log.Println("Attempt to reload config failed as no path to configuration provided on command line.")
 		return
 	}
-	config, err := configuration.LoadConfigurationFromPath(s.configFile)
+	config, err := configuration.LoadJSONFromPath(s.configFile)
 	if err != nil {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	s.transmogrifier.RequestConfigurationChange(config)
+	s.transmogrifier.RequestConfigurationChange(config.ToConfiguration())
 }
 
 func (s *server) signalDumpStacks() {

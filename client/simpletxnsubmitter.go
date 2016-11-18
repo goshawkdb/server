@@ -153,7 +153,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 
 func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine, useNextVersion bool, vc versionCache) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() || (sts.topology.Next() != nil && (!useNextVersion || !sts.topology.NextBarrierReached1(sts.rmId))) {
+	if sts.topology.IsBlank() || (sts.topology.NextConfiguration != nil && (!useNextVersion || !sts.topology.NextConfiguration.BarrierReached1For(sts.rmId))) {
 		fun := func() error {
 			return sts.SubmitClientTransaction(translationCallback, ctxnCap, txnId, continuation, delay, useNextVersion, vc)
 		}
@@ -165,7 +165,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.T
 		return nil
 	}
 	version := sts.topology.Version
-	if next := sts.topology.Next(); next != nil && useNextVersion {
+	if next := sts.topology.NextConfiguration; next != nil && useNextVersion {
 		version = next.Version
 	}
 	txnCap, activeRMs, _, err := sts.clientToServerTxn(translationCallback, ctxnCap, version, vc)
@@ -184,10 +184,10 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 		return nil
 	}
 	sts.topology = topology
-	sts.resolver = ch.NewResolver(topology.RMs(), topology.TwoFInc)
+	sts.resolver = ch.NewResolver(topology.RMs, topology.TwoFInc)
 	sts.hashCache.SetResolver(sts.resolver)
 	if topology.Roots != nil {
-		for _, root := range topology.Roots {
+		for _, root := range topology.RootVarUUIds {
 			sts.hashCache.AddPosition(root.VarUUId, root.Positions)
 		}
 	}
@@ -208,8 +208,8 @@ func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() error {
 	if sts.topology == nil || sts.connections == nil {
 		return nil
 	}
-	sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs()))
-	for _, rmId := range sts.topology.RMs() {
+	sts.disabledHashCodes = make(map[common.RMId]server.EmptyStruct, len(sts.topology.RMs))
+	for _, rmId := range sts.topology.RMs {
 		if rmId == common.RMIdEmpty {
 			continue
 		} else if _, found := sts.connections[rmId]; !found {
