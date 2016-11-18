@@ -30,9 +30,9 @@ func NewProposerDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, 
 	return pd
 }
 
-func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *msgs.Txn) {
-	txnId := common.MakeTxnId(txn.Id())
-	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txnId, txn) })
+func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
+	txnId := txn.Id
+	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txn) })
 }
 
 func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
@@ -42,15 +42,17 @@ func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVo
 
 func (pd *ProposerDispatcher) TwoBTxnVotesReceived(sender common.RMId, twoBTxnVotes *msgs.TwoBTxnVotes) {
 	var txnId *common.TxnId
+	var txn *eng.TxnReader
 	switch twoBTxnVotes.Which() {
 	case msgs.TWOBTXNVOTES_FAILURES:
 		txnId = common.MakeTxnId(twoBTxnVotes.Failures().TxnId())
 	case msgs.TWOBTXNVOTES_OUTCOME:
-		txnId = common.MakeTxnId(twoBTxnVotes.Outcome().Txn().Id())
+		txn = eng.TxnReaderFromData(twoBTxnVotes.Outcome().Txn())
+		txnId = txn.Id
 	default:
 		panic(fmt.Sprintf("Unexpected 2BVotes type: %v", twoBTxnVotes.Which()))
 	}
-	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TwoBTxnVotesReceived(sender, txnId, twoBTxnVotes) })
+	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TwoBTxnVotesReceived(sender, txnId, txn, twoBTxnVotes) })
 }
 
 func (pd *ProposerDispatcher) TxnGloballyCompleteReceived(sender common.RMId, tgc *msgs.TxnGloballyComplete) {
@@ -68,10 +70,10 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, sta
 	elemsCount := elemsList.Len()
 	for idx := 0; idx < elemsCount; idx++ {
 		elem := elemsList.At(idx)
-		txnCap := elem.Txn()
-		txnId := common.MakeTxnId(txnCap.Id())
+		txn := eng.TxnReaderFromData(elem.Txn())
+		txnId := txn.Id
 		varCaps := elem.Vars()
-		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txnId, &txnCap, &varCaps, stateChange) })
+		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txn, &varCaps, stateChange) })
 	}
 }
 

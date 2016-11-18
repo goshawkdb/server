@@ -4,27 +4,26 @@ import (
 	"fmt"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
+	tw "github.com/msackman/gotimerwheel"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"math/rand"
 	"time"
 )
 
 type VarManager struct {
 	LocalConnection
-	Topology    *configuration.Topology
-	RMId        common.RMId
-	db          *db.Databases
-	active      map[common.VarUUId]*Var
-	RollAllowed bool
-	onDisk      func(bool)
-	lc          LocalConnection
-	callbacks   []func()
-	beaterLive  bool
-	exe         *dispatcher.Executor
+	Topology         *configuration.Topology
+	RMId             common.RMId
+	db               *db.Databases
+	active           map[common.VarUUId]*Var
+	RollAllowed      bool
+	onDisk           func(bool)
+	tw               *tw.TimerWheel
+	beaterTerminator chan struct{}
+	exe              *dispatcher.Executor
 }
 
 func init() {
@@ -38,7 +37,7 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 		db:              db,
 		active:          make(map[common.VarUUId]*Var),
 		RollAllowed:     false,
-		callbacks:       []func(){},
+		tw:              tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
 		exe:             exe,
 	}
 	exe.Enqueue(func() {
@@ -179,8 +178,8 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 
 func (vm *VarManager) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Active Vars: %v", len(vm.active)))
-	sc.Emit(fmt.Sprintf("- Callbacks: %v", len(vm.callbacks)))
-	sc.Emit(fmt.Sprintf("- Beater live? %v", vm.beaterLive))
+	sc.Emit(fmt.Sprintf("- Callbacks: %v", vm.tw.Length()))
+	sc.Emit(fmt.Sprintf("- Beater live? %v", vm.beaterTerminator != nil))
 	sc.Emit(fmt.Sprintf("- Roll allowed? %v", vm.RollAllowed))
 	for _, v := range vm.active {
 		v.Status(sc.Fork())
@@ -188,44 +187,34 @@ func (vm *VarManager) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (vm *VarManager) ScheduleCallback(fun func()) {
-	vm.callbacks = append(vm.callbacks, fun)
-	if !vm.beaterLive {
-		vm.beaterLive = true
-		terminate := make(chan struct{})
-		go vm.beater(terminate)
+func (vm *VarManager) ScheduleCallback(interval time.Duration, fun tw.Event) {
+	if err := vm.tw.ScheduleEventIn(interval, fun); err != nil {
+		panic(err)
+	}
+	if vm.beaterTerminator == nil {
+		vm.beaterTerminator = make(chan struct{})
+		go vm.beater(vm.beaterTerminator)
 	}
 }
 
-func (vm *VarManager) beat(terminate chan struct{}) {
-	if len(vm.callbacks) != 0 {
-		callbacks := vm.callbacks
-		vm.callbacks = make([]func(), 0, len(callbacks))
-		for _, fun := range callbacks {
-			fun()
-		}
-	}
-	if len(vm.callbacks) == 0 {
-		close(terminate)
-		vm.beaterLive = false
+func (vm *VarManager) beat() {
+	vm.tw.AdvanceTo(time.Now(), 32)
+	// fmt.Println("done:", )
+	if vm.tw.IsEmpty() && vm.beaterTerminator != nil {
+		close(vm.beaterTerminator)
+		vm.beaterTerminator = nil
 	}
 }
 
 func (vm *VarManager) beater(terminate chan struct{}) {
-	barrier := make(chan server.EmptyStruct, 1)
-	fun := func() {
-		vm.beat(terminate)
-		barrier <- server.EmptyStructVal
-	}
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	sleep := 100 * time.Millisecond
 	for {
-		time.Sleep(server.VarIdleTimeoutMin + (time.Duration(rng.Intn(server.VarIdleTimeoutRange)) * time.Millisecond))
+		time.Sleep(sleep)
 		select {
 		case <-terminate:
 			return
 		default:
-			vm.exe.Enqueue(fun)
-			<-barrier
+			vm.exe.Enqueue(vm.beat)
 		}
 	}
 }

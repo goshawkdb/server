@@ -70,7 +70,8 @@ func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarMana
 	return executor.Enqueue(func() { fun(manager) })
 }
 
+type TranslationCallback func(*cmsgs.ClientAction, *msgs.Action, []common.RMId, map[common.RMId]bool) error
 type LocalConnection interface {
-	RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error)
+	RunClientTransaction(*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions, TranslationCallback) (*TxnReader, *msgs.Outcome, error)
 	Status(*server.StatusConsumer)
 }

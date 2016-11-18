@@ -5,14 +5,11 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xe10cac715301f488;
 
-using Txn = import "transaction.capnp";
-using Vec = import "vectorclock.capnp";
-
 struct Outcome {
   id  @0: List(OutcomeId);
-  txn @1: Txn.Txn;
+  txn @1: Data;
   union {
-    commit       @2: Vec.VectorClock;
+    commit       @2: Data;
     abort :group {
       union {
         resubmit @3: Void;
@@ -24,8 +21,8 @@ struct Outcome {
 
 struct Update {
   txnId   @0: Data;
-  actions @1: List(Txn.Action);
-  clock   @2: Vec.VectorClock;
+  actions @1: Data;
+  clock   @2: Data;
 }
 
 struct OutcomeId {

@@ -9,6 +9,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	eng "goshawkdb.io/server/txnengine"
 	"log"
 )
 
@@ -36,8 +37,9 @@ func (ad *AcceptorDispatcher) OneATxnVotesReceived(sender common.RMId, oneATxnVo
 }
 
 func (ad *AcceptorDispatcher) TwoATxnVotesReceived(sender common.RMId, twoATxnVotes *msgs.TwoATxnVotes) {
-	txnId := common.MakeTxnId(twoATxnVotes.Txn().Id())
-	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TwoATxnVotesReceived(sender, txnId, twoATxnVotes) })
+	txn := eng.TxnReaderFromData(twoATxnVotes.Txn())
+	txnId := txn.Id
+	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TwoATxnVotesReceived(sender, txn, twoATxnVotes) })
 }
 
 func (ad *AcceptorDispatcher) TxnLocallyCompleteReceived(sender common.RMId, tlc *msgs.TxnLocallyComplete) {

@@ -5,18 +5,19 @@ import (
 )
 
 const (
-	ServerVersion                 = "0.2"
+	ServerVersion                 = "0.3"
 	MDBInitialSize                = 1048576
 	TwoToTheSixtyThree            = 9223372036854775808
-	SubmissionInitialAttempts     = 5
-	SubmissionInitialBackoff      = 2 * time.Microsecond
+	SubmissionMinSubmitDelay      = 2 * time.Millisecond
 	SubmissionMaxSubmitDelay      = 2 * time.Second
-	VarIdleTimeoutMin             = 50 * time.Millisecond
-	VarIdleTimeoutRange           = 250
-	FrameLockMinExcessSize        = 100
-	FrameLockMinRatio             = 2
+	VarRollDelayMin               = 50 * time.Millisecond
+	VarRollDelayMax               = 500 * time.Millisecond
+	VarRollTimeExpectation        = 3 * time.Millisecond
+	VarRollPRequirement           = 0.9
+	VarRollForceNotFirstAfter     = time.Second
 	ConnectionRestartDelayRangeMS = 5000
 	ConnectionRestartDelayMin     = 3 * time.Second
 	MostRandomByteIndex           = 7 // will be the lsb of a big-endian client-n in the txnid.
 	MigrationBatchElemCount       = 64
+	PoissonSamples                = 64
 )

@@ -82,7 +82,7 @@ func (chc *ConsistentHashCache) Remove(vUUId *common.VarUUId) {
 // In here, we don't actually add to the cache because we don't know
 // if the corresponding txn is going to commit or not.
 func (chc *ConsistentHashCache) CreatePositions(vUUId *common.VarUUId, positionsLength int) (*common.Positions, []common.RMId, error) {
-	positionsCap := capn.NewBuffer(nil).NewUInt8List(positionsLength)
+	positionsCap := capn.NewBuffer(make([]byte, 0, positionsLength*2)).NewUInt8List(positionsLength)
 	positionsSlice := make([]uint8, positionsLength)
 	n, entropy := uint64(chc.rng.Int63()), uint64(server.TwoToTheSixtyThree)
 	for idx := range positionsSlice {

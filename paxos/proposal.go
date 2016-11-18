@@ -15,8 +15,7 @@ type proposal struct {
 	acceptors          []common.RMId
 	activeRMIds        map[common.RMId]uint32
 	fInc               int
-	txn                *msgs.Txn
-	txnId              *common.TxnId
+	txn                *eng.TxnReader
 	submitter          common.RMId
 	submitterBootCount uint32
 	skipPhase1         bool
@@ -26,8 +25,9 @@ type proposal struct {
 	finished           bool
 }
 
-func NewProposal(pm *ProposerManager, txnId *common.TxnId, txn *msgs.Txn, fInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
-	allocs := txn.Allocations()
+func NewProposal(pm *ProposerManager, txn *eng.TxnReader, fInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
+	txnCap := txn.Txn
+	allocs := txnCap.Allocations()
 	activeRMIds := make(map[common.RMId]uint32, allocs.Len())
 	for idx, l := 0, allocs.Len(); idx < l; idx++ {
 		alloc := allocs.At(idx)
@@ -45,9 +45,8 @@ func NewProposal(pm *ProposerManager, txnId *common.TxnId, txn *msgs.Txn, fInc i
 		activeRMIds:        activeRMIds,
 		fInc:               fInc,
 		txn:                txn,
-		txnId:              txnId,
-		submitter:          common.RMId(txn.Submitter()),
-		submitterBootCount: txn.SubmitterBootCount(),
+		submitter:          common.RMId(txnCap.Submitter()),
+		submitterBootCount: txnCap.SubmitterBootCount(),
 		skipPhase1:         skipPhase1,
 		instances:          make(map[common.VarUUId]*proposalInstance, len(ballots)),
 		pending:            make([]*proposalInstance, 0, len(ballots)),
@@ -100,7 +99,8 @@ func (p *proposal) maybeSendOneA() {
 	sender := newProposalSender(p, pendingPromises)
 	oneACap := msgs.NewOneATxnVotes(seg)
 	msg.SetOneATxnVotes(oneACap)
-	oneACap.SetTxnId(p.txnId[:])
+	txnId := p.txn.Id
+	oneACap.SetTxnId(txnId[:])
 	oneACap.SetRmId(uint32(p.instanceRMId))
 	proposals := msgs.NewTxnVoteProposalList(seg, len(pendingPromises))
 	oneACap.SetProposals(proposals)
@@ -109,7 +109,7 @@ func (p *proposal) maybeSendOneA() {
 		pi.addOneAToProposal(&proposal, sender)
 	}
 	sender.msg = server.SegToBytes(seg)
-	server.Log(p.txnId, "Adding sender for 1A")
+	server.Log(txnId, "Adding sender for 1A")
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -143,19 +143,13 @@ func (p *proposal) maybeSendTwoA() {
 	twoACap.SetRmId(uint32(p.instanceRMId))
 	acceptRequests := msgs.NewTxnVoteAcceptRequestList(seg, len(pendingAccepts))
 	twoACap.SetAcceptRequests(acceptRequests)
-	deflate := false
 	for idx, pi := range pendingAccepts {
 		acceptRequest := acceptRequests.At(idx)
-		deflate = pi.addTwoAToAcceptRequest(seg, &acceptRequest, sender) || deflate
+		pi.addTwoAToAcceptRequest(seg, &acceptRequest, sender)
 	}
-	if deflate {
-		deflated := deflateTxn(p.txn, seg)
-		twoACap.SetTxn(*deflated)
-	} else {
-		twoACap.SetTxn(*p.txn)
-	}
+	twoACap.SetTxn(p.txn.Data)
 	sender.msg = server.SegToBytes(seg)
-	server.Log(p.txnId, "Adding sender for 2A")
+	server.Log(p.txn.Id, "Adding sender for 2A")
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -179,12 +173,12 @@ func (p *proposal) FinishProposing() []common.RMId {
 	for _, pi := range p.instances {
 		if sender := pi.oneASender; sender != nil {
 			pi.oneASender = nil
-			server.Log(p.txnId, "finishing sender for 1A")
+			server.Log(p.txn.Id, "finishing sender for 1A")
 			sender.finished()
 		}
 		if sender := pi.twoASender; sender != nil {
 			pi.twoASender = nil
-			server.Log(p.txnId, pi.ballot.VarUUId, "finishing sender for 2A")
+			server.Log(p.txn.Id, pi.ballot.VarUUId, "finishing sender for 2A")
 			sender.finished()
 		}
 	}
@@ -192,7 +186,7 @@ func (p *proposal) FinishProposing() []common.RMId {
 }
 
 func (p *proposal) Status(sc *server.StatusConsumer) {
-	sc.Emit(fmt.Sprintf("Proposal for %v-%v", p.txnId, p.instanceRMId))
+	sc.Emit(fmt.Sprintf("Proposal for %v-%v", p.txn.Id, p.instanceRMId))
 	sc.Emit(fmt.Sprintf("- Acceptors: %v", p.acceptors))
 	sc.Emit(fmt.Sprintf("- Instances: %v", len(p.instances)))
 	sc.Emit(fmt.Sprintf("- Finished? %v", p.finished))
@@ -290,7 +284,7 @@ type proposalOneB struct {
 	*proposalInstance
 	promisesReceivedFrom []common.RMId
 	winningRound         paxosNumber
-	winningBallot        *msgs.Ballot
+	winningBallot        []byte
 }
 
 func (oneB *proposalOneB) proposalInstanceComponentWitness() {}
@@ -328,8 +322,7 @@ func (oneB *proposalOneB) oneBTxnVotesReceived(sender common.RMId, promise *msgs
 		accepted := promise.Accepted()
 		if roundNumber = paxosNumber(accepted.RoundNumber()); roundNumber > oneB.winningRound {
 			oneB.winningRound = roundNumber
-			ballot := accepted.Ballot()
-			oneB.winningBallot = &ballot
+			oneB.winningBallot = accepted.Ballot()
 		}
 	default:
 		panic(fmt.Sprintf("Unexpected promise type: %v", promise.Which()))
@@ -365,20 +358,18 @@ func (twoA *proposalTwoA) init(pi *proposalInstance) {
 
 func (twoA *proposalTwoA) start() {}
 
-func (twoA *proposalTwoA) addTwoAToAcceptRequest(seg *capn.Segment, acceptRequest *msgs.TxnVoteAcceptRequest, sender *proposalSender) bool {
-	var ballotPtr *msgs.Ballot
+func (twoA *proposalTwoA) addTwoAToAcceptRequest(seg *capn.Segment, acceptRequest *msgs.TxnVoteAcceptRequest, sender *proposalSender) {
+	var ballotData []byte
 	if twoA.winningBallot == nil { // free choice from everyone
-		ballot := twoA.ballot.AddToSeg(seg)
-		ballotPtr = &ballot
+		ballotData = twoA.ballot.Data
 	} else {
-		ballotPtr = twoA.winningBallot
+		ballotData = twoA.winningBallot
 	}
-	acceptRequest.SetBallot(*ballotPtr)
+	acceptRequest.SetBallot(ballotData)
 
 	acceptRequest.SetRoundNumber(uint64(twoA.currentRoundNumber))
 	twoA.twoASender = sender
 	twoA.nextState(nil)
-	return ballotPtr.Vote().Which() != msgs.VOTE_COMMIT
 }
 
 // twoB
@@ -498,7 +489,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			if s.proposal.finished {
 				return
 			}
-			allocs := s.proposal.txn.Allocations()
+			allocs := s.proposal.txn.Txn.Allocations()
 			for idx, l := 0, allocs.Len(); idx < l; idx++ {
 				alloc := allocs.At(idx)
 				rmId := common.RMId(alloc.RmId())
@@ -518,17 +509,17 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 						break
 					}
 					ballots := MakeAbortBallots(s.proposal.txn, &alloc)
-					server.Log(s.proposal.txnId, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
+					server.Log(s.proposal.txn.Id, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
 					s.proposal.abortInstances = append(s.proposal.abortInstances, rmId)
 					s.proposal.proposerManager.NewPaxosProposals(
-						s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, rmId, false)
+						s.txn, s.fInc, ballots, s.proposal.acceptors, rmId, false)
 				}
 			}
 		})
 		return
 	}
 
-	alloc := AllocForRMId(s.proposal.txn, lost)
+	alloc := AllocForRMId(s.proposal.txn.Txn, lost)
 	if alloc == nil || alloc.Active() == 0 {
 		return
 	}
@@ -542,14 +533,14 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			}
 		}
 		ballots := MakeAbortBallots(s.proposal.txn, alloc)
-		server.Log(s.proposal.txnId, "Trying to abort for", lost, "Found actions:", len(ballots))
+		server.Log(s.proposal.txn.Id, "Trying to abort for", lost, "Found actions:", len(ballots))
 		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
 		s.proposal.proposerManager.NewPaxosProposals(
-			s.txnId, s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
+			s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
 	})
 }
 
-func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
 	for _, acc := range s.proposal.acceptors {
 		if acc == rmId {
 			conn.Send(s.msg)
@@ -559,4 +550,5 @@ func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection
 	if bootCount, found := s.proposal.activeRMIds[rmId]; found && bootCount != conn.BootCount() {
 		s.ConnectionLost(rmId, conns)
 	}
+	done()
 }

@@ -9,6 +9,7 @@ import (
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
@@ -66,7 +67,10 @@ func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configurati
 	tt.enqueueQuery(topologyTransmogrifierMsgRequestConfigChange{config: config})
 }
 
-type topologyTransmogrifierMsgSetActiveConnections map[common.RMId]paxos.Connection
+type topologyTransmogrifierMsgSetActiveConnections struct {
+	servers map[common.RMId]paxos.Connection
+	done    func()
+}
 
 func (ttmsac topologyTransmogrifierMsgSetActiveConnections) witness() topologyTransmogrifierMsg {
 	return ttmsac
@@ -153,23 +157,26 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 
 	cm.AddServerConnectionSubscriber(tt)
 
-	go tt.actorLoop(head, config)
+	go tt.actorLoop(head)
 	return tt, tt.localEstablished
 }
 
 func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{servers: conns})
 }
 
 func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{servers: conns})
 }
 
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections(conns))
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{
+		servers: conns,
+		done:    done,
+	})
 }
 
-func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *configuration.Configuration) {
+func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 	subscriberInstalled := make(chan struct{})
 	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var) {
 		if v == nil {
@@ -178,12 +185,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 		v.AddWriteSubscriber(configuration.VersionOne,
 			&eng.VarWriteSubscriber{
 				Observe: func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-					var rootVarPosPtr *msgs.VarIdPos
-					if refs.Len() > 0 {
-						root := refs.At(0)
-						rootVarPosPtr = &root
-					}
-					topology, err := configuration.TopologyFromCap(txn.Id, rootVarPosPtr, value)
+					topology, err := configuration.TopologyFromCap(txn.Id, refs, value)
 					if err != nil {
 						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 					}
@@ -219,7 +221,10 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead, config *confi
 			case topologyTransmogrifierMsgShutdown:
 				terminate = true
 			case topologyTransmogrifierMsgSetActiveConnections:
-				err = tt.activeConnectionsChange(msgT)
+				err = tt.activeConnectionsChange(msgT.servers)
+				if msgT.done != nil {
+					msgT.done()
+				}
 			case topologyTransmogrifierMsgTopologyObserved:
 				server.Log("Topology: New topology observed:", msgT.topology)
 				err = tt.setActive(msgT.topology)
@@ -267,9 +272,10 @@ func (tt *TopologyTransmogrifier) activeConnectionsChange(conns map[common.RMId]
 }
 
 func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) error {
+	server.Log("Topology: setActive:", topology)
 	if tt.active != nil {
 		switch {
-		case tt.active.ClusterId != topology.ClusterId:
+		case tt.active.ClusterId != topology.ClusterId && tt.active.ClusterId != "":
 			return fmt.Errorf("Topology: Fatal: config with ClusterId change from '%s' to '%s'.",
 				tt.active.ClusterId, topology.ClusterId)
 
@@ -355,13 +361,19 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
 	if tt.active != nil {
+		activeClusterUUId, goalClusterUUId := tt.active.ClusterUUId(), goal.ClusterUUId()
 		switch {
 		case goal.Version == 0:
 			return // done.
 
-		case goal.ClusterId != tt.active.ClusterId:
+		case goal.ClusterId != tt.active.ClusterId && tt.active.ClusterId != "":
 			log.Printf("Topology: Illegal config: ClusterId should be '%s' instead of '%s'.",
 				tt.active.ClusterId, goal.ClusterId)
+			return
+
+		case goalClusterUUId != 0 && activeClusterUUId != 0 && goalClusterUUId != activeClusterUUId:
+			log.Printf("Topology: Illegal config: ClusterUUId should be '%v' instead of '%v'.",
+				activeClusterUUId, goalClusterUUId)
 			return
 
 		case goal.MaxRMCount != tt.active.MaxRMCount && tt.active.Version != 0:
@@ -376,6 +388,10 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 		case goal.Version == tt.active.Version:
 			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
 			return
+		}
+
+		if activeClusterUUId != 0 {
+			goal.SetClusterUUId(activeClusterUUId)
 		}
 	}
 
@@ -412,17 +428,19 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 	}
 }
 
-func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask) {
-	sleep := time.Duration(tt.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
-	go func() {
-		time.Sleep(sleep)
-		tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			if tt.task == task {
-				return tt.task.tick()
-			}
-			return nil
-		}))
-	}()
+func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask, tc *targetConfig) {
+	if !tc.tickEnqueued {
+		tc.tickEnqueued = true
+		tc.backoff.After(func() {
+			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				tc.tickEnqueued = false
+				if tt.task == task {
+					return tt.task.tick()
+				}
+				return nil
+			}))
+		})
+	}
 }
 
 func (tt *TopologyTransmogrifier) migrationReceived(migration topologyTransmogrifierMsgMigration) error {
@@ -503,7 +521,7 @@ type migrationTxnLocalStateChange struct {
 	inprogressPtr          *int32
 }
 
-func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(*eng.Txn, ...*eng.Ballot) {
+func (mtlsc *migrationTxnLocalStateChange) TxnBallotsComplete(...*eng.Ballot) {
 	panic("TxnBallotsComplete called on migrating txn.")
 }
 
@@ -536,17 +554,22 @@ type topologyTask interface {
 
 type targetConfig struct {
 	*TopologyTransmogrifier
-	config *configuration.NextConfiguration
-	sender paxos.ServerConnectionSubscriber
+	config       *configuration.NextConfiguration
+	sender       paxos.ServerConnectionSubscriber
+	backoff      *server.BinaryBackoffEngine
+	tickEnqueued bool
 }
 
 func (task *targetConfig) tick() error {
+	task.backoff = nil
+	task.tickEnqueued = false
+
 	switch {
 	case task.active == nil:
 		log.Println("Topology: Ensuring local topology.")
 		task.task = &ensureLocalTopology{task}
 
-	case task.active.Version == 0:
+	case task.active.ClusterId == "":
 		log.Printf("Topology: Attempting to join cluster with configuration: %v", task.config)
 		task.task = &joinCluster{targetConfig: task}
 
@@ -643,13 +666,13 @@ func (task *targetConfig) partitionByActiveConnection(rmIdLists ...common.RMIds)
 	return active, passive
 }
 
-func (task *targetConfig) verifyRoots(rootId *common.VarUUId, remoteHosts []string) (bool, error) {
+func (task *targetConfig) verifyClusterUUIds(clusterUUId uint64, remoteHosts []string) (bool, error) {
 	for _, host := range remoteHosts {
 		if cd, found := task.hostToConnection[host]; found {
-			switch remoteRootId := cd.RootId(); {
-			case remoteRootId == nil:
+			switch remoteClusterUUId := cd.ClusterUUId(); {
+			case remoteClusterUUId == 0:
 				// they're joining
-			case rootId.Compare(remoteRootId) == common.EQ:
+			case clusterUUId == remoteClusterUUId:
 				// all good
 			default:
 				return false, errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting topology change.")
@@ -693,6 +716,14 @@ func (task *targetConfig) isInRMs(rmIds common.RMIds) bool {
 	return false
 }
 
+func (task *targetConfig) createOrAdvanceBackoff() {
+	if task.backoff == nil {
+		task.backoff = server.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, time.Duration(len(task.config.Hosts))*server.SubmissionMaxSubmitDelay)
+	} else {
+		task.backoff.Advance()
+	}
+}
+
 // ensureLocalTopology
 
 type ensureLocalTopology struct {
@@ -701,7 +732,7 @@ type ensureLocalTopology struct {
 
 func (task *ensureLocalTopology) tick() error {
 	if task.active != nil {
-		// the fact we're here means we're done - there is a topology
+		// The fact we're here means we're done - there is a topology
 		// discovered one way or another.
 		if err := task.completed(); err != nil {
 			return err
@@ -709,13 +740,6 @@ func (task *ensureLocalTopology) tick() error {
 		// However, just because we have a local config doesn't mean it
 		// actually satisfies the goal. Essentially, we're pretending
 		// that the goal is in Next().
-		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.ConnectionManagerSubscriber: func() error {
-				if task.task != nil {
-					return task.task.tick()
-				}
-				return nil
-			}})
 		task.selectGoal(task.config)
 		return nil
 	}
@@ -729,7 +753,7 @@ func (task *ensureLocalTopology) tick() error {
 		return task.fatal(err)
 	}
 
-	if topology == nil && task.config.ClusterId == "" {
+	if topology == nil && (task.config == nil || task.config.Configuration == nil || task.config.ClusterId == "") {
 		return task.fatal(errors.New("No configuration supplied and no configuration found in local store. Cannot continue."))
 
 	} else if topology == nil {
@@ -752,8 +776,15 @@ type joinCluster struct {
 }
 
 func (task *joinCluster) tick() error {
-	if task.active.Version != 0 {
-		return task.completed()
+	if !(task.active.ClusterId == "") {
+		if err := task.completed(); err != nil {
+			return err
+		}
+		// Exactly the same logic as in ensureLocalTopology: the active
+		// probably doesn't have a Next set; even if it does, it may
+		// have no relationship to task.config.
+		task.selectGoal(task.config)
+		return nil
 	}
 
 	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
@@ -763,8 +794,12 @@ func (task *joinCluster) tick() error {
 		return task.fatal(err)
 	}
 
-	// must install to connectionManager before launching any connections
-	task.installTopology(task.active, nil)
+	// Set up the ClusterId so that we can actually create some connections.
+	active := task.active.Clone()
+	active.ClusterId = task.config.ClusterId
+
+	// Must install to connectionManager before launching any connections
+	task.installTopology(active, nil)
 	// we may not have the youngest topology and there could be other
 	// hosts who have connected to us who are trying to send us a more
 	// up to date topology. So we shouldn't kill off those connections.
@@ -778,7 +813,7 @@ func (task *joinCluster) tick() error {
 	task.shareGoalWithAll()
 
 	rmIds := make([]common.RMId, 0, len(task.config.Hosts))
-	var rootId *common.VarUUId
+	clusterUUId := uint64(0)
 	for _, host := range task.config.Hosts {
 		cd, found := task.hostToConnection[host]
 		if !found {
@@ -787,12 +822,12 @@ func (task *joinCluster) tick() error {
 			return nil
 		}
 		rmIds = append(rmIds, cd.RMId())
-		switch theirRootId := cd.RootId(); {
-		case theirRootId == nil:
+		switch theirClusterUUId := cd.ClusterUUId(); {
+		case theirClusterUUId == 0:
 			// they're joining too
-		case rootId == nil:
-			rootId = theirRootId
-		case rootId.Compare(theirRootId) == common.EQ:
+		case clusterUUId == 0:
+			clusterUUId = theirClusterUUId
+		case clusterUUId == theirClusterUUId:
 			// all good
 		default:
 			return task.fatal(
@@ -800,7 +835,7 @@ func (task *joinCluster) tick() error {
 		}
 	}
 
-	if allJoining := rootId == nil; allJoining {
+	if allJoining := clusterUUId == 0; allJoining {
 		// Note that the order of RMIds here matches the order of hosts.
 		return task.allJoining(rmIds)
 
@@ -816,62 +851,19 @@ func (task *joinCluster) tick() error {
 }
 
 func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
-	targetTopology := configuration.NewTopology(task.active.DBVersion, nil, task.config.Configuration)
-	targetTopology.SetRMs(allRMIds)
+	// NB: active never gets installed to the DB itself.
+	config := task.config
+	config1 := configuration.BlankTopology().Configuration
+	config1.ClusterId = config.ClusterId
+	config1.Hosts = config.Hosts
+	config1.F = config.F
+	config1.MaxRMCount = config.MaxRMCount
+	config1.SetRMs(allRMIds)
 
-	// NB: activeWithNext never gets installed to the DB itself.
-	activeWithNext := task.active.Clone()
-	activeWithNext.SetNext(&configuration.NextConfiguration{
-		Configuration: targetTopology.Configuration,
-		AllHosts:      activeWithNext.Hosts,
-		NewRMIds:      allRMIds,
-	})
+	active := task.active.Clone()
+	active.SetConfiguration(config1)
 
-	// We're about to create and run a txn, so we must make sure that
-	// txn's topology version is acceptable to our proposers.
-	task.installTopology(activeWithNext, nil)
-
-	switch resubmit, err := task.attemptCreateRoot(targetTopology); {
-	case err != nil:
-		return task.fatal(err)
-	case resubmit:
-		server.Log("Topology: Root creation needs resubmit")
-		task.enqueueTick(task)
-		return nil
-	case targetTopology.Root.VarUUId == nil:
-		// We failed; likely we need to wait for connections to change
-		server.Log("Topology: Root creation failed")
-		return nil
-	}
-
-	// Finally we need to rewrite the topology. For allJoining, we
-	// must use everyone as active. This is because we could have
-	// seen one of our peers when it had no RootId, but we've since
-	// lost that connection and in fact that peer has gone off and
-	// joined another cluster. So the only way to be instantaneously
-	// sure that all peers are empty and moving to the same topology
-	// is to have all peers as active.
-
-	// If we got this far then attemptCreateRoot will have modified
-	// targetTopology to include the updated root. We should install
-	// this to the connectionManager.
-	activeWithNext.Root = targetTopology.Root
-	task.installTopology(activeWithNext, nil)
-
-	result, resubmit, err := task.rewriteTopology(task.active, targetTopology, allRMIds, nil)
-	if err != nil {
-		return task.fatal(err)
-	}
-	if resubmit {
-		server.Log("Topology: Topology rewrite needs resubmit", allRMIds, result)
-		task.enqueueTick(task)
-		return nil
-	}
-	// !resubmit, so MUST be a BadRead, or success. By definition,
-	// if allJoining, everyone is active. So even if we weren't
-	// successful rewriting ourself, we're guaranteed to be sent
-	// someone else's write through the subscriber.
-	return nil
+	return task.setActive(active)
 }
 
 // installTargetOld
@@ -899,7 +891,7 @@ func (task *installTargetOld) tick() error {
 	// the others so they might calculate different targets and then
 	// we'd be racing.
 
-	targetTopology, err := task.calculateTargetTopology()
+	targetTopology, rootsRequired, err := task.calculateTargetTopology()
 	if err != nil || targetTopology == nil {
 		return err
 	}
@@ -916,14 +908,32 @@ func (task *installTargetOld) tick() error {
 	// add on all new (if there are any) as passives
 	passive = append(passive, targetTopology.Next().NewRMIds...)
 
-	log.Printf("Topology: Calculated target topology: %v (active: %v, passive: %v)", targetTopology.Next(), active, passive)
+	log.Printf("Topology: Calculated target topology: %v (new rootsRequired: %v, active: %v, passive: %v)", targetTopology.Next(), rootsRequired, active, passive)
+
+	if rootsRequired != 0 {
+		resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
+		if err != nil {
+			return task.fatal(err)
+		}
+		if resubmit {
+			task.createOrAdvanceBackoff()
+			task.enqueueTick(task, task.targetConfig)
+			return nil
+		}
+		targetTopology.Roots = append(targetTopology.Roots, roots...)
+	}
+
+	targetTopology.SetClusterUUId(task.active.ClusterUUId())
+	server.Log("Set cluster uuid", targetTopology.ClusterUUId())
 
 	_, resubmit, err := task.rewriteTopology(task.active, targetTopology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.enqueueTick(task)
+		server.Log("Topology: Installing to old requires resubmit.")
+		task.createOrAdvanceBackoff()
+		task.enqueueTick(task, task.targetConfig)
 		return nil
 	}
 	// Must be badread, which means again we should receive the
@@ -931,10 +941,10 @@ func (task *installTargetOld) tick() error {
 	return nil
 }
 
-func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, error) {
+func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, int, error) {
 	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
-		return nil, task.fatal(err)
+		return nil, 0, task.fatal(err)
 	}
 
 	hostsSurvived, hostsRemoved, hostsAdded :=
@@ -974,11 +984,11 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// the -1 is because allRemoteHosts will not include localHost
 	hostsAddedList := allRemoteHosts[len(hostsOld)-1:]
-	allAddedFound, err := task.verifyRoots(task.active.Root.VarUUId, hostsAddedList)
+	allAddedFound, err := task.verifyClusterUUIds(task.active.ClusterUUId(), hostsAddedList)
 	if err != nil {
-		return nil, task.error(err)
+		return nil, 0, task.error(err)
 	} else if !allAddedFound {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// map(old -> new)
@@ -996,7 +1006,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	for host := range hostsAdded {
 		cd, found := task.hostToConnection[host]
 		if !found {
-			return nil, nil
+			return nil, 0, nil
 		}
 		hostsAdded[host] = cd
 		connsAdded = append(connsAdded, cd)
@@ -1085,17 +1095,39 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	}
 	conds := calculateMigrationConditions(rmIdsAdded, rmIdsLost, rmIdsSurvived, task.active.Configuration, next)
 
+	// now figure out which roots have survived and how many new ones
+	// we need to create.
+	oldNamesList := targetTopology.RootNames()
+	oldNamesCount := len(oldNamesList)
+	oldNames := make(map[string]uint32, oldNamesCount)
+	for idx, name := range oldNamesList {
+		oldNames[name] = uint32(idx)
+	}
+	newNames := next.RootNames()
+	rootsRequired := 0
+	rootIndices := make([]uint32, len(newNames))
+	for idx, name := range newNames {
+		if index, found := oldNames[name]; found {
+			rootIndices[idx] = index
+		} else {
+			rootIndices[idx] = uint32(oldNamesCount + rootsRequired)
+			rootsRequired++
+		}
+	}
+	targetTopology.Roots = targetTopology.Roots[:oldNamesCount]
+
 	targetTopology.SetNext(&configuration.NextConfiguration{
 		Configuration:  next,
 		AllHosts:       append(allRemoteHosts, localHost),
 		NewRMIds:       rmIdsAdded,
 		SurvivingRMIds: rmIdsSurvived,
 		LostRMIds:      rmIdsLost,
+		RootIndices:    rootIndices,
 		InstalledOnNew: len(rmIdsAdded) == 0,
 		Pending:        conds,
 	})
 
-	return targetTopology, nil
+	return targetTopology, rootsRequired, nil
 }
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
@@ -1178,7 +1210,7 @@ func (task *installTargetNew) tick() error {
 	fInc := ((len(active) + len(passive)) >> 1) + 1
 	active, passive = active[:fInc], append(active[fInc:], passive...)
 
-	newActive := task.active.Next().NewRMIds
+	newActive := next.NewRMIds
 	for _, rmId := range newActive {
 		if _, found := task.activeConnections[rmId]; !found {
 			log.Printf("Topology: awaiting connections to new cluster members.")
@@ -1197,8 +1229,9 @@ func (task *installTargetNew) tick() error {
 		return task.fatal(err)
 	}
 	if resubmit {
-		server.Log("Topology: Topology extension requires resubmit.")
-		task.enqueueTick(task)
+		server.Log("Topology: Installing to new requires resubmit.")
+		task.createOrAdvanceBackoff()
+		task.enqueueTick(task, task.targetConfig)
 	}
 	return nil
 }
@@ -1264,7 +1297,8 @@ func (task *awaitBarrier1) tick() error {
 		}
 		if resubmit {
 			server.Log("Topology: Barrier1 reached. Requires resubmit.")
-			task.enqueueTick(task)
+			task.createOrAdvanceBackoff()
+			task.enqueueTick(task, task.targetConfig)
 		}
 
 	} else if activeNextConfig != task.installing {
@@ -1373,7 +1407,8 @@ func (task *awaitBarrier2) tick() error {
 		}
 		if resubmit {
 			server.Log("Topology: Barrier2 reached. Requires resubmit.")
-			task.enqueueTick(task)
+			task.createOrAdvanceBackoff()
+			task.enqueueTick(task, task.targetConfig)
 		}
 
 	} else if activeNextConfig != task.installing {
@@ -1474,7 +1509,8 @@ func (task *migrate) tick() error {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.enqueueTick(task)
+		task.createOrAdvanceBackoff()
+		task.enqueueTick(task, task.targetConfig)
 		return nil
 	}
 	// Must be badread, which means again we should receive the
@@ -1547,12 +1583,20 @@ func (task *installCompletion) tick() error {
 	topology := task.active.Clone()
 	topology.SetConfiguration(next.Configuration)
 
+	oldRoots := task.active.Roots
+	newRoots := make([]configuration.Root, len(next.RootIndices))
+	for idx, index := range next.RootIndices {
+		newRoots[idx] = oldRoots[index]
+	}
+	topology.Roots = newRoots
+
 	_, resubmit, err := task.rewriteTopology(task.active, topology, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	}
 	if resubmit {
-		task.enqueueTick(task)
+		task.createOrAdvanceBackoff()
+		task.enqueueTick(task, task.targetConfig)
 		return nil
 	}
 	// Must be badread, which means again we should receive the
@@ -1568,12 +1612,14 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 	}
 
 	seg := capn.NewBuffer(nil)
-	txn := msgs.NewTxn(seg)
+	txn := msgs.NewRootTxn(seg)
 	txn.SetSubmitter(uint32(task.connectionManager.RMId))
-	txn.SetSubmitterBootCount(task.connectionManager.BootCount)
+	txn.SetSubmitterBootCount(task.connectionManager.BootCount())
 
-	actions := msgs.NewActionList(seg, 1)
-	txn.SetActions(actions)
+	actionsSeg := capn.NewBuffer(nil)
+	actionsWrapper := msgs.NewRootActionListWrapper(actionsSeg)
+	actions := msgs.NewActionList(actionsSeg, 1)
+	actionsWrapper.SetActions(actions)
 	action := actions.At(0)
 	action.SetVarId(configuration.TopologyVarUUId[:])
 
@@ -1603,12 +1649,16 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 		rw := action.Readwrite()
 		rw.SetVersion(read.DBVersion[:])
 		rw.SetValue(write.Serialize())
-		refs := msgs.NewVarIdPosList(seg, 1)
+		roots := write.Roots
+		refs := msgs.NewVarIdPosList(seg, len(roots))
+		for idx, root := range roots {
+			varIdPos := refs.At(idx)
+			varIdPos.SetId(root.VarUUId[:])
+			varIdPos.SetPositions((capn.UInt8List)(*root.Positions))
+		}
 		rw.SetReferences(refs)
-		varIdPos := refs.At(0)
-		varIdPos.SetId(write.Root.VarUUId[:])
-		varIdPos.SetPositions((capn.UInt8List)(*write.Root.Positions))
 	}
+	txn.SetActions(server.SegToBytes(actionsSeg))
 
 	allocs := msgs.NewAllocationList(seg, len(active)+len(passive))
 	txn.SetAllocations(allocs)
@@ -1651,10 +1701,11 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 		return nil, err
 	}
 
+	backoff := server.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
 	for {
 		txn := task.createTopologyTransaction(nil, nil, []common.RMId{task.connectionManager.RMId}, nil)
 
-		result, err := task.localConnection.RunTransaction(txn, true, task.connectionManager.RMId)
+		_, result, err := task.localConnection.RunTransaction(txn, nil, backoff, task.connectionManager.RMId)
 		if err != nil {
 			return nil, err
 		}
@@ -1666,6 +1717,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 		}
 		abort := result.Abort()
 		if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
+			backoff.Advance()
 			continue
 		}
 		abortUpdates := abort.Rerun()
@@ -1674,7 +1726,7 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 		}
 		update := abortUpdates.At(0)
 		dbversion := common.MakeTxnId(update.TxnId())
-		updateActions := update.Actions()
+		updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
 		if updateActions.Len() != 1 {
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave multiple actions: %v", updateActions.Len())
 		}
@@ -1686,22 +1738,19 @@ func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topolog
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave non-write action")
 		}
 		write := updateAction.Write()
-		var rootPtr *msgs.VarIdPos
-		if refs := write.References(); refs.Len() == 1 {
-			root := refs.At(0)
-			rootPtr = &root
-		}
-		return configuration.TopologyFromCap(dbversion, rootPtr, write.Value())
+		refs := write.References()
+		return configuration.TopologyFromCap(dbversion, &refs, write.Value())
 	}
 }
 
 func (task *targetConfig) createTopologyZero(config *configuration.NextConfiguration) (*configuration.Topology, error) {
-	topology := configuration.BlankTopology(config.ClusterId)
+	topology := configuration.BlankTopology()
 	topology.SetNext(config)
 	txn := task.createTopologyTransaction(nil, topology, []common.RMId{task.connectionManager.RMId}, nil)
 	txnId := topology.DBVersion
 	txn.SetId(txnId[:])
-	result, err := task.localConnection.RunTransaction(txn, false, task.connectionManager.RMId)
+	// in general, we do backoff locally, so don't pass backoff through here
+	_, result, err := task.localConnection.RunTransaction(txn, txnId, nil, task.connectionManager.RMId)
 	if err != nil {
 		return nil, err
 	}
@@ -1718,11 +1767,12 @@ func (task *targetConfig) createTopologyZero(config *configuration.NextConfigura
 func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, active, passive common.RMIds) (*configuration.Topology, bool, error) {
 	txn := task.createTopologyTransaction(read, write, active, passive)
 
-	result, err := task.localConnection.RunTransaction(txn, true, active...)
+	// in general, we do backoff locally, so don't pass backoff through here
+	txnReader, result, err := task.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
 		return nil, false, err
 	}
-	txnId := common.MakeTxnId(result.Txn().Id())
+	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
 		topology := write.Clone()
 		topology.DBVersion = txnId
@@ -1743,7 +1793,7 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, a
 	update := abortUpdates.At(0)
 	dbversion := common.MakeTxnId(update.TxnId())
 
-	updateActions := update.Actions()
+	updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
 		return nil, false,
 			fmt.Errorf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
@@ -1760,95 +1810,64 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, a
 			fmt.Errorf("Internal error: update action from readwrite of topology gave non-write action!")
 	}
 	writeAction := updateAction.Write()
-	var rootVarPos *msgs.VarIdPos
-	if refs := writeAction.References(); refs.Len() == 1 {
-		root := refs.At(0)
-		rootVarPos = &root
-	} else if refs.Len() > 1 {
-		return nil, false,
-			fmt.Errorf("Internal error: update action from readwrite of topology has %v references instead of 1!",
-				refs.Len())
-	}
-	topology, err := configuration.TopologyFromCap(dbversion, rootVarPos, writeAction.Value())
+	refs := writeAction.References()
+	topology, err := configuration.TopologyFromCap(dbversion, &refs, writeAction.Value())
 	if err != nil {
 		return nil, false, err
 	}
 	return topology, false, nil
 }
 
-func (task *targetConfig) attemptCreateRoot(topology *configuration.Topology) (bool, error) {
-	twoFInc, fInc, f := int(topology.TwoFInc), int(topology.FInc), int(topology.F)
-	active := make([]common.RMId, fInc)
-	passive := make([]common.RMId, f)
-	// this is valid only because root's positions are hardcoded
-	nonEmpties := topology.RMs().NonEmpty()
-	for _, rmId := range nonEmpties {
-		if _, found := task.activeConnections[rmId]; !found {
-			return false, nil
-		}
-	}
-	copy(active, nonEmpties[:fInc])
-	nonEmpties = nonEmpties[fInc:]
-	copy(passive, nonEmpties[:f])
-
-	server.Log("Topology: Creating Root. Actives:", active, "; Passives:", passive)
+func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {
+	server.Log("Topology: Creating Roots.")
 
 	seg := capn.NewBuffer(nil)
-	txn := msgs.NewTxn(seg)
-	txn.SetSubmitter(uint32(task.connectionManager.RMId))
-	txn.SetSubmitterBootCount(task.connectionManager.BootCount)
-	actions := msgs.NewActionList(seg, 1)
-	txn.SetActions(actions)
-	action := actions.At(0)
-	vUUId := task.localConnection.NextVarUUId()
-	action.SetVarId(vUUId[:])
-	action.SetCreate()
-	create := action.Create()
-	positions := seg.NewUInt8List(int(topology.MaxRMCount))
-	create.SetPositions(positions)
-	for idx, l := 0, positions.Len(); idx < l; idx++ {
-		positions.Set(idx, uint8(idx))
+	ctxn := cmsgs.NewClientTxn(seg)
+	ctxn.SetRetry(false)
+	roots := make([]configuration.Root, rootCount)
+	actions := cmsgs.NewClientActionList(seg, rootCount)
+	for idx := range roots {
+		action := actions.At(idx)
+		vUUId := task.localConnection.NextVarUUId()
+		action.SetVarId(vUUId[:])
+		action.SetCreate()
+		create := action.Create()
+		create.SetValue([]byte{})
+		create.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
+		root := &roots[idx]
+		root.VarUUId = vUUId
 	}
-	create.SetValue([]byte{})
-	create.SetReferences(msgs.NewVarIdPosList(seg, 0))
-	allocs := msgs.NewAllocationList(seg, twoFInc)
-	txn.SetAllocations(allocs)
-	offset := 0
-	for idx, rmIds := range []common.RMIds{active, passive} {
-		for idy, rmId := range rmIds {
-			alloc := allocs.At(idy + offset)
-			alloc.SetRmId(uint32(rmId))
-			if idx == 0 {
-				alloc.SetActive(task.activeConnections[rmId].BootCount())
-			} else {
-				alloc.SetActive(0)
-			}
-			indices := seg.NewUInt16List(1)
-			alloc.SetActionIndices(indices)
-			indices.Set(0, 0)
-		}
-		offset += len(rmIds)
-	}
-	txn.SetFInc(topology.FInc)
-	txn.SetTopologyVersion(topology.Version)
-	result, err := task.localConnection.RunTransaction(&txn, true, active...)
+	ctxn.SetActions(actions)
+	txnReader, result, err := task.localConnection.RunClientTransaction(&ctxn, nil, nil)
+	server.Log("Create root result", result, err)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if result == nil { // shutdown
-		return false, nil
+		return false, nil, nil
 	}
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		server.Log("Topology: Root created in", vUUId)
-		topology.Root.VarUUId = vUUId
-		topology.Root.Positions = (*common.Positions)(&positions)
-		return false, nil
+		actions := txnReader.Actions(true).Actions()
+		for idx := range roots {
+			root := &roots[idx]
+			action := actions.At(idx)
+			vUUId := common.MakeVarUUId(action.VarId())
+			if vUUId.Compare(root.VarUUId) != common.EQ {
+				return false, nil, fmt.Errorf("Internal error: actions changed order! At %v expecting %v, found %v", idx, root.VarUUId, vUUId)
+			}
+			if action.Which() != msgs.ACTION_CREATE {
+				return false, nil, fmt.Errorf("Internal error: actions changed type! At %v expecting create, found %v", idx, action.Which())
+			}
+			positions := action.Create().Positions()
+			root.Positions = (*common.Positions)(&positions)
+		}
+		server.Log("Topology: Roots created in", roots)
+		return false, roots, nil
 	}
-	abort := result.Abort()
-	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-		return true, nil
+	if result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT {
+		return true, nil, nil
 	}
-	return false, fmt.Errorf("Internal error: creation of root gave rerun outcome")
+	return false, nil, fmt.Errorf("Internal error: creation of root gave rerun outcome")
 }
 
 // emigrator
@@ -1894,7 +1913,8 @@ func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos
 	delete(e.activeBatches, rmId)
 }
 
-func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection) {
+func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+	defer done()
 	if rmId == e.connectionManager.RMId {
 		return
 	}
@@ -1958,12 +1978,7 @@ func (it *dbIterator) iterate() {
 				if txnBytes == nil {
 					return true
 				}
-				seg, _, err = capn.ReadFromMemoryZeroCopy(txnBytes)
-				if err != nil {
-					cursor.Error(err)
-					return true
-				}
-				txnCap := msgs.ReadRootTxn(seg)
+				txn := eng.TxnReaderFromData(txnBytes)
 				// So, we only need to send based on the vars that we have
 				// (in fact, we require the positions so we can only look
 				// at the vars we have). However, the txn var allocations
@@ -1972,8 +1987,8 @@ func (it *dbIterator) iterate() {
 				// txn when it changes. So that all just means we must
 				// ignore the allocations here, and just work through the
 				// actions directly.
-				actions := txnCap.Actions()
-				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], &actions)
+				actions := txn.Actions(true).Actions()
+				varCaps, err := it.filterVars(cursor, vUUIdBytes, txnId[:], actions)
 				if err != nil {
 					return true
 				} else if len(varCaps) == 0 {
@@ -1985,7 +2000,7 @@ func (it *dbIterator) iterate() {
 						cursor.Error(err)
 						return true
 					} else if len(matchingVarCaps) != 0 {
-						sb.add(&txnCap, matchingVarCaps)
+						sb.add(txn, matchingVarCaps)
 					}
 				}
 			}
@@ -2090,7 +2105,8 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	}
 }
 func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]paxos.Connection) {}
-func (it *dbIterator) ConnectionEstablished(common.RMId, paxos.Connection, map[common.RMId]paxos.Connection) {
+func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	done()
 }
 
 type sendBatch struct {
@@ -2101,7 +2117,7 @@ type sendBatch struct {
 }
 
 type migrationElem struct {
-	txn  *msgs.Txn
+	txn  *eng.TxnReader
 	vars []*msgs.Var
 }
 
@@ -2125,7 +2141,7 @@ func (sb *sendBatch) flush() {
 	elems := msgs.NewMigrationElementList(seg, len(sb.elems))
 	for idx, elem := range sb.elems {
 		elemCap := msgs.NewMigrationElement(seg)
-		elemCap.SetTxn(*elem.txn)
+		elemCap.SetTxn(elem.txn.Data)
 		vars := msgs.NewVarList(seg, len(elem.vars))
 		for idy, varCap := range elem.vars {
 			vars.Set(idy, *varCap)
@@ -2141,9 +2157,9 @@ func (sb *sendBatch) flush() {
 	sb.elems = sb.elems[:0]
 }
 
-func (sb *sendBatch) add(txnCap *msgs.Txn, varCaps []*msgs.Var) {
+func (sb *sendBatch) add(txn *eng.TxnReader, varCaps []*msgs.Var) {
 	elem := &migrationElem{
-		txn:  txnCap,
+		txn:  txn,
 		vars: varCaps,
 	}
 	sb.elems = append(sb.elems, elem)

@@ -5,17 +5,18 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xc3ce226b914ee1eb;
 
-using VC = import "vectorclock.capnp";
+using Common = import "../../common/capnp/capabilities.capnp";
 
 struct Var {
   id              @0: Data;
   positions       @1: List(UInt8);
   writeTxnId      @2: Data;
-  writeTxnClock   @3: VC.VectorClock;
-  writesClock     @4: VC.VectorClock;
+  writeTxnClock   @3: Data;
+  writesClock     @4: Data;
 }
 
 struct VarIdPos {
-  id        @0: Data;
-  positions @1: List(UInt8);
+  id         @0: Data;
+  positions  @1: List(UInt8);
+  capability @2: Common.Capability;
 }

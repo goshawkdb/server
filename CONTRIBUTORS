@@ -2,3 +2,14 @@ This file lists all individuals having contributed content to the
 repository.
 
 Matthew Sackman <matthew@goshawkdb.io>
+Ashley Hewson <ash@lshift.net>
+
+By default, code in this repository is:
+Copyright (C) 2015-2016 Matthew Sackman <matthew@goshawkdb.io>
+
+The following files are:
+
+Copyright (C) 2015-2016 Matthew Sackman <matthew@goshawkdb.io>
+Copyright (C) 2016 LShift Ltd <opensource@lshift.net>
+
+client/clienttxnsubmitter.go

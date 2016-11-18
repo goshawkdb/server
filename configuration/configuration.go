@@ -8,12 +8,16 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
+	"math/rand"
 	"net"
 	"os"
+	"sort"
 	"strconv"
+	"time"
 )
 
 type Configuration struct {
@@ -23,11 +27,18 @@ type Configuration struct {
 	F                             uint8
 	MaxRMCount                    uint16
 	NoSync                        bool
-	ClientCertificateFingerprints []string
+	ClientCertificateFingerprints map[string]map[string]*RootCapability
+	clusterUUId                   uint64
+	roots                         []string
 	rms                           common.RMIds
 	rmsRemoved                    map[common.RMId]server.EmptyStruct
-	fingerprints                  map[[sha256.Size]byte]server.EmptyStruct
+	fingerprints                  map[[sha256.Size]byte]map[string]*common.Capability
 	nextConfiguration             *NextConfiguration
+}
+
+type RootCapability struct {
+	Read  bool
+	Write bool
 }
 
 type NextConfiguration struct {
@@ -36,6 +47,7 @@ type NextConfiguration struct {
 	NewRMIds        common.RMIds
 	SurvivingRMIds  common.RMIds
 	LostRMIds       common.RMIds
+	RootIndices     []uint32
 	InstalledOnNew  bool
 	BarrierReached1 common.RMIds
 	BarrierReached2 common.RMIds
@@ -43,8 +55,8 @@ type NextConfiguration struct {
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n InstalledOnNew: %v;\n BarrierReached1: %v;\n BarrierReached2: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.InstalledOnNew, next.BarrierReached1, next.BarrierReached2, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n RootIndices: %v;\n InstalledOnNew: %v;\n BarrierReached1: %v;\n BarrierReached2: %v;\n Pending:%v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.RootIndices, next.InstalledOnNew, next.BarrierReached1, next.BarrierReached2, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -59,6 +71,15 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 		if aHost != bAllHosts[idx] {
 			return false
 		}
+	}
+	if len(a.RootIndices) == len(b.RootIndices) {
+		for idx, aIndex := range a.RootIndices {
+			if aIndex != b.RootIndices[idx] {
+				return false
+			}
+		}
+	} else {
+		return false
 	}
 	return a.NewRMIds.Equal(b.NewRMIds) &&
 		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
@@ -87,6 +108,9 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	lostRMIds := make([]common.RMId, len(next.LostRMIds))
 	copy(lostRMIds, next.LostRMIds)
 
+	rootIndices := make([]uint32, len(next.RootIndices))
+	copy(rootIndices, next.RootIndices)
+
 	barrierReached1 := make([]common.RMId, len(next.BarrierReached1))
 	copy(barrierReached1, next.BarrierReached1)
 
@@ -112,6 +136,7 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 		NewRMIds:        newRMIds,
 		SurvivingRMIds:  survivingRMIds,
 		LostRMIds:       lostRMIds,
+		RootIndices:     rootIndices,
 		InstalledOnNew:  next.InstalledOnNew,
 		BarrierReached1: barrierReached1,
 		BarrierReached2: barrierReached2,
@@ -176,32 +201,70 @@ func decodeConfiguration(decoder *json.Decoder) (*Configuration, error) {
 	if len(config.ClientCertificateFingerprints) == 0 {
 		return nil, errors.New("No ClientCertificateFingerprints defined")
 	} else {
-		fingerprints := make(map[[sha256.Size]byte]server.EmptyStruct, len(config.ClientCertificateFingerprints))
-		for _, fingerprint := range config.ClientCertificateFingerprints {
+		rootsMap := make(map[string]server.EmptyStruct)
+		rootsName := []string{}
+		fingerprints := make(map[[sha256.Size]byte]map[string]*common.Capability, len(config.ClientCertificateFingerprints))
+		seg := capn.NewBuffer(nil)
+		for fingerprint, rootsCapability := range config.ClientCertificateFingerprints {
 			fingerprintBytes, err := hex.DecodeString(fingerprint)
 			if err != nil {
 				return nil, err
 			} else if l := len(fingerprintBytes); l != sha256.Size {
 				return nil, fmt.Errorf("Invalid fingerprint: expected %v bytes, and found %v", sha256.Size, l)
 			}
+			if len(rootsCapability) == 0 {
+				return nil, fmt.Errorf("No roots configured for client fingerprint %v; at least 1 needed", fingerprint)
+			}
+			roots := make(map[string]*common.Capability, len(rootsCapability))
+			for name, rootCapability := range rootsCapability {
+				if _, found := rootsMap[name]; !found {
+					rootsMap[name] = server.EmptyStructVal
+					rootsName = append(rootsName, name)
+				}
+				if !rootCapability.Read && !rootCapability.Write {
+					return nil, fmt.Errorf("Client fingerprint %v, root %s: no capability has been granted.",
+						fingerprint, name)
+				}
+				var capability *common.Capability
+				if rootCapability.Read && rootCapability.Write {
+					capability = common.MaxCapability
+				} else {
+					cap := cmsgs.NewCapability(seg)
+					switch {
+					case rootCapability.Read && rootCapability.Write:
+						cap.SetReadWrite()
+					case rootCapability.Read:
+						cap.SetRead()
+					case rootCapability.Write:
+						cap.SetWrite()
+					default:
+						cap.SetNone()
+					}
+					capability = common.NewCapability(cap)
+				}
+				roots[name] = capability
+			}
 			ary := [sha256.Size]byte{}
 			copy(ary[:], fingerprintBytes)
-			fingerprints[ary] = server.EmptyStructVal
+			fingerprints[ary] = roots
 		}
 		config.fingerprints = fingerprints
 		config.ClientCertificateFingerprints = nil
+		sort.Strings(rootsName)
+		config.roots = rootsName
 	}
 	return &config, err
 }
 
 func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	c := &Configuration{
-		ClusterId:  config.ClusterId(),
-		Version:    config.Version(),
-		Hosts:      config.Hosts().ToArray(),
-		F:          config.F(),
-		MaxRMCount: config.MaxRMCount(),
-		NoSync:     config.NoSync(),
+		ClusterId:   config.ClusterId(),
+		clusterUUId: config.ClusterUUId(),
+		Version:     config.Version(),
+		Hosts:       config.Hosts().ToArray(),
+		F:           config.F(),
+		MaxRMCount:  config.MaxRMCount(),
+		NoSync:      config.NoSync(),
 	}
 
 	rms := config.Rms()
@@ -216,14 +279,31 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		c.rmsRemoved[common.RMId(rmsRemoved.At(idx))] = server.EmptyStructVal
 	}
 
+	rootsName := []string{}
+	rootsMap := make(map[string]server.EmptyStruct)
 	fingerprints := config.Fingerprints()
-	fingerprintsMap := make(map[[sha256.Size]byte]server.EmptyStruct, fingerprints.Len())
+	fingerprintsMap := make(map[[sha256.Size]byte]map[string]*common.Capability, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
+		fingerprint := fingerprints.At(idx)
 		ary := [sha256.Size]byte{}
-		copy(ary[:], fingerprints.At(idx))
-		fingerprintsMap[ary] = server.EmptyStructVal
+		copy(ary[:], fingerprint.Sha256())
+		rootsCap := fingerprint.Roots()
+		roots := make(map[string]*common.Capability, rootsCap.Len())
+		for idy, m := 0, rootsCap.Len(); idy < m; idy++ {
+			rootCap := rootsCap.At(idy)
+			name := rootCap.Name()
+			capability := rootCap.Capability()
+			roots[name] = common.NewCapability(capability)
+			if _, found := rootsMap[name]; !found {
+				rootsName = append(rootsName, name)
+				rootsMap[name] = server.EmptyStructVal
+			}
+		}
+		fingerprintsMap[ary] = roots
 	}
 	c.fingerprints = fingerprintsMap
+	sort.Strings(rootsName)
+	c.roots = rootsName
 
 	if config.Which() == msgs.CONFIGURATION_TRANSITIONINGTO {
 		next := config.TransitioningTo()
@@ -247,6 +327,8 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			lostRMIds[idx] = common.RMId(lostRMIdsCap.At(idx))
 		}
 
+		rootIndices := next.RootIndices().ToArray()
+
 		barrierReached1Cap := next.BarrierReached1()
 		barrierReached1 := make([]common.RMId, barrierReached1Cap.Len())
 		for idx := range barrierReached1 {
@@ -267,6 +349,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			NewRMIds:        newRMIds,
 			SurvivingRMIds:  survivingRMIds,
 			LostRMIds:       lostRMIds,
+			RootIndices:     rootIndices,
 			InstalledOnNew:  next.InstalledOnNew(),
 			BarrierReached1: barrierReached1,
 			BarrierReached2: barrierReached2,
@@ -281,7 +364,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
+	if !(a.ClusterId == b.ClusterId && a.clusterUUId == b.clusterUUId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Hosts) == len(b.Hosts) && len(a.fingerprints) == len(b.fingerprints) && len(a.rms) == len(b.rms) && len(a.rmsRemoved) == len(b.rmsRemoved)) {
 		return false
 	}
 	for idx, aHost := range a.Hosts {
@@ -299,21 +382,50 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			return false
 		}
 	}
-	for fingerprint := range b.fingerprints {
-		if _, found := a.fingerprints[fingerprint]; !found {
+	for fingerprint, aRoots := range a.fingerprints {
+		if bRoots, found := b.fingerprints[fingerprint]; !found || len(aRoots) != len(bRoots) {
 			return false
+		} else {
+			for name, aRootCaps := range aRoots {
+				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
+					return false
+				}
+			}
 		}
 	}
 	return a.nextConfiguration.Equal(b.nextConfiguration)
 }
 
 func (config *Configuration) String() string {
-	return fmt.Sprintf("Configuration{ClusterId: %v, Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v}",
-		config.ClusterId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved)
+	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, RootNames: %v, %v}",
+		config.ClusterId, config.clusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.rms, config.rmsRemoved, config.roots, config.nextConfiguration)
 }
 
-func (config *Configuration) Fingerprints() map[[sha256.Size]byte]server.EmptyStruct {
+func (config *Configuration) ClusterUUId() uint64 {
+	return config.clusterUUId
+}
+
+func (config *Configuration) SetClusterUUId(uuid uint64) {
+	if config.clusterUUId == 0 {
+		if uuid == 0 {
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			r := uint64(rng.Int63())
+			for r == 0 {
+				r = uint64(rng.Int63())
+			}
+			config.clusterUUId = r
+		} else {
+			config.clusterUUId = uuid
+		}
+	}
+}
+
+func (config *Configuration) Fingerprints() map[[sha256.Size]byte]map[string]*common.Capability {
 	return config.fingerprints
+}
+
+func (config *Configuration) RootNames() []string {
+	return config.roots
 }
 
 func (config *Configuration) NextBarrierReached1(rmId common.RMId) bool {
@@ -364,21 +476,29 @@ func (config *Configuration) SetRMsRemoved(removed map[common.RMId]server.EmptyS
 
 func (config *Configuration) Clone() *Configuration {
 	clone := &Configuration{
-		ClusterId:  config.ClusterId,
-		Version:    config.Version,
-		Hosts:      make([]string, len(config.Hosts)),
-		F:          config.F,
-		MaxRMCount: config.MaxRMCount,
-		NoSync:     config.NoSync,
-		ClientCertificateFingerprints: make([]string, len(config.ClientCertificateFingerprints)),
+		ClusterId:   config.ClusterId,
+		clusterUUId: config.clusterUUId,
+		Version:     config.Version,
+		Hosts:       make([]string, len(config.Hosts)),
+		F:           config.F,
+		MaxRMCount:  config.MaxRMCount,
+		NoSync:      config.NoSync,
+		ClientCertificateFingerprints: nil,
+		roots:             make([]string, len(config.roots)),
 		rms:               make([]common.RMId, len(config.rms)),
 		rmsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.rmsRemoved)),
-		fingerprints:      make(map[[sha256.Size]byte]server.EmptyStruct, len(config.fingerprints)),
+		fingerprints:      make(map[[sha256.Size]byte]map[string]*common.Capability, len(config.fingerprints)),
 		nextConfiguration: config.nextConfiguration.Clone(),
 	}
 
 	copy(clone.Hosts, config.Hosts)
-	copy(clone.ClientCertificateFingerprints, config.ClientCertificateFingerprints)
+	if config.ClientCertificateFingerprints != nil {
+		clone.ClientCertificateFingerprints = make(map[string]map[string]*RootCapability, len(config.ClientCertificateFingerprints))
+		for k, v := range config.ClientCertificateFingerprints {
+			clone.ClientCertificateFingerprints[k] = v
+		}
+	}
+	copy(clone.roots, config.roots)
 	copy(clone.rms, config.rms)
 	for k, v := range config.rmsRemoved {
 		clone.rmsRemoved[k] = v
@@ -392,6 +512,7 @@ func (config *Configuration) Clone() *Configuration {
 func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configuration {
 	cap := msgs.AutoNewConfiguration(seg)
 	cap.SetClusterId(config.ClusterId)
+	cap.SetClusterUUId(config.clusterUUId)
 	cap.SetVersion(config.Version)
 
 	hosts := seg.NewTextList(len(config.Hosts))
@@ -419,13 +540,25 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 	}
 
 	fingerprintsMap := config.fingerprints
-	fingerprints := seg.NewDataList(len(fingerprintsMap))
-	cap.SetFingerprints(fingerprints)
+	fingerprintsCap := msgs.NewFingerprintList(seg, len(fingerprintsMap))
 	idx = 0
-	for fingerprint := range fingerprintsMap {
-		fingerprints.Set(idx, fingerprint[:])
+	for fingerprint, roots := range fingerprintsMap {
+		fingerprintCap := msgs.NewFingerprint(seg)
+		fingerprintCap.SetSha256(fingerprint[:])
+		rootsCap := msgs.NewRootList(seg, len(roots))
+		idy := 0
+		for name, capability := range roots {
+			rootCap := msgs.NewRoot(seg)
+			rootCap.SetName(name)
+			rootCap.SetCapability(capability.Capability)
+			rootsCap.Set(idy, rootCap)
+			idy++
+		}
+		fingerprintCap.SetRoots(rootsCap)
+		fingerprintsCap.Set(idx, fingerprintCap)
 		idx++
 	}
+	cap.SetFingerprints(fingerprintsCap)
 
 	if config.nextConfiguration == nil {
 		cap.SetStable()
@@ -458,6 +591,12 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 			lostRMIdsCap.Set(idx, uint32(rmId))
 		}
 		next.SetLostRMIds(lostRMIdsCap)
+
+		rootIndicesCap := seg.NewUInt32List(len(nextConfig.RootIndices))
+		for idx, index := range nextConfig.RootIndices {
+			rootIndicesCap.Set(idx, index)
+		}
+		next.SetRootIndices(rootIndicesCap)
 
 		barrierReached1Cap := seg.NewUInt32List(len(nextConfig.BarrierReached1))
 		for idx, rmId := range nextConfig.BarrierReached1 {

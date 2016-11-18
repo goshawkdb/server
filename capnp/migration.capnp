@@ -5,7 +5,6 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0x83d51cd76711395c;
 
-using Txn = import "transaction.capnp";
 using Outcome = import "outcome.capnp";
 using Var = import "var.capnp";
 
@@ -19,6 +18,6 @@ struct MigrationComplete {
 }
 
 struct MigrationElement {
-  txn  @0: Txn.Txn;
+  txn  @0: Data;
   vars @1: List(Var.Var);
 }

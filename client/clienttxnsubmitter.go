@@ -9,22 +9,25 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
-	"time"
+	eng "goshawkdb.io/server/txnengine"
 )
 
-type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error)
+type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error) error
 
 type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
 	versionCache versionCache
 	txnLive      bool
+	backoff      *server.BinaryBackoffEngine
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm)
 	return &ClientTxnSubmitter{
-		SimpleTxnSubmitter: NewSimpleTxnSubmitter(rmId, bootCount, cm),
-		versionCache:       NewVersionCache(),
+		SimpleTxnSubmitter: sts,
+		versionCache:       NewVersionCache(roots),
 		txnLive:            false,
+		backoff:            server.NewBinaryBackoffEngine(sts.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 	}
 }
 
@@ -34,10 +37,13 @@ func (cts *ClientTxnSubmitter) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation ClientTxnCompletionConsumer) {
+func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn, continuation ClientTxnCompletionConsumer) error {
 	if cts.txnLive {
-		continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
-		return
+		return continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
+	}
+
+	if err := cts.versionCache.ValidateTransaction(ctxnCap); err != nil {
+		return continuation(nil, err)
 	}
 
 	seg := capn.NewBuffer(nil)
@@ -45,26 +51,23 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	clientOutcome.SetId(ctxnCap.Id())
 
 	curTxnId := common.MakeTxnId(ctxnCap.Id())
-
-	delay := time.Duration(0)
-	retryCount := 0
+	cts.backoff.Shrink(server.SubmissionMinSubmitDelay)
 
 	var cont TxnCompletionConsumer
-	cont = func(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+	cont = func(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
 		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
-			continuation(nil, err)
-			return
+			return continuation(nil, err)
 		}
+		txnId := txn.Id
 		switch outcome.Which() {
 		case msgs.OUTCOME_COMMIT:
-			cts.versionCache.UpdateFromCommit(txnId, outcome)
+			cts.versionCache.UpdateFromCommit(txn, outcome)
 			clientOutcome.SetFinalId(txnId[:])
 			clientOutcome.SetCommit()
-			cts.addCreatesToCache(outcome)
+			cts.addCreatesToCache(txn)
 			cts.txnLive = false
-			continuation(&clientOutcome, nil)
-			return
+			return continuation(&clientOutcome, nil)
 
 		default:
 			abort := outcome.Abort()
@@ -78,37 +81,34 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetFinalId(txnId[:])
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
-					continuation(&clientOutcome, nil)
-					return
+					return continuation(&clientOutcome, nil)
 				}
 			}
 			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
-			retryCount++
-			switch {
-			case retryCount == server.SubmissionInitialAttempts:
-				delay = server.SubmissionInitialBackoff
-			case retryCount > server.SubmissionInitialAttempts:
-				delay = delay + time.Duration(cts.rng.Intn(int(delay)))
-				if delay > server.SubmissionMaxSubmitDelay {
-					delay = time.Duration(cts.rng.Intn(int(server.SubmissionMaxSubmitDelay)))
-				}
-			}
+
+			cts.backoff.Advance()
+			//fmt.Printf("%v ", cts.backoff.Cur)
 
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
 			curTxnIdNum += 1 + uint64(cts.rng.Intn(8))
 			binary.BigEndian.PutUint64(curTxnId[:8], curTxnIdNum)
-			ctxnCap.SetId(curTxnId[:])
+			newSeg := capn.NewBuffer(nil)
+			newCtxnCap := cmsgs.NewClientTxn(newSeg)
+			newCtxnCap.SetId(curTxnId[:])
+			newCtxnCap.SetRetry(ctxnCap.Retry())
+			newCtxnCap.SetActions(ctxnCap.Actions())
 
-			cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, delay, false)
+			return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, &newCtxnCap, curTxnId, cont, cts.backoff, false, cts.versionCache)
 		}
 	}
 
 	cts.txnLive = true
-	cts.SimpleTxnSubmitter.SubmitClientTransaction(ctxnCap, cont, 0, false)
+	// fmt.Printf("%v ", delay)
+	return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, ctxnCap, curTxnId, cont, cts.backoff, false, cts.versionCache)
 }
 
-func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
-	actions := outcome.Txn().Actions()
+func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {
+	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		if action.Which() == msgs.ACTION_CREATE {
@@ -119,39 +119,19 @@ func (cts *ClientTxnSubmitter) addCreatesToCache(outcome *msgs.Outcome) {
 	}
 }
 
-func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[*msgs.Update][]*msgs.Action) cmsgs.ClientUpdate_List {
+func (cts *ClientTxnSubmitter) translateUpdates(seg *capn.Segment, updates map[common.TxnId]*[]*update) cmsgs.ClientUpdate_List {
 	clientUpdates := cmsgs.NewClientUpdateList(seg, len(updates))
 	idx := 0
-	for update, actions := range updates {
+	for txnId, actions := range updates {
 		clientUpdate := clientUpdates.At(idx)
 		idx++
-		clientUpdate.SetVersion(update.TxnId())
-		clientActions := cmsgs.NewClientActionList(seg, len(actions))
+		clientUpdate.SetVersion(txnId[:])
+		clientActions := cmsgs.NewClientActionList(seg, len(*actions))
 		clientUpdate.SetActions(clientActions)
 
-		for idy, action := range actions {
+		for idy, action := range *actions {
 			clientAction := clientActions.At(idy)
-			clientAction.SetVarId(action.VarId())
-			switch action.Which() {
-			case msgs.ACTION_MISSING:
-				clientAction.SetDelete()
-			case msgs.ACTION_WRITE:
-				clientAction.SetWrite()
-				write := action.Write()
-				clientWrite := clientAction.Write()
-				clientWrite.SetValue(write.Value())
-				references := write.References()
-				clientReferences := seg.NewDataList(references.Len())
-				clientWrite.SetReferences(clientReferences)
-				for idz, n := 0, references.Len(); idz < n; idz++ {
-					ref := references.At(idz)
-					clientReferences.Set(idz, ref.Id())
-					positions := common.Positions(ref.Positions())
-					cts.hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
-				}
-			default:
-				panic(fmt.Sprintf("Unexpected action type: %v", action.Which()))
-			}
+			action.AddToClientAction(cts.hashCache, seg, &clientAction)
 		}
 	}
 	return clientUpdates

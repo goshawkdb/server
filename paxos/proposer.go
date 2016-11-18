@@ -41,17 +41,18 @@ type Proposer struct {
 // we receive outcomes before the txn itself, we do not vote. So you
 // can be active, but not a voter.
 
-func NewProposer(pm *ProposerManager, txnId *common.TxnId, txnCap *msgs.Txn, mode ProposerMode, topology *configuration.Topology) *Proposer {
+func NewProposer(pm *ProposerManager, txn *eng.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
+	txnCap := txn.Txn
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            mode,
-		txnId:           txnId,
+		txnId:           txn.Id,
 		acceptors:       GetAcceptorsFromTxn(txnCap),
 		topology:        topology,
 		fInc:            int(txnCap.FInc()),
 	}
 	if mode == ProposerActiveVoter {
-		p.txn = eng.TxnFromCap(pm.Exe, pm.VarDispatcher, p, pm.RMId, txnCap)
+		p.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, p, pm.RMId, txn)
 	}
 	p.init()
 	return p
@@ -204,9 +205,13 @@ func (pab *proposerAwaitBallots) init(proposer *Proposer) {
 
 func (pab *proposerAwaitBallots) start() {
 	pab.txn.Start(true)
-	pab.submitter = common.RMId(pab.txn.TxnCap.Submitter())
-	pab.submitterBootCount = pab.txn.TxnCap.SubmitterBootCount()
+	txnCap := pab.txn.TxnReader.Txn
+	pab.submitter = common.RMId(txnCap.Submitter())
+	pab.submitterBootCount = txnCap.SubmitterBootCount()
 	if pab.txn.Retry {
+		// We need to observe whether or not the submitter dies. If it
+		// does die, we should tidy up (abort) asap otherwise we have a
+		// leak which may never trigger.
 		pab.proposerManager.AddServerConnectionSubscriber(pab)
 	}
 }
@@ -216,11 +221,11 @@ func (pab *proposerAwaitBallots) String() string {
 	return "proposerAwaitBallots"
 }
 
-func (pab *proposerAwaitBallots) TxnBallotsComplete(_ *eng.Txn, ballots ...*eng.Ballot) {
+func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 	if pab.currentState == pab {
 		server.Log(pab.txnId, "TxnBallotsComplete callback. Acceptors:", pab.acceptors)
 		if !pab.allAcceptorsAgreed {
-			pab.proposerManager.NewPaxosProposals(pab.txnId, pab.txn.TxnCap, pab.fInc, ballots, pab.acceptors, pab.proposerManager.RMId, true)
+			pab.proposerManager.NewPaxosProposals(pab.txn.TxnReader, pab.fInc, ballots, pab.acceptors, pab.proposerManager.RMId, true)
 		}
 		pab.nextState()
 
@@ -239,10 +244,10 @@ func (pab *proposerAwaitBallots) TxnBallotsComplete(_ *eng.Txn, ballots ...*eng.
 func (pab *proposerAwaitBallots) Abort() {
 	if pab.currentState == pab && !pab.allAcceptorsAgreed {
 		server.Log(pab.txnId, "Proposer Aborting")
-		txnCap := pab.txn.TxnCap
-		alloc := AllocForRMId(txnCap, pab.proposerManager.RMId)
-		ballots := MakeAbortBallots(txnCap, alloc)
-		pab.TxnBallotsComplete(pab.txn, ballots...)
+		txn := pab.txn.TxnReader
+		alloc := AllocForRMId(txn.Txn, pab.proposerManager.RMId)
+		ballots := MakeAbortBallots(txn, alloc)
+		pab.TxnBallotsComplete(ballots...)
 	}
 }
 
@@ -256,10 +261,11 @@ func (pab *proposerAwaitBallots) ConnectionLost(rmId common.RMId, conns map[comm
 		pab.maybeAbortRetry()
 	}
 }
-func (pab *proposerAwaitBallots) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection) {
+func (pab *proposerAwaitBallots) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
 	if rmId == pab.submitter && conn.BootCount() != pab.submitterBootCount {
 		pab.maybeAbortRetry()
 	}
+	done()
 }
 
 func (pab *proposerAwaitBallots) maybeAbortRetry() {
@@ -364,9 +370,9 @@ func (palc *proposerAwaitLocallyComplete) start() {
 	if palc.txn == nil && palc.outcome.Which() == msgs.OUTCOME_COMMIT {
 		// We are a learner (either active or passive), and the result
 		// has turned out to be a commit.
-		txnCap := palc.outcome.Txn()
+		txn := eng.TxnReaderFromData(palc.outcome.Txn())
 		pm := palc.proposerManager
-		palc.txn = eng.TxnFromCap(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, &txnCap)
+		palc.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, txn)
 		palc.txn.Start(false)
 	}
 	if palc.txn == nil {

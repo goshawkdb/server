@@ -21,6 +21,7 @@ type VarWriteSubscriber struct {
 type Var struct {
 	UUId            *common.VarUUId
 	positions       *common.Positions
+	poisson         *Poisson
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
@@ -46,24 +47,18 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	}
 
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
-	writeTxnClock := VectorClockFromCap(varCap.WriteTxnClock())
-	writesClock := VectorClockFromCap(varCap.WritesClock())
+	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
+	writesClock := VectorClockFromData(varCap.WritesClock(), true).AsMutable()
 	server.Log(v.UUId, "Restored", writeTxnId)
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
 	}).ResultError(); err == nil && result != nil {
-		bites := result.([]byte)
-		if seg, _, err := capn.ReadFromMemoryZeroCopy(bites); err == nil {
-			txn := msgs.ReadRootTxn(seg)
-			actions := txn.Actions()
-			v.curFrame = NewFrame(nil, v, writeTxnId, &actions, writeTxnClock, writesClock)
-			v.curFrameOnDisk = v.curFrame
-			v.varCap = &varCap
-			return v, nil
-		} else {
-			return nil, err
-		}
+		txn := TxnReaderFromData(result.([]byte))
+		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
+		v.curFrameOnDisk = v.curFrame
+		v.varCap = &varCap
+		return v, nil
 	} else {
 		return nil, err
 	}
@@ -72,8 +67,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
 	v := newVar(uuid, exe, db, vm)
 
-	clock := NewVectorClock().Bump(*v.UUId, 0)
-	written := NewVectorClock().Bump(*v.UUId, 0)
+	clock := NewVectorClock().AsMutable().Bump(v.UUId, 1)
+	written := NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
 
 	seg := capn.NewBuffer(nil)
@@ -89,6 +84,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	return &Var{
 		UUId:            uuid,
 		positions:       nil,
+		poisson:         NewPoisson(),
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
@@ -217,8 +213,8 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 		}
 	}
 
-	// diffLen := len(action.outcomeClock.Clock) - action.TxnCap.Actions().Len()
-	// fmt.Printf("%v ", diffLen)
+	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
+	// fmt.Printf("d%v ", diffLen)
 
 	v.maybeWriteFrame(f, action, positions)
 }
@@ -250,11 +246,11 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	}
 
 	varCap.SetWriteTxnId(f.frameTxnId[:])
-	varCap.SetWriteTxnClock(f.frameTxnClock.AddToSeg(varSeg))
-	varCap.SetWritesClock(f.frameWritesClock.AddToSeg(varSeg))
+	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
+	varCap.SetWritesClock(f.frameWritesClock.AsData())
 	varData := server.SegToBytes(varSeg)
 
-	txnBytes := action.TxnRootBytes()
+	txnBytes := action.TxnReader.Data
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...

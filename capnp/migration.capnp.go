@@ -298,8 +298,8 @@ func AutoNewMigrationElement(s *C.Segment) MigrationElement {
 func ReadRootMigrationElement(s *C.Segment) MigrationElement {
 	return MigrationElement(s.Root(0).ToStruct())
 }
-func (s MigrationElement) Txn() Txn           { return Txn(C.Struct(s).GetObject(0).ToStruct()) }
-func (s MigrationElement) SetTxn(v Txn)       { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s MigrationElement) Txn() []byte        { return C.Struct(s).GetObject(0).ToData() }
+func (s MigrationElement) SetTxn(v []byte)    { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s MigrationElement) Vars() Var_List     { return Var_List(C.Struct(s).GetObject(1)) }
 func (s MigrationElement) SetVars(v Var_List) { C.Struct(s).SetObject(1, C.Object(v)) }
 func (s MigrationElement) WriteJSON(w io.Writer) error {
@@ -317,7 +317,11 @@ func (s MigrationElement) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Txn()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -382,7 +386,11 @@ func (s MigrationElement) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.Txn()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
