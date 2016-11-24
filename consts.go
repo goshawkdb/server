@@ -5,7 +5,7 @@ import (
 )
 
 const (
-	ServerVersion                 = "0.3"
+	ServerVersion                 = "0.3.1"
 	MDBInitialSize                = 1048576
 	TwoToTheSixtyThree            = 9223372036854775808
 	SubmissionMinSubmitDelay      = 2 * time.Millisecond
