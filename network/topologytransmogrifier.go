@@ -385,9 +385,12 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			return fmt.Errorf("Illegal config change: Ignoring config with version %v as newer version already active (%v).",
 				goal.Version, tt.active.Version)
 
-		case goal.Version == tt.active.Version:
+		case goal.Configuration.EqualExternally(tt.active.Configuration):
 			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
 			return nil
+
+		case goal.Version == tt.active.Version:
+			return fmt.Errorf("Illegal config change: Config has changed but Version has not been increased (%v). Ignoring.", goal.Version)
 		}
 
 		if activeClusterUUId != 0 {
@@ -403,12 +406,15 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 				existingGoal.ClusterId, goal.ClusterId)
 
 		case goal.Version < existingGoal.Version:
-			return fmt.Errorf("Topology: Illegal config change: Ignoring config with version %v as newer version already targetted (%v).",
+			return fmt.Errorf("Illegal config change: Ignoring config with version %v as newer version already targetted (%v).",
 				goal.Version, existingGoal.Version)
 
-		case goal.Version == existingGoal.Version:
+		case goal.Configuration.EqualExternally(existingGoal.Configuration):
 			log.Printf("Topology: Config transition to version %v already in progress.", goal.Version)
-			return nil // goal already in progress
+			return nil
+
+		case goal.Version == existingGoal.Version:
+			return fmt.Errorf("Illegal config change: Config has changed but Version has not been increased (%v). Ignoring.", goal.Version)
 
 		default:
 			server.Log("Topology: Abandoning old task")
