@@ -230,7 +230,11 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 				err = tt.setActive(msgT.topology)
 			case topologyTransmogrifierMsgRequestConfigChange:
 				server.Log("Topology: Topology change request:", msgT.config)
-				tt.selectGoal(&configuration.NextConfiguration{Configuration: msgT.config})
+				nonFatalErr := tt.selectGoal(&configuration.NextConfiguration{Configuration: msgT.config})
+				// because this is definitely not the cmd-line config, an error here is non-fatal
+				if nonFatalErr != nil {
+					log.Println("Topology: Ignoring requested configuration change:", nonFatalErr)
+				}
 			case topologyTransmogrifierMsgMigration:
 				err = tt.migrationReceived(msgT)
 			case topologyTransmogrifierMsgMigrationComplete:
@@ -326,7 +330,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			}
 
 		} else {
-			tt.selectGoal(next)
+			return tt.selectGoal(next)
 		}
 	}
 	return nil
@@ -359,35 +363,31 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 	tt.connectionManager.SetTopology(topology, wrapped)
 }
 
-func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) {
+func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) error {
 	if tt.active != nil {
 		activeClusterUUId, goalClusterUUId := tt.active.ClusterUUId, goal.ClusterUUId
 		switch {
 		case goal.Version == 0:
-			return // done.
+			return nil // done installing version0.
 
 		case goal.ClusterId != tt.active.ClusterId && tt.active.ClusterId != "":
-			log.Printf("Topology: Illegal config: ClusterId should be '%s' instead of '%s'.",
+			return fmt.Errorf("Illegal config change: ClusterId should be '%s' instead of '%s'.",
 				tt.active.ClusterId, goal.ClusterId)
-			return
 
 		case goalClusterUUId != 0 && activeClusterUUId != 0 && goalClusterUUId != activeClusterUUId:
-			log.Printf("Topology: Illegal config: ClusterUUId should be '%v' instead of '%v'.",
+			return fmt.Errorf("Illegal config change: ClusterUUId should be '%v' instead of '%v'.",
 				activeClusterUUId, goalClusterUUId)
-			return
 
 		case goal.MaxRMCount != tt.active.MaxRMCount && tt.active.Version != 0:
-			log.Printf("Topology: Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
-			return
+			return fmt.Errorf("Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
 
 		case goal.Version < tt.active.Version:
-			log.Printf("Topology: Ignoring config with version %v as newer version already active (%v).",
+			return fmt.Errorf("Illegal config change: Ignoring config with version %v as newer version already active (%v).",
 				goal.Version, tt.active.Version)
-			return
 
 		case goal.Version == tt.active.Version:
 			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
-			return
+			return nil
 		}
 
 		if activeClusterUUId != 0 {
@@ -399,18 +399,16 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 		existingGoal := tt.task.goal()
 		switch {
 		case goal.ClusterId != existingGoal.ClusterId:
-			log.Printf("Topology: Illegal config: ClusterId should be '%s' instead of '%s'.",
+			return fmt.Errorf("Illegal config change: ClusterId should be '%s' instead of '%s'.",
 				existingGoal.ClusterId, goal.ClusterId)
-			return
 
 		case goal.Version < existingGoal.Version:
-			log.Printf("Topology: Ignoring config with version %v as newer version already targetted (%v).",
+			return fmt.Errorf("Topology: Illegal config change: Ignoring config with version %v as newer version already targetted (%v).",
 				goal.Version, existingGoal.Version)
-			return
 
 		case goal.Version == existingGoal.Version:
 			log.Printf("Topology: Config transition to version %v already in progress.", goal.Version)
-			return // goal already in progress
+			return nil // goal already in progress
 
 		default:
 			server.Log("Topology: Abandoning old task")
@@ -426,6 +424,7 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			config:                 goal,
 		}
 	}
+	return nil
 }
 
 func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask, tc *targetConfig) {
@@ -745,8 +744,7 @@ func (task *ensureLocalTopology) tick() error {
 		// However, just because we have a local config doesn't mean it
 		// actually satisfies the goal, so we now need to reevaluate our
 		// goal versus our loaded config.
-		task.selectGoal(task.config)
-		return nil
+		return task.selectGoal(task.config)
 	}
 
 	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
@@ -788,8 +786,7 @@ func (task *joinCluster) tick() error {
 		// Exactly the same logic as in ensureLocalTopology: the active
 		// probably doesn't have a Next set; even if it does, it may
 		// have no relationship to task.config.
-		task.selectGoal(task.config)
-		return nil
+		return task.selectGoal(task.config)
 	}
 
 	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
