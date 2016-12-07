@@ -737,9 +737,14 @@ func (task *ensureLocalTopology) tick() error {
 		if err := task.completed(); err != nil {
 			return err
 		}
+		if task.config.Configuration == nil {
+			// There was no config supplied on the command line, so just
+			// pop what we've read in here.
+			task.config.Configuration = task.active.Configuration
+		}
 		// However, just because we have a local config doesn't mean it
-		// actually satisfies the goal. Essentially, we're pretending
-		// that the goal is in Next().
+		// actually satisfies the goal, so we now need to reevaluate our
+		// goal versus our loaded config.
 		task.selectGoal(task.config)
 		return nil
 	}
