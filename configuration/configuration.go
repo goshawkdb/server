@@ -198,19 +198,37 @@ func BlankConfiguration() *Configuration {
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {
+	if !a.EqualExternally(b) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	if !(a.ClusterUUId == b.ClusterUUId && a.RMs.Equal(b.RMs) && len(a.RMsRemoved) == len(b.RMsRemoved) && len(a.Roots) == len(b.Roots)) {
+		return false
+	}
+	for aRM := range a.RMsRemoved {
+		if _, found := b.RMsRemoved[aRM]; !found {
+			return false
+		}
+	}
+	for idx, aRoot := range a.Roots {
+		if aRoot != b.Roots[idx] {
+			return false
+		}
+	}
+	return a.NextConfiguration.Equal(b.NextConfiguration)
+}
+
+func (a *Configuration) EqualExternally(b *Configuration) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if !(a.ClusterId == b.ClusterId && a.ClusterUUId == b.ClusterUUId && a.Version == b.Version && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && a.RMs.Equal(b.RMs) && len(a.Hosts) == len(b.Hosts) && len(a.RMsRemoved) == len(b.RMsRemoved) && len(a.Fingerprints) == len(b.Fingerprints) && len(a.Roots) == len(b.Roots)) {
+	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Fingerprints) == len(b.Fingerprints)) {
 		return false
 	}
 	for idx, aHost := range a.Hosts {
 		if aHost != b.Hosts[idx] {
-			return false
-		}
-	}
-	for aRM := range a.RMsRemoved {
-		if _, found := b.RMsRemoved[aRM]; !found {
 			return false
 		}
 	}
@@ -225,12 +243,7 @@ func (a *Configuration) Equal(b *Configuration) bool {
 			}
 		}
 	}
-	for idx, aRoot := range a.Roots {
-		if aRoot != b.Roots[idx] {
-			return false
-		}
-	}
-	return a.NextConfiguration.Equal(b.NextConfiguration)
+	return true
 }
 
 func (config *Configuration) String() string {
