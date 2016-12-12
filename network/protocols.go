@@ -19,6 +19,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type Handshaker interface {
 
 type Protocol interface {
 	Run(conn *Connection) error
+	HandleMsg(connectionMsg) error
 	TopologyChanged(*connectionMsgTopologyChanged) error
 	ServerConnectionsChanged(map[common.RMId]paxos.Connection) error
 }
@@ -64,7 +66,15 @@ type WebsocketMsgPackClient struct {
 }
 
 type beater struct {
-	beatBytes []byte
+	connectionMsgBasic
+	*TLSCapnpHandshaker
+	conn         *Connection
+	beatBytes    []byte
+	terminate    chan struct{}
+	terminated   *sync.WaitGroup
+	ticker       *time.Ticker
+	missingBeats int
+	mustSendBeat bool
 }
 
 func (tch *TLSCapnpHandshaker) makeHello() *capn.Segment {
@@ -156,10 +166,18 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 	}
 }
 
-func (tch *TLSCapnpHandshaker) createBeater(beatBytes []byte) {
+func (tch *TLSCapnpHandshaker) createBeater(conn *Connection, beatBytes []byte) {
+	wg := new(sync.WaitGroup)
+	wg.Add(1)
 	tch.beater = &beater{
-		beatBytes: beatBytes,
+		TLSCapnpHandshaker: tch,
+		beatBytes:          beatBytes,
+		conn:               conn,
+		terminate:          make(chan struct{}),
+		terminated:         wg,
+		ticker:             time.NewTicker(common.HeartbeatInterval),
 	}
+	tch.beater.start()
 }
 
 func (tch *TLSCapnpHandshaker) serverError(err error) error {
@@ -297,7 +315,7 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	seg := capn.NewBuffer(nil)
 	message := msgs.NewRootMessage(seg)
 	message.SetHeartbeat()
-	tcs.createBeater(server.SegToBytes(seg))
+	tcs.createBeater(conn, server.SegToBytes(seg))
 
 	flushSeg := capn.NewBuffer(nil)
 	flushMsg := msgs.NewRootMessage(flushSeg)
@@ -306,6 +324,15 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	tcs.connectionManager.ServerEstablished(conn, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.combinedTieBreak, tcs.remoteClusterUUId, func() { conn.Send(flushBytes) })
 
 	return nil
+}
+
+func (tcs *TLSCapnpServer) HandleMsg(msg connectionMsg) error {
+	switch msgT := msg.(type) {
+	case *beater:
+		return tcs.beater.beat()
+	default:
+		return fmt.Errorf("Fatal to Connection: Received unexpected message: %#v", msgT)
+	}
 }
 
 func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) error {
@@ -399,19 +426,42 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 }
 
 func (tcc *TLSCapnpClient) Run(conn *Connection) error {
-	seg := capn.NewBuffer(nil)
-	message := cmsgs.NewRootClientMessage(seg)
-	message.SetHeartbeat()
-	tcc.createBeater(server.SegToBytes(seg))
 	servers := tcc.connectionManager.ClientEstablished(tcc.connectionNumber, conn)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
 	} else {
+		seg := capn.NewBuffer(nil)
+		message := cmsgs.NewRootClientMessage(seg)
+		message.SetHeartbeat()
+		tcc.createBeater(conn, server.SegToBytes(seg))
+
 		tcc.submitter = client.NewClientTxnSubmitter(tcc.connectionManager.RMId, tcc.connectionManager.BootCount(), tcc.rootsVar, tcc.connectionManager)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil
 	}
+}
+
+func (tcc *TLSCapnpClient) HandleMsg(msg connectionMsg) error {
+	switch msgT := msg.(type) {
+	case connectionMsgOutcomeReceived:
+		return tcc.outcomeReceived(msgT)
+	case *beater:
+		return tcc.beater.beat()
+	default:
+		return fmt.Errorf("Fatal to Connection: Received unexpected message: %#v", msgT)
+	}
+}
+
+func (tcc *TLSCapnpClient) outcomeReceived(out connectionMsgOutcomeReceived) error {
+	err := tcc.submitter.SubmissionOutcomeReceived(out.sender, out.txn, out.outcome)
+	if tcc.submitterIdle != nil && tcc.submitter.IsIdle() {
+		si := tcc.submitterIdle
+		tcc.submitterIdle = nil
+		server.Log("Connection", tcc, "outcomeReceived", si, "(submitterIdle)")
+		si.maybeClose()
+	}
+	return err
 }
 
 func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
@@ -472,10 +522,61 @@ func (wmc *WebsocketMsgPackClient) Run(conn *Connection) error {
 	return nil
 }
 
+func (wmc *WebsocketMsgPackClient) HandleMsg(msg connectionMsg) error {
+	return nil
+}
+
 func (wmc *WebsocketMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
 	return nil
 }
 
 func (wmc *WebsocketMsgPackClient) ServerConnectionsChanged(map[common.RMId]paxos.Connection) error {
+	return nil
+}
+
+// beater
+
+func (b *beater) start() {
+	if b != nil {
+		go b.tick()
+	}
+}
+
+func (b *beater) stop() {
+	if b != nil {
+		close(b.terminate)
+		b.terminated.Wait()
+	}
+}
+
+func (b *beater) tick() {
+	defer func() {
+		b.ticker.Stop()
+		b.ticker = nil
+		b.terminated.Done()
+	}()
+	for {
+		select {
+		case <-b.terminate:
+			return
+		case <-b.ticker.C:
+			if !b.conn.enqueueQuery(b) {
+				return
+			}
+		}
+	}
+}
+
+func (b *beater) beat() error {
+	if b != nil {
+		if b.missingBeats == 2 {
+			return fmt.Errorf("Missed too many connection heartbeats.")
+		}
+		b.missingBeats++
+		b.mustSendBeat = !b.mustSendBeat
+		if !b.mustSendBeat {
+			return b.send(b.beatBytes)
+		}
+	}
 	return nil
 }
