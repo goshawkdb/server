@@ -13,7 +13,9 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/paxos"
 	"log"
 	"math/rand"
 	"net"
@@ -25,7 +27,9 @@ type Handshaker interface {
 }
 
 type Protocol interface {
-	Run() error
+	Run(conn *Connection) error
+	TopologyChanged(*connectionMsgTopologyChanged) error
+	ServerConnectionsChanged(map[common.RMId]paxos.Connection) error
 }
 
 type TLSCapnpHandshaker struct {
@@ -34,6 +38,7 @@ type TLSCapnpHandshaker struct {
 	connectionManager *ConnectionManager
 	rng               *rand.Rand
 	topology          *configuration.Topology
+	beater            *beater
 }
 
 type TLSCapnpServer struct {
@@ -42,6 +47,7 @@ type TLSCapnpServer struct {
 	remoteClusterUUId uint64
 	remoteBootCount   uint32
 	combinedTieBreak  uint32
+	restart           bool
 }
 
 type TLSCapnpClient struct {
@@ -49,10 +55,16 @@ type TLSCapnpClient struct {
 	peerCerts        []*x509.Certificate
 	roots            map[string]*common.Capability
 	rootsVar         map[common.VarUUId]*common.Capability
-	ConnectionNumber uint32
+	connectionNumber uint32
+	submitter        *client.ClientTxnSubmitter
+	submitterIdle    *connectionMsgTopologyChanged
 }
 
-type WebsocketClient struct {
+type WebsocketMsgPackClient struct {
+}
+
+type beater struct {
+	beatBytes []byte
 }
 
 func (tch *TLSCapnpHandshaker) makeHello() *capn.Segment {
@@ -144,6 +156,12 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 	}
 }
 
+func (tch *TLSCapnpHandshaker) createBeater(beatBytes []byte) {
+	tch.beater = &beater{
+		beatBytes: beatBytes,
+	}
+}
+
 func (tch *TLSCapnpHandshaker) serverError(err error) error {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
@@ -171,6 +189,8 @@ func (tch *TLSCapnpHandshaker) baseTLSConfig() *tls.Config {
 		RootCAs:                  roots,
 	}
 }
+
+// CapnpServer
 
 func (tcs *TLSCapnpServer) finishHandshake() error {
 	// TLS seems to require us to pick one end as the client and one
@@ -271,9 +291,43 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 	return false
 }
 
-func (tcs *TLSCapnpServer) Run() error {
+func (tcs *TLSCapnpServer) Run(conn *Connection) error {
+	tcs.restart = true
+
+	seg := capn.NewBuffer(nil)
+	message := msgs.NewRootMessage(seg)
+	message.SetHeartbeat()
+	tcs.createBeater(server.SegToBytes(seg))
+
+	flushSeg := capn.NewBuffer(nil)
+	flushMsg := msgs.NewRootMessage(flushSeg)
+	flushMsg.SetFlushed()
+	flushBytes := server.SegToBytes(flushSeg)
+	tcs.connectionManager.ServerEstablished(conn, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.combinedTieBreak, tcs.remoteClusterUUId, func() { conn.Send(flushBytes) })
+
 	return nil
 }
+
+func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+	topology := tc.topology
+	tcs.topology = topology
+
+	server.Log("Connection", tcs, "topologyChanged", tc, "(isServer)")
+	tc.maybeClose()
+	if topology != nil {
+		if _, found := topology.RMsRemoved[tcs.remoteRMId]; found {
+			tcs.restart = false
+		}
+	}
+
+	return nil
+}
+
+func (tcs *TLSCapnpServer) ServerConnectionsChanged(map[common.RMId]paxos.Connection) error {
+	return nil
+}
+
+// CapnpClient
 
 func (tcc *TLSCapnpClient) finishHandshake() error {
 	config := tcc.baseTLSConfig()
@@ -321,7 +375,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
-	binary.BigEndian.PutUint32(namespace[0:4], tcc.ConnectionNumber)
+	binary.BigEndian.PutUint32(namespace[0:4], tcc.connectionNumber)
 	binary.BigEndian.PutUint32(namespace[4:8], tcc.connectionManager.BootCount())
 	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.connectionManager.RMId))
 	hello.SetNamespace(namespace)
@@ -344,14 +398,84 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	return seg
 }
 
-func (tcc *TLSCapnpClient) Run() error {
+func (tcc *TLSCapnpClient) Run(conn *Connection) error {
+	seg := capn.NewBuffer(nil)
+	message := cmsgs.NewRootClientMessage(seg)
+	message.SetHeartbeat()
+	tcc.createBeater(server.SegToBytes(seg))
+	servers := tcc.connectionManager.ClientEstablished(tcc.connectionNumber, conn)
+	if servers == nil {
+		return errors.New("Not ready for client connections")
+	} else {
+		tcc.submitter = client.NewClientTxnSubmitter(tcc.connectionManager.RMId, tcc.connectionManager.BootCount(), tcc.rootsVar, tcc.connectionManager)
+		tcc.submitter.TopologyChanged(tcc.topology)
+		tcc.submitter.ServerConnectionsChanged(servers)
+		return nil
+	}
+}
+
+func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+	if si := tcc.submitterIdle; si != nil {
+		tcc.submitterIdle = nil
+		server.Log("Connection", tcc, "topologyChanged:", tc, "clearing old:", si)
+		si.maybeClose()
+	}
+
+	topology := tc.topology
+	tcc.topology = topology
+
+	if topology != nil {
+		if authenticated, _, roots := tcc.verifyPeerCerts(tcc.peerCerts); !authenticated {
+			server.Log("Connection", tcc, "topologyChanged", tc, "(client unauthed)")
+			tc.maybeClose()
+			return errors.New("Client connection closed: No client certificate known")
+		} else if len(roots) == len(tcc.roots) {
+			for name, capsOld := range tcc.roots {
+				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
+					server.Log("Connection", tcc, "topologyChanged", tc, "(roots changed)")
+					tc.maybeClose()
+					return errors.New("Client connection closed: roots have changed")
+				}
+			}
+		} else {
+			server.Log("Connection", tcc, "topologyChanged", tc, "(roots changed)")
+			tc.maybeClose()
+			return errors.New("Client connection closed: roots have changed")
+		}
+	}
+	if err := tcc.submitter.TopologyChanged(topology); err != nil {
+		tc.maybeClose()
+		return err
+	}
+	if tcc.submitter.IsIdle() {
+		server.Log("Connection", tcc, "topologyChanged", tc, "(client, submitter is idle)")
+		tc.maybeClose()
+	} else {
+		server.Log("Connection", tcc, "topologyChanged", tc, "(client, submitter not idle)")
+		tcc.submitterIdle = tc
+	}
+
 	return nil
 }
 
-func (wc *WebsocketClient) PerformHandshake() (*WebsocketClient, error) {
-	return wc, nil
+func (tcc *TLSCapnpClient) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
+	return tcc.submitter.ServerConnectionsChanged(servers)
 }
 
-func (wc *WebsocketClient) Run() error {
+// WebSocketMsgPackClient
+
+func (wmc *WebsocketMsgPackClient) PerformHandshake() (*WebsocketMsgPackClient, error) {
+	return wmc, nil
+}
+
+func (wmc *WebsocketMsgPackClient) Run(conn *Connection) error {
+	return nil
+}
+
+func (wmc *WebsocketMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+	return nil
+}
+
+func (wmc *WebsocketMsgPackClient) ServerConnectionsChanged(map[common.RMId]paxos.Connection) error {
 	return nil
 }
