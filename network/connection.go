@@ -1135,3 +1135,7 @@ type connectionReadError struct {
 	connectionMsgBasic
 	error
 }
+
+type connectionSubmitTransaction cmsgs.ClientMessage
+
+func (csm connectionSubmitTransaction) witness() connectionMsg { return csm }
