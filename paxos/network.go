@@ -47,6 +47,7 @@ type Connection interface {
 type ClientConnection interface {
 	Shutdownable
 	ServerConnectionSubscriber
+	Status(*server.StatusConsumer)
 	SubmissionOutcomeReceived(common.RMId, *eng.TxnReader, *msgs.Outcome)
 }
 
