@@ -249,6 +249,7 @@ func (conn *Connection) handleShutdown(err error) {
 	} else if conn.Handshaker != nil {
 		conn.Handshaker.InternalShutdown()
 	}
+	conn.currentState = nil
 	conn.Protocol = nil
 	conn.Handshaker = nil
 	conn.Dialer = nil
