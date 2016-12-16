@@ -75,6 +75,10 @@ func (td *TCPDialer) Dial() (Handshaker, error) {
 	return td.handshakeBuilder(socket), nil
 }
 
+func (td *TCPDialer) String() string {
+	return fmt.Sprintf("TCPDialer to %s", td.remoteHost)
+}
+
 // TLS Capnp Handshaker
 
 type TLSCapnpHandshaker struct {
@@ -105,9 +109,9 @@ func NewTLSCapnpHandshaker(dialer Dialer, socket *net.TCPConn, cm *ConnectionMan
 
 func (tch *TLSCapnpHandshaker) String() string {
 	if tch.dialer == nil {
-		return fmt.Sprintf("Connection (TLSCapnpHandshaker) from remote")
+		return fmt.Sprintf("TLSCapnpHandshaker %d from remote", tch.connectionNumber)
 	} else {
-		return fmt.Sprintf("Connection (TLSCapnpHandshaker) to %s", tch.remoteHost)
+		return fmt.Sprintf("TLSCapnpHandshaker to %s", tch.remoteHost)
 	}
 }
 
@@ -280,9 +284,9 @@ type TLSCapnpServer struct {
 
 func (tcs *TLSCapnpServer) String() string {
 	if tcs.dialer == nil {
-		return fmt.Sprintf("Connection (TLSCapnpServer) from %s", tcs.remoteHost)
+		return fmt.Sprintf("TLSCapnpServer for %v(%d) from %s", tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteHost)
 	} else {
-		return fmt.Sprintf("Connection (TLSCapnpServer) to %s", tcs.remoteHost)
+		return fmt.Sprintf("TLSCapnpServer for %v(%d) to %s", tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteHost)
 	}
 }
 
@@ -486,11 +490,7 @@ type TLSCapnpClient struct {
 }
 
 func (tcc *TLSCapnpClient) String() string {
-	if tcc.dialer == nil {
-		return fmt.Sprintf("Connection (TLSCapnpClient) from %s", tcc.remoteHost)
-	} else {
-		return fmt.Sprintf("Connection (TLSCapnpClient) to %s", tcc.remoteHost)
-	}
+	return fmt.Sprintf("TLSCapnpClient %d from %s", tcc.connectionNumber, tcc.remoteHost)
 }
 
 func (tcc *TLSCapnpClient) Shutdown(sync paxos.Blocking) {
@@ -590,7 +590,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		return errors.New("Not ready for client connections")
 
 	} else {
-		log.Printf("Client connection established to %v\n", tcc.remoteHost)
+		log.Printf("Client connection established from %v\n", tcc.remoteHost)
 
 		seg := capn.NewBuffer(nil)
 		message := cmsgs.NewRootClientMessage(seg)

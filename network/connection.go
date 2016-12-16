@@ -280,15 +280,13 @@ func (conn *Connection) nextState(requestedState connectionStateMachineComponent
 }
 
 func (conn *Connection) status(sc *server.StatusConsumer) {
-	/*
-		sc.Emit(fmt.Sprintf("Connection to %v (%v, %v)", conn.remoteHost, conn.remoteRMId, conn.remoteBootCount))
-		sc.Emit(fmt.Sprintf("- Current State: %v", conn.currentState))
-		sc.Emit(fmt.Sprintf("- IsServer? %v", conn.isServer))
-		sc.Emit(fmt.Sprintf("- IsClient? %v", conn.isClient))
-		if conn.submitter != nil {
-			conn.submitter.Status(sc.Fork())
-		}
-	*/
+	if conn.Protocol != nil {
+		sc.Emit(fmt.Sprintf("Connection %v", conn.Protocol))
+	} else if conn.Handshaker != nil {
+		sc.Emit(fmt.Sprintf("Connection %v", conn.Handshaker))
+	} else if conn.Dialer != nil {
+		sc.Emit(fmt.Sprintf("Connection %v", conn.Dialer))
+	}
 	sc.Join()
 }
 
