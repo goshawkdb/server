@@ -498,7 +498,7 @@ func (cm *ConnectionManager) setDesiredServers(hosts connectionManagerMsgSetDesi
 		desiredMap[host] = server.EmptyStructVal
 		if _, found := cm.servers[host]; !found {
 			cm.servers[host] = &connectionManagerMsgServerEstablished{
-				Connection: NewConnectionToDial(host, cm),
+				Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
 				host:       host,
 			}
 		}
@@ -544,7 +544,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 			connEst.Shutdown(paxos.Async)
 			if killOld {
 				cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
-					Connection: NewConnectionToDial(cd.host, cm),
+					Connection: NewConnectionTCPTLSCapnpDialer(cd.host, cm),
 					host:       cd.host,
 				}
 			}
@@ -557,7 +557,7 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 			connEst.host, cm.RMId)
 		connEst.Shutdown(paxos.Async)
 		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
-			Connection: NewConnectionToDial(connEst.host, cm),
+			Connection: NewConnectionTCPTLSCapnpDialer(connEst.host, cm),
 			host:       connEst.host,
 		}
 
@@ -569,11 +569,11 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 		delete(cm.rmToServer, cd.rmId)
 		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
-			Connection: NewConnectionToDial(cd.host, cm),
+			Connection: NewConnectionTCPTLSCapnpDialer(cd.host, cm),
 			host:       cd.host,
 		}
 		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
-			Connection: NewConnectionToDial(connEst.host, cm),
+			Connection: NewConnectionTCPTLSCapnpDialer(connEst.host, cm),
 			host:       connEst.host,
 		}
 
@@ -596,7 +596,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 				for _, host := range cm.desired {
 					if host == cd.host {
 						cm.servers[host] = &connectionManagerMsgServerEstablished{
-							Connection: NewConnectionToDial(host, cm),
+							Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
 							host:       host,
 						}
 						break
@@ -703,11 +703,8 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	}
 	cm.RLock()
 	sc.Emit(fmt.Sprintf("Client Connection Count: %v", len(cm.connCountToClient)))
-	cm.connCountToClient[0].(*client.LocalConnection).Status(sc.Fork())
 	for _, conn := range cm.connCountToClient {
-		if c, ok := conn.(*Connection); ok {
-			c.Status(sc.Fork())
-		}
+		conn.Status(sc.Fork())
 	}
 	cm.RUnlock()
 	cm.Dispatchers.VarDispatcher.Status(sc.Fork())
