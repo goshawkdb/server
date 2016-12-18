@@ -2,6 +2,7 @@ package configuration
 
 import (
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -293,6 +294,17 @@ func (config *Configuration) EnsureClusterUUId(uuid uint64) uint64 {
 		}
 	}
 	return config.ClusterUUId
+}
+
+func (config *Configuration) VerifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capability) {
+	fingerprints := config.Fingerprints
+	for _, cert := range peerCerts {
+		hashsum = sha256.Sum256(cert.Raw)
+		if roots, found := fingerprints[hashsum]; found {
+			return true, hashsum, roots
+		}
+	}
+	return false, hashsum, nil
 }
 
 // Also checks we are in there somewhere

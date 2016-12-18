@@ -1,7 +1,6 @@
 package network
 
 import (
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -36,7 +35,6 @@ type Handshaker interface {
 type Protocol interface {
 	Run(*Connection) error
 	TopologyChanged(*connectionMsgTopologyChanged) error
-	SendMessage([]byte) error
 	RestartDialer() Dialer
 	InternalShutdown()
 }
@@ -168,10 +166,6 @@ func (tch *TLSCapnpHandshaker) String() string {
 	}
 }
 
-func (tch *TLSCapnpHandshaker) SendMessage(msg []byte) error {
-	return tch.beater.sendMessage(msg)
-}
-
 func (tch *TLSCapnpHandshaker) makeHello() *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHello(seg)
@@ -274,7 +268,7 @@ func (tch *TLSCapnpHandshaker) createBeater(conn *Connection, beatBytes []byte) 
 
 type TLSCapnpServer struct {
 	*TLSCapnpHandshaker
-	conn              *Connection
+	Connection        *Connection
 	remoteRMId        common.RMId
 	remoteClusterUUId uint64
 	remoteBootCount   uint32
@@ -383,7 +377,7 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 }
 
 func (tcs *TLSCapnpServer) Run(conn *Connection) error {
-	tcs.conn = conn
+	tcs.Connection = conn
 	log.Printf("Server connection established to %v (%v)\n", tcs.remoteHost, tcs.remoteRMId)
 
 	seg := capn.NewBuffer(nil)
@@ -396,7 +390,7 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	flushMsg := msgs.NewRootMessage(flushSeg)
 	flushMsg.SetFlushed()
 	flushBytes := server.SegToBytes(flushSeg)
-	tcs.connectionManager.ServerEstablished(tcs.conn, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.combinedTieBreak, tcs.remoteClusterUUId, func() { tcs.conn.Send(flushBytes) })
+	tcs.connectionManager.ServerEstablished(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.combinedTieBreak, tcs.remoteClusterUUId, func() { tcs.Send(flushBytes) })
 
 	return nil
 }
@@ -416,6 +410,10 @@ func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) err
 	return nil
 }
 
+func (tcs *TLSCapnpServer) Send(msg []byte) {
+	tcs.Connection.enqueueQuery(connectionExec(func() error { return tcs.beater.sendMessage(msg) }))
+}
+
 func (tcs *TLSCapnpServer) RestartDialer() Dialer {
 	tcs.InternalShutdown()
 	return tcs.dialer
@@ -426,7 +424,7 @@ func (tcs *TLSCapnpServer) InternalShutdown() {
 		tcs.reader.stop()
 		tcs.reader = nil
 	}
-	tcs.connectionManager.ServerLost(tcs.conn, tcs.remoteRMId, false)
+	tcs.connectionManager.ServerLost(tcs, tcs.remoteRMId, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
 }
 
@@ -467,7 +465,7 @@ func (tcs *TLSCapnpServer) String() string {
 func (tcs *TLSCapnpServer) createReader() {
 	if tcs.reader == nil {
 		tcs.reader = &socketReader{
-			conn:             tcs.conn,
+			conn:             tcs.Connection,
 			socketMsgHandler: tcs,
 			terminate:        make(chan struct{}),
 			terminated:       make(chan struct{}),
@@ -480,7 +478,7 @@ func (tcs *TLSCapnpServer) createReader() {
 
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
-	conn          *Connection
+	*Connection
 	peerCerts     []*x509.Certificate
 	roots         map[string]*common.Capability
 	rootsVar      map[common.VarUUId]*common.Capability
@@ -505,7 +503,7 @@ func (tcc *TLSCapnpClient) finishHandshake() error {
 	}
 
 	peerCerts := socket.ConnectionState().PeerCertificates
-	if authenticated, hashsum, roots := tcc.verifyPeerCerts(peerCerts); authenticated {
+	if authenticated, hashsum, roots := tcc.topology.VerifyPeerCerts(peerCerts); authenticated {
 		tcc.peerCerts = peerCerts
 		tcc.roots = roots
 		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
@@ -520,24 +518,13 @@ func (tcc *TLSCapnpClient) finishHandshake() error {
 	}
 }
 
-func (tcc *TLSCapnpClient) verifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capability) {
-	fingerprints := tcc.topology.Fingerprints
-	for _, cert := range peerCerts {
-		hashsum = sha256.Sum256(cert.Raw)
-		if roots, found := fingerprints[hashsum]; found {
-			return true, hashsum, roots
-		}
-	}
-	return false, hashsum, nil
-}
-
 func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	seg := capn.NewBuffer(nil)
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], tcc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], tcc.connectionManager.BootCount())
-	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.connectionManager.RMId))
+	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.connectionManager.BootCount())
+	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.TLSCapnpHandshaker.connectionManager.RMId))
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(tcc.roots))
 	idy := 0
@@ -559,8 +546,8 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 }
 
 func (tcc *TLSCapnpClient) Run(conn *Connection) error {
-	tcc.conn = conn
-	servers := tcc.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
+	tcc.Connection = conn
+	servers := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
 
@@ -573,7 +560,8 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		tcc.createBeater(conn, server.SegToBytes(seg))
 		tcc.createReader()
 
-		tcc.submitter = client.NewClientTxnSubmitter(tcc.connectionManager.RMId, tcc.connectionManager.BootCount(), tcc.rootsVar, tcc.connectionManager)
+		cm := tcc.TLSCapnpHandshaker.connectionManager
+		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount(), tcc.rootsVar, cm)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil
@@ -591,7 +579,7 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) err
 	tcc.topology = topology
 
 	if topology != nil {
-		if authenticated, _, roots := tcc.verifyPeerCerts(tcc.peerCerts); !authenticated {
+		if authenticated, _, roots := tcc.topology.VerifyPeerCerts(tcc.peerCerts); !authenticated {
 			server.Log("Connection", tcc, "topologyChanged", tc, "(client unauthed)")
 			tc.maybeClose()
 			return errors.New("Client connection closed: No client certificate known")
@@ -637,7 +625,7 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 	if tcc.submitter != nil {
 		tcc.submitter.Shutdown()
 	}
-	tcc.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+	tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }
 
@@ -645,12 +633,8 @@ func (tcc *TLSCapnpClient) String() string {
 	return fmt.Sprintf("TLSCapnpClient %d from %s", tcc.connectionNumber, tcc.remoteHost)
 }
 
-func (tcc *TLSCapnpClient) Shutdown(sync paxos.Blocking) {
-	tcc.conn.Shutdown(sync)
-}
-
 func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	tcc.conn.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionExec(func() error {
 		return tcc.outcomeReceived(sender, txn, outcome)
 	}))
 }
@@ -667,17 +651,17 @@ func (tcc *TLSCapnpClient) outcomeReceived(sender common.RMId, txn *eng.TxnReade
 }
 
 func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	tcc.conn.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionExec(func() error {
 		return tcc.serverConnectionsChanged(servers)
 	}))
 }
 func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	tcc.conn.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionExec(func() error {
 		return tcc.serverConnectionsChanged(servers)
 	}))
 }
 func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	tcc.conn.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionExec(func() error {
 		if done != nil {
 			defer done()
 		}
@@ -687,10 +671,6 @@ func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Conne
 
 func (tcc *TLSCapnpClient) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
 	return tcc.submitter.ServerConnectionsChanged(servers)
-}
-
-func (tcc *TLSCapnpClient) Status(sc *server.StatusConsumer) {
-	tcc.conn.Status(sc)
 }
 
 func (tcc *TLSCapnpClient) readAndHandleOneMsg() error {
@@ -704,7 +684,7 @@ func (tcc *TLSCapnpClient) readAndHandleOneMsg() error {
 		return nil // do nothing
 	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		// submitter is accessed from the connection go routine, so we must relay this
-		tcc.conn.enqueueQuery(connectionExec(func() error {
+		tcc.enqueueQuery(connectionExec(func() error {
 			return tcc.submitTransaction(msg.ClientTxnSubmission())
 		}))
 		return nil
@@ -718,14 +698,14 @@ func (tcc *TLSCapnpClient) submitTransaction(ctxn cmsgs.ClientTxn) error {
 	return tcc.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) error {
 		switch {
 		case err != nil: // error is non-fatal to connection
-			return tcc.SendMessage(tcc.clientTxnError(&ctxn, err, origTxnId))
+			return tcc.beater.sendMessage(tcc.clientTxnError(&ctxn, err, origTxnId))
 		case clientOutcome == nil: // shutdown
 			return nil
 		default:
 			seg := capn.NewBuffer(nil)
 			msg := cmsgs.NewRootClientMessage(seg)
 			msg.SetClientTxnOutcome(*clientOutcome)
-			return tcc.SendMessage(server.SegToBytes(msg.Segment))
+			return tcc.beater.sendMessage(server.SegToBytes(msg.Segment))
 		}
 	})
 }
@@ -735,11 +715,7 @@ func (tcc *TLSCapnpClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, orig
 	msg := cmsgs.NewRootClientMessage(seg)
 	outcome := cmsgs.NewClientTxnOutcome(seg)
 	msg.SetClientTxnOutcome(outcome)
-	if origTxnId == nil {
-		outcome.SetId(ctxn.Id())
-	} else {
-		outcome.SetId(origTxnId[:])
-	}
+	outcome.SetId(origTxnId[:])
 	outcome.SetFinalId(ctxn.Id())
 	outcome.SetError(err.Error())
 	return server.SegToBytes(seg)
@@ -748,34 +724,13 @@ func (tcc *TLSCapnpClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, orig
 func (tcc *TLSCapnpClient) createReader() {
 	if tcc.reader == nil {
 		tcc.reader = &socketReader{
-			conn:             tcc.conn,
+			conn:             tcc.Connection,
 			socketMsgHandler: tcc,
 			terminate:        make(chan struct{}),
 			terminated:       make(chan struct{}),
 		}
 		tcc.reader.start()
 	}
-}
-
-// WebSocketMsgPackClient
-
-type WebsocketMsgPackClient struct {
-}
-
-func (wmc *WebsocketMsgPackClient) PerformHandshake(*configuration.Topology) (*WebsocketMsgPackClient, error) {
-	return wmc, nil
-}
-
-func (wmc *WebsocketMsgPackClient) RestartDialer() Dialer {
-	return nil // client connections are never restarted
-}
-
-func (wmc *WebsocketMsgPackClient) Run() error {
-	return nil
-}
-
-func (wmc *WebsocketMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
-	return nil
 }
 
 // Beater

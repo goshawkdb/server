@@ -221,10 +221,10 @@ func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []s
 	})
 }
 
-func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, clusterUUId uint64, flushCallback func()) {
+func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, clusterUUId uint64, flushCallback func()) {
 	cm.enqueueQuery(&connectionManagerMsgServerEstablished{
-		Connection:    conn,
-		send:          conn.Send,
+		Connection:    tcs.Connection,
+		send:          tcs.Send,
 		established:   true,
 		host:          host,
 		rmId:          rmId,
@@ -235,9 +235,9 @@ func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rm
 	})
 }
 
-func (cm *ConnectionManager) ServerLost(conn *Connection, rmId common.RMId, restarting bool) {
+func (cm *ConnectionManager) ServerLost(tcs *TLSCapnpServer, rmId common.RMId, restarting bool) {
 	cm.enqueueQuery(connectionManagerMsgServerLost{
-		Connection: conn,
+		Connection: tcs.Connection,
 		rmId:       rmId,
 		restarting: restarting,
 	})

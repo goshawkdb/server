@@ -14,7 +14,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
-	"goshawkdb.io/server/network/websocket"
 	"goshawkdb.io/server/paxos"
 	"io/ioutil"
 	"log"
@@ -56,7 +55,7 @@ func newServer() (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.IntVar(&wssPort, "wssPort", 0, "Port to server wss on (default of 0 disables wss")
+	flag.IntVar(&wssPort, "wssPort", 0, "Port to server wss on (default of 0 disables WebSocket listener")
 	flag.Parse()
 
 	if version {
@@ -116,7 +115,7 @@ func newServer() (*server, error) {
 	}
 
 	if !(0 <= wssPort && wssPort < 65536 && wssPort != port) {
-		return nil, fmt.Errorf("Supplied wss port is illegal (%d). Port must be >= 0 and < 65536 and not equal to %d", wssPort, port)
+		return nil, fmt.Errorf("Supplied wss port is illegal (%d). Port must be >= 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
 	}
 
 	s := &server{
@@ -193,7 +192,9 @@ func (s *server) start() {
 	s.addOnShutdown(listener.Shutdown)
 
 	if s.wssPort != 0 {
-		websocket.StartListener(s.wssPort, cm)
+		wssListener, err := network.NewWebsocketListener(s.wssPort, cm)
+		s.maybeShutdown(err)
+		s.addOnShutdown(wssListener.Shutdown)
 	}
 
 	defer s.shutdown(nil)
