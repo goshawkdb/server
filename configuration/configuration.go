@@ -976,8 +976,3 @@ func (g *Generator) AddToSeg(seg *capn.Segment) msgs.Condition {
 	condCap.SetGenerator(genCap)
 	return condCap
 }
-
-/*
-
-
- */

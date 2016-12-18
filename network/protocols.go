@@ -835,6 +835,12 @@ func (b *beater) beat() error {
 		} else {
 			b.mustSendBeat = true
 		}
+		// Useful for testing recovery from network brownouts
+		/*
+			if b.rng.Intn(15) == 0 && b.dialer != nil {
+				return fmt.Errorf("Random death. Restarting connection.")
+			}
+		*/
 	}
 	return nil
 }
@@ -891,11 +897,3 @@ func (sr *socketReader) read() {
 		}
 	}
 }
-
-// Useful for testing recovery from network brownouts
-/*
-	if cr.rng.Intn(15) == 0 && cr.isServer {
-		return cr.maybeRestartConnection(
-			fmt.Errorf("Random death. Restarting connection."))
-	}
-*/
