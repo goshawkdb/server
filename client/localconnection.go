@@ -47,7 +47,7 @@ type localConnectionMsgStatus struct {
 type localConnectionMsgOutcomeReceived struct {
 	localConnectionMsgBasic
 	sender  common.RMId
-	txnId   *common.TxnId
+	txn     *eng.TxnReader
 	outcome *msgs.Outcome
 }
 
@@ -86,31 +86,38 @@ func (lcmsq *localConnectionMsgSyncQuery) maybeClose() {
 type localConnectionMsgRunClientTxn struct {
 	localConnectionMsgBasic
 	localConnectionMsgSyncQuery
-	txn         *cmsgs.ClientTxn
-	varPosMap   map[common.VarUUId]*common.Positions
-	assignTxnId bool
-	outcome     *msgs.Outcome
+	txn                 *cmsgs.ClientTxn
+	varPosMap           map[common.VarUUId]*common.Positions
+	translationCallback eng.TranslationCallback
+	txnReader           *eng.TxnReader
+	outcome             *msgs.Outcome
 }
 
-func (lcmrct *localConnectionMsgRunClientTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+func (lcmrct *localConnectionMsgRunClientTxn) consumer(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
+	lcmrct.txnReader = txn
 	lcmrct.outcome = outcome
 	lcmrct.err = err
 	lcmrct.maybeClose()
+	return nil
 }
 
 type localConnectionMsgRunTxn struct {
 	localConnectionMsgBasic
 	localConnectionMsgSyncQuery
-	txn         *msgs.Txn
-	assignTxnId bool
-	activeRMs   []common.RMId
-	outcome     *msgs.Outcome
+	txn       *msgs.Txn
+	txnId     *common.TxnId
+	activeRMs []common.RMId
+	backoff   *server.BinaryBackoffEngine
+	txnReader *eng.TxnReader
+	outcome   *msgs.Outcome
 }
 
-func (lcmrt *localConnectionMsgRunTxn) consumer(txnId *common.TxnId, outcome *msgs.Outcome, err error) {
+func (lcmrt *localConnectionMsgRunTxn) consumer(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
+	lcmrt.txnReader = txn
 	lcmrt.outcome = outcome
 	lcmrt.err = err
 	lcmrt.maybeClose()
+	return nil
 }
 
 func (lc *LocalConnection) NextVarUUId() *common.VarUUId {
@@ -153,11 +160,11 @@ func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
 	lc.enqueueQuery(localConnectionMsgStatus{StatusConsumer: sc})
 }
 
-func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txnId *common.TxnId, outcome *msgs.Outcome) {
-	server.Log("LC Received submission outcome for", txnId)
+func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+	server.Log("LC Received submission outcome for", txn.Id)
 	lc.enqueueQuery(localConnectionMsgOutcomeReceived{
 		sender:  sender,
-		txnId:   txnId,
+		txn:     txn,
 		outcome: outcome,
 	})
 }
@@ -184,46 +191,54 @@ func (lc *LocalConnection) TopologyChanged(topology *configuration.Topology, don
 	}
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, assignTxnId bool) (*msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*eng.TxnReader, *msgs.Outcome, error) {
 	query := &localConnectionMsgRunClientTxn{
-		txn:         txn,
-		varPosMap:   varPosMap,
-		assignTxnId: assignTxnId,
+		txn:                 txn,
+		varPosMap:           varPosMap,
+		translationCallback: translationCallback,
 	}
 	query.init()
 	if lc.enqueueQuerySync(query, query.resultChan) {
-		return query.outcome, query.err
+		return query.txnReader, query.outcome, query.err
 	} else {
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
-func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, assignTxnId bool, activeRMs ...common.RMId) (*msgs.Outcome, error) {
+// txn must be root in its segment
+func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *server.BinaryBackoffEngine, activeRMs ...common.RMId) (*eng.TxnReader, *msgs.Outcome, error) {
 	query := &localConnectionMsgRunTxn{
-		txn:         txn,
-		assignTxnId: assignTxnId,
-		activeRMs:   activeRMs,
+		txn:       txn,
+		txnId:     txnId,
+		backoff:   backoff,
+		activeRMs: activeRMs,
 	}
 	query.init()
 	if lc.enqueueQuerySync(query, query.resultChan) {
-		return query.outcome, query.err
+		return query.txnReader, query.outcome, query.err
 	} else {
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
-type localConnectionMsgServerConnectionsChanged map[common.RMId]paxos.Connection
+type localConnectionMsgServerConnectionsChanged struct {
+	servers map[common.RMId]paxos.Connection
+	done    func()
+}
 
 func (lcmscc localConnectionMsgServerConnectionsChanged) witness() localConnectionMsg { return lcmscc }
 
 func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged(servers))
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers})
 }
 func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged(servers))
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers})
 }
-func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged(servers))
+func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{
+		servers: servers,
+		done:    done,
+	})
 }
 
 func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *LocalConnection {
@@ -266,6 +281,9 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	topology := lc.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, lc)
 	defer lc.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, lc)
 	servers := lc.connectionManager.ClientEstablished(0, lc)
+	if servers == nil {
+		panic("LocalConnection failed to register with ConnectionManager!")
+	}
 	defer lc.connectionManager.ClientLost(0, lc)
 	lc.submitter.TopologyChanged(topology)
 	lc.submitter.ServerConnectionsChanged(servers)
@@ -283,16 +301,19 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 			case localConnectionMsgShutdown:
 				terminate = true
 			case *localConnectionMsgTopologyChanged:
-				lc.submitter.TopologyChanged(msgT.topology)
+				err = lc.submitter.TopologyChanged(msgT.topology)
 				msgT.maybeClose()
 			case *localConnectionMsgRunTxn:
 				lc.runTransaction(msgT)
 			case *localConnectionMsgRunClientTxn:
-				lc.runClientTransaction(msgT)
+				err = lc.runClientTransaction(msgT)
 			case localConnectionMsgOutcomeReceived:
-				lc.submitter.SubmissionOutcomeReceived(msgT.sender, msgT.txnId, msgT.outcome)
+				err = lc.submitter.SubmissionOutcomeReceived(msgT.sender, msgT.txn, msgT.outcome)
 			case localConnectionMsgServerConnectionsChanged:
-				lc.submitter.ServerConnectionsChanged((map[common.RMId]paxos.Connection)(msgT))
+				err = lc.submitter.ServerConnectionsChanged(msgT.servers)
+				if msgT.done != nil {
+					msgT.done()
+				}
 			case localConnectionMsgStatus:
 				lc.status(msgT.StatusConsumer)
 			default:
@@ -310,27 +331,26 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	lc.cellTail.Terminate()
 }
 
-func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunClientTxn) {
+func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunClientTxn) error {
 	txn := txnQuery.txn
-	if txnQuery.assignTxnId {
-		txnId := lc.getNextTxnId()
-		txn.SetId(txnId[:])
-		server.Log("LC starting client txn", txnId)
-	}
+	txnId := lc.getNextTxnId()
+	txn.SetId(txnId[:])
+	server.Log("LC starting client txn", txnId)
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
-	lc.submitter.SubmitClientTransaction(txn, txnQuery.consumer, 0, true)
+	return lc.submitter.SubmitClientTransaction(txnQuery.translationCallback, txn, txnId, txnQuery.consumer, nil, true, nil)
 }
 
 func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {
+	txnId := txnQuery.txnId
 	txn := txnQuery.txn
-	if txnQuery.assignTxnId {
-		txnId := lc.getNextTxnId()
+	if txnId == nil {
+		txnId = lc.getNextTxnId()
 		txn.SetId(txnId[:])
 		server.Log("LC starting txn", txnId)
 	}
-	lc.submitter.SubmitTransaction(txn, txnQuery.activeRMs, txnQuery.consumer, 0)
+	lc.submitter.SubmitTransaction(txn, txnId, txnQuery.activeRMs, txnQuery.consumer, txnQuery.backoff)
 }
 
 func (lc *LocalConnection) getNextTxnId() *common.TxnId {

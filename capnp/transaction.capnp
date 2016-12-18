@@ -12,10 +12,14 @@ struct Txn {
   submitter          @1: UInt32;
   submitterBootCount @2: UInt32;
   retry              @3: Bool;
-  actions            @4: List(Action);
+  actions            @4: Data;
   allocations        @5: List(Allocation);
   fInc               @6: UInt8;
   topologyVersion    @7: UInt32;
+}
+
+struct ActionListWrapper {
+  actions @0: List(Action);
 }
 
 struct Action {

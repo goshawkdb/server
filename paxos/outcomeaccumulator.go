@@ -58,9 +58,19 @@ func (oa *OutcomeAccumulator) TopologyChange(topology *configuration.Topology) b
 	// live transaction must have its outcome known. Therefore by this
 	// point we should not have to deal with the removal of nodes
 	// causing winningOutcome needing to go from nil to non-nil.
-	for rmId := range topology.RMsRemoved() {
+
+	// The above holds for user txns, but not for txns which are
+	// actually involved in a topology change. For example, a node
+	// which is being removed could start a topology txn, and then
+	// observe that the topology has changed and it has been
+	// removed. It then shuts down. This could result in a loss of
+	// acceptors and proposers. It's the loss of acceptors that's the
+	// biggest problem because we have no way to replace them.
+
+	for rmId := range topology.RMsRemoved {
 		if acceptorOutcome, found := oa.acceptorOutcomes[rmId]; found {
 			delete(oa.acceptorOutcomes, rmId)
+			server.Log("OutcomeAccumulator deleting acceptor", rmId)
 			oa.acceptors[acceptorOutcome.idx] = common.RMIdEmpty
 			if l := oa.acceptors.NonEmptyLen(); l < oa.fInc {
 				oa.fInc = l
@@ -87,7 +97,13 @@ func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outc
 	outcomeEq := (*outcomeEqualId)(outcome)
 	acceptorOutcome, found := oa.acceptorOutcomes[acceptorId]
 	if !found {
-		panic(fmt.Sprintf("BallotOutcomeReceived: Unable to find precreated acceptorIndexWithTxnOutcome for %v", acceptorId))
+		// It must have been removed due to a topology change. See notes
+		// in TopologyChange
+		if oa.winningOutcome == nil {
+			return nil, false
+		} else {
+			return (*msgs.Outcome)(oa.winningOutcome.outcome), oa.winningOutcome.outcomeReceivedCount == len(oa.acceptorOutcomes)
+		}
 	}
 
 	if tOut := acceptorOutcome.tOut; tOut != nil {
@@ -111,9 +127,10 @@ func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outc
 	// worry about that here.
 	tOut.outcomeReceivedCount++
 	tOut.acceptors[acceptorOutcome.idx] = acceptorId
+	acceptorOutcome.tOut = tOut
 
 	allAgreed := tOut.outcomeReceivedCount == len(oa.acceptorOutcomes)
-	if oa.winningOutcome == nil && oa.fInc == tOut.outcomeReceivedCount {
+	if oa.winningOutcome == nil && tOut.outcomeReceivedCount == oa.fInc {
 		oa.winningOutcome = tOut
 		return (*msgs.Outcome)(oa.winningOutcome.outcome), allAgreed
 	}
@@ -124,7 +141,9 @@ func (oa *OutcomeAccumulator) TxnGloballyCompleteReceived(acceptorId common.RMId
 	server.Log("TGC received from", acceptorId, "; pending:", oa.pendingTGC)
 	acceptorOutcome, found := oa.acceptorOutcomes[acceptorId]
 	if !found {
-		panic(fmt.Sprintf("TxnGloballyCompleteReceived: Unable to find precreated acceptorIndexWithTxnOutcome for %v", acceptorId))
+		// It must have been removed due to a topology change. See notes
+		// in TopologyChange
+		return oa.pendingTGC == 0
 	}
 	if !acceptorOutcome.tgcReceived {
 		acceptorOutcome.tgcReceived = true

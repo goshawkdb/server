@@ -7,25 +7,26 @@ import (
 	"bytes"
 	"encoding/json"
 	C "github.com/glycerine/go-capnproto"
+	"goshawkdb.io/common/capnp"
 	"io"
 )
 
 type Var C.Struct
 
-func NewVar(s *C.Segment) Var                { return Var(s.NewStruct(0, 5)) }
-func NewRootVar(s *C.Segment) Var            { return Var(s.NewRootStruct(0, 5)) }
-func AutoNewVar(s *C.Segment) Var            { return Var(s.NewStructAR(0, 5)) }
-func ReadRootVar(s *C.Segment) Var           { return Var(s.Root(0).ToStruct()) }
-func (s Var) Id() []byte                     { return C.Struct(s).GetObject(0).ToData() }
-func (s Var) SetId(v []byte)                 { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Var) Positions() C.UInt8List         { return C.UInt8List(C.Struct(s).GetObject(1)) }
-func (s Var) SetPositions(v C.UInt8List)     { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Var) WriteTxnId() []byte             { return C.Struct(s).GetObject(2).ToData() }
-func (s Var) SetWriteTxnId(v []byte)         { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s Var) WriteTxnClock() VectorClock     { return VectorClock(C.Struct(s).GetObject(3).ToStruct()) }
-func (s Var) SetWriteTxnClock(v VectorClock) { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Var) WritesClock() VectorClock       { return VectorClock(C.Struct(s).GetObject(4).ToStruct()) }
-func (s Var) SetWritesClock(v VectorClock)   { C.Struct(s).SetObject(4, C.Object(v)) }
+func NewVar(s *C.Segment) Var            { return Var(s.NewStruct(0, 5)) }
+func NewRootVar(s *C.Segment) Var        { return Var(s.NewRootStruct(0, 5)) }
+func AutoNewVar(s *C.Segment) Var        { return Var(s.NewStructAR(0, 5)) }
+func ReadRootVar(s *C.Segment) Var       { return Var(s.Root(0).ToStruct()) }
+func (s Var) Id() []byte                 { return C.Struct(s).GetObject(0).ToData() }
+func (s Var) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Var) Positions() C.UInt8List     { return C.UInt8List(C.Struct(s).GetObject(1)) }
+func (s Var) SetPositions(v C.UInt8List) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Var) WriteTxnId() []byte         { return C.Struct(s).GetObject(2).ToData() }
+func (s Var) SetWriteTxnId(v []byte)     { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
+func (s Var) WriteTxnClock() []byte      { return C.Struct(s).GetObject(3).ToData() }
+func (s Var) SetWriteTxnClock(v []byte)  { C.Struct(s).SetObject(3, s.Segment.NewData(v)) }
+func (s Var) WritesClock() []byte        { return C.Struct(s).GetObject(4).ToData() }
+func (s Var) SetWritesClock(v []byte)    { C.Struct(s).SetObject(4, s.Segment.NewData(v)) }
 func (s Var) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -116,7 +117,11 @@ func (s Var) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.WriteTxnClock()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -131,7 +136,11 @@ func (s Var) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.WritesClock()
-		err = s.WriteJSON(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -238,7 +247,11 @@ func (s Var) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.WriteTxnClock()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -253,7 +266,11 @@ func (s Var) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.WritesClock()
-		err = s.WriteCapLit(b)
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
@@ -288,14 +305,18 @@ func (s Var_List) Set(i int, item Var) { C.PointerList(s).Set(i, C.Object(item))
 
 type VarIdPos C.Struct
 
-func NewVarIdPos(s *C.Segment) VarIdPos       { return VarIdPos(s.NewStruct(0, 2)) }
-func NewRootVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewRootStruct(0, 2)) }
-func AutoNewVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewStructAR(0, 2)) }
+func NewVarIdPos(s *C.Segment) VarIdPos       { return VarIdPos(s.NewStruct(0, 3)) }
+func NewRootVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewRootStruct(0, 3)) }
+func AutoNewVarIdPos(s *C.Segment) VarIdPos   { return VarIdPos(s.NewStructAR(0, 3)) }
 func ReadRootVarIdPos(s *C.Segment) VarIdPos  { return VarIdPos(s.Root(0).ToStruct()) }
 func (s VarIdPos) Id() []byte                 { return C.Struct(s).GetObject(0).ToData() }
 func (s VarIdPos) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s VarIdPos) Positions() C.UInt8List     { return C.UInt8List(C.Struct(s).GetObject(1)) }
 func (s VarIdPos) SetPositions(v C.UInt8List) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s VarIdPos) Capability() capnp.Capability {
+	return capnp.Capability(C.Struct(s).GetObject(2).ToStruct())
+}
+func (s VarIdPos) SetCapability(v capnp.Capability) { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s VarIdPos) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -353,6 +374,21 @@ func (s VarIdPos) WriteJSON(w io.Writer) error {
 			}
 			err = b.WriteByte(']')
 		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"capability\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Capability()
+		err = s.WriteJSON(b)
 		if err != nil {
 			return err
 		}
@@ -430,6 +466,21 @@ func (s VarIdPos) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("capability = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Capability()
+		err = s.WriteCapLit(b)
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -446,7 +497,7 @@ func (s VarIdPos) MarshalCapLit() ([]byte, error) {
 type VarIdPos_List C.PointerList
 
 func NewVarIdPosList(s *C.Segment, sz int) VarIdPos_List {
-	return VarIdPos_List(s.NewCompositeList(0, 2, sz))
+	return VarIdPos_List(s.NewCompositeList(0, 3, sz))
 }
 func (s VarIdPos_List) Len() int          { return C.PointerList(s).Len() }
 func (s VarIdPos_List) At(i int) VarIdPos { return VarIdPos(C.PointerList(s).At(i).ToStruct()) }

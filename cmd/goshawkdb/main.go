@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
@@ -31,7 +32,7 @@ import (
 func main() {
 	log.SetPrefix(common.ProductName + " ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Printf("Version %s; %v", goshawk.ServerVersion, os.Args)
+	log.Printf("GoshawkDB Version %s with %s; %v", goshawk.ServerVersion, mdb.Version(), os.Args)
 
 	if s, err := newServer(); err != nil {
 		fmt.Printf("\n%v\n\n", err)
@@ -166,9 +167,6 @@ func (s *server) start() {
 
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
-	if commandLineConfig == nil {
-		commandLineConfig = configuration.BlankTopology("").Configuration
-	}
 
 	nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(s.certificate)
 	for idx := range s.certificate {
@@ -256,7 +254,11 @@ func (s *server) ensureBootCount() error {
 
 func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 	if s.configFile != "" {
-		return configuration.LoadConfigurationFromPath(s.configFile)
+		configJSON, err := configuration.LoadJSONFromPath(s.configFile)
+		if err != nil {
+			return nil, err
+		}
+		return configJSON.ToConfiguration(), nil
 	}
 	return nil, nil
 }
@@ -285,12 +287,12 @@ func (s *server) signalReloadConfig() {
 		log.Println("Attempt to reload config failed as no path to configuration provided on command line.")
 		return
 	}
-	config, err := configuration.LoadConfigurationFromPath(s.configFile)
+	config, err := configuration.LoadJSONFromPath(s.configFile)
 	if err != nil {
 		log.Println("Cannot reload config due to error:", err)
 		return
 	}
-	s.transmogrifier.RequestConfigurationChange(config)
+	s.transmogrifier.RequestConfigurationChange(config.ToConfiguration())
 }
 
 func (s *server) signalDumpStacks() {

@@ -13,7 +13,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/db"
-	_ "goshawkdb.io/server/txnengine"
+	eng "goshawkdb.io/server/txnengine"
 	"io/ioutil"
 	"log"
 	"os"
@@ -107,12 +107,9 @@ func (lc *locationChecker) locationCheck(cell *varWrapperCell) error {
 	if res == nil || (ok && txnBites == nil) {
 		return fmt.Errorf("Failed to find %v from %v in %v", txnId, vUUId, foundIn)
 	}
-	seg, _, err := capn.ReadFromMemoryZeroCopy(txnBites)
-	if err != nil {
+	if _, _, err = capn.ReadFromMemoryZeroCopy(txnBites); err != nil {
 		return err
 	}
-	txnCap := msgs.ReadRootTxn(seg)
-
 	positions := varCap.Positions().ToArray()
 	rmIds, err := lc.resolver.ResolveHashCodes(positions)
 	if err != nil {
@@ -147,14 +144,7 @@ func (lc *locationChecker) locationCheck(cell *varWrapperCell) error {
 			}
 			varBites, ok := res.([]byte)
 			if res == nil || (ok && varBites == nil) {
-				if vUUId.BootCount() == 1 && vUUId.ConnectionCount() == 0 &&
-					(txnId == nil ||
-						(txnId.BootCount() == 1 && txnId.ConnectionCount() == 0 &&
-							txnCap.Actions().Len() == 1 && txnCap.Actions().At(0).Which() == msgs.ACTION_CREATE)) {
-					fmt.Printf("Failed to find %v in %v (%v, %v, %v) but it looks like it's a bad root.\n", vUUId, remote, rmIds, positions, foundIn)
-				} else {
-					return fmt.Errorf("Failed to find %v in %v (%v, %v, %v)", vUUId, remote, rmIds, positions, foundIn)
-				}
+				return fmt.Errorf("Failed to find %v in %v (%v, %v, %v)", vUUId, remote, rmIds, positions, foundIn)
 			} else {
 				seg, _, err := capn.ReadFromMemoryZeroCopy(varBites)
 				if err != nil {
@@ -251,18 +241,13 @@ func (s *store) LoadTopology() error {
 			rtxn.Error(fmt.Errorf("Unable to find txn for topology: %v", txnId))
 			return nil
 		}
-		seg, _, err = capn.ReadFromMemoryZeroCopy(bites)
-		if err != nil {
-			rtxn.Error(err)
+		txnReader := eng.TxnReaderFromData(bites)
+		actions := txnReader.Actions(true)
+		if l := actions.Actions().Len(); l != 1 {
+			rtxn.Error(fmt.Errorf("Topology txn has %v actions; expected 1", l))
 			return nil
 		}
-		txnCap := msgs.ReadRootTxn(seg)
-		actions := txnCap.Actions()
-		if actions.Len() != 1 {
-			rtxn.Error(fmt.Errorf("Topology txn has %v actions; expected 1", actions.Len()))
-			return nil
-		}
-		action := actions.At(0)
+		action := actions.Actions().At(0)
 		var refs msgs.VarIdPos_List
 		switch action.Which() {
 		case msgs.ACTION_WRITE:
@@ -286,14 +271,13 @@ func (s *store) LoadTopology() error {
 			rtxn.Error(fmt.Errorf("Topology txn action has %v references; expected 1", refs.Len()))
 			return nil
 		}
-		rootRef := refs.At(0)
 
 		seg, _, err = capn.ReadFromMemoryZeroCopy(bites)
 		if err != nil {
 			rtxn.Error(err)
 			return nil
 		}
-		topology, err := configuration.TopologyFromCap(txnId, &rootRef, bites)
+		topology, err := configuration.TopologyFromCap(txnId, &refs, bites)
 		if err != nil {
 			rtxn.Error(err)
 			return nil

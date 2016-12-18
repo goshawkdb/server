@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	C "github.com/glycerine/go-capnproto"
+	"goshawkdb.io/common/capnp"
 	"io"
 )
 
@@ -19,34 +20,38 @@ const (
 	CONFIGURATION_STABLE          Configuration_Which = 1
 )
 
-func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(16, 13)) }
-func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(16, 13)) }
-func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(16, 13)) }
+func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(24, 14)) }
+func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(24, 14)) }
+func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(24, 14)) }
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
-func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(8)) }
+func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(16)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
 func (s Configuration) ClusterIdBytes() []byte         { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
 func (s Configuration) SetClusterId(v string)          { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
-func (s Configuration) Version() uint32                { return C.Struct(s).Get32(0) }
-func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(0, v) }
+func (s Configuration) ClusterUUId() uint64            { return C.Struct(s).Get64(0) }
+func (s Configuration) SetClusterUUId(v uint64)        { C.Struct(s).Set64(0, v) }
+func (s Configuration) Version() uint32                { return C.Struct(s).Get32(8) }
+func (s Configuration) SetVersion(v uint32)            { C.Struct(s).Set32(8, v) }
 func (s Configuration) Hosts() C.TextList              { return C.TextList(C.Struct(s).GetObject(1)) }
 func (s Configuration) SetHosts(v C.TextList)          { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s Configuration) F() uint8                       { return C.Struct(s).Get8(4) }
-func (s Configuration) SetF(v uint8)                   { C.Struct(s).Set8(4, v) }
-func (s Configuration) MaxRMCount() uint16             { return C.Struct(s).Get16(6) }
-func (s Configuration) SetMaxRMCount(v uint16)         { C.Struct(s).Set16(6, v) }
-func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(40) }
-func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(40, v) }
+func (s Configuration) F() uint8                       { return C.Struct(s).Get8(12) }
+func (s Configuration) SetF(v uint8)                   { C.Struct(s).Set8(12, v) }
+func (s Configuration) MaxRMCount() uint16             { return C.Struct(s).Get16(14) }
+func (s Configuration) SetMaxRMCount(v uint16)         { C.Struct(s).Set16(14, v) }
+func (s Configuration) NoSync() bool                   { return C.Struct(s).Get1(104) }
+func (s Configuration) SetNoSync(v bool)               { C.Struct(s).Set1(104, v) }
 func (s Configuration) Rms() C.UInt32List              { return C.UInt32List(C.Struct(s).GetObject(2)) }
 func (s Configuration) SetRms(v C.UInt32List)          { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s Configuration) RmsRemoved() C.UInt32List       { return C.UInt32List(C.Struct(s).GetObject(3)) }
 func (s Configuration) SetRmsRemoved(v C.UInt32List)   { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Configuration) Fingerprints() C.DataList       { return C.DataList(C.Struct(s).GetObject(4)) }
-func (s Configuration) SetFingerprints(v C.DataList)   { C.Struct(s).SetObject(4, C.Object(v)) }
+func (s Configuration) Fingerprints() Fingerprint_List {
+	return Fingerprint_List(C.Struct(s).GetObject(4))
+}
+func (s Configuration) SetFingerprints(v Fingerprint_List) { C.Struct(s).SetObject(4, C.Object(v)) }
 func (s Configuration) TransitioningTo() ConfigurationTransitioningTo {
 	return ConfigurationTransitioningTo(s)
 }
-func (s Configuration) SetTransitioningTo() { C.Struct(s).Set16(8, 0) }
+func (s Configuration) SetTransitioningTo() { C.Struct(s).Set16(16, 0) }
 func (s ConfigurationTransitioningTo) Configuration() Configuration {
 	return Configuration(C.Struct(s).GetObject(5).ToStruct())
 }
@@ -75,27 +80,33 @@ func (s ConfigurationTransitioningTo) LostRMIds() C.UInt32List {
 func (s ConfigurationTransitioningTo) SetLostRMIds(v C.UInt32List) {
 	C.Struct(s).SetObject(9, C.Object(v))
 }
-func (s ConfigurationTransitioningTo) InstalledOnNew() bool     { return C.Struct(s).Get1(41) }
-func (s ConfigurationTransitioningTo) SetInstalledOnNew(v bool) { C.Struct(s).Set1(41, v) }
-func (s ConfigurationTransitioningTo) BarrierReached1() C.UInt32List {
+func (s ConfigurationTransitioningTo) RootIndices() C.UInt32List {
 	return C.UInt32List(C.Struct(s).GetObject(10))
 }
-func (s ConfigurationTransitioningTo) SetBarrierReached1(v C.UInt32List) {
+func (s ConfigurationTransitioningTo) SetRootIndices(v C.UInt32List) {
 	C.Struct(s).SetObject(10, C.Object(v))
 }
-func (s ConfigurationTransitioningTo) BarrierReached2() C.UInt32List {
+func (s ConfigurationTransitioningTo) InstalledOnNew() bool     { return C.Struct(s).Get1(105) }
+func (s ConfigurationTransitioningTo) SetInstalledOnNew(v bool) { C.Struct(s).Set1(105, v) }
+func (s ConfigurationTransitioningTo) BarrierReached1() C.UInt32List {
 	return C.UInt32List(C.Struct(s).GetObject(11))
 }
-func (s ConfigurationTransitioningTo) SetBarrierReached2(v C.UInt32List) {
+func (s ConfigurationTransitioningTo) SetBarrierReached1(v C.UInt32List) {
 	C.Struct(s).SetObject(11, C.Object(v))
 }
-func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
-	return ConditionPair_List(C.Struct(s).GetObject(12))
+func (s ConfigurationTransitioningTo) BarrierReached2() C.UInt32List {
+	return C.UInt32List(C.Struct(s).GetObject(12))
 }
-func (s ConfigurationTransitioningTo) SetPending(v ConditionPair_List) {
+func (s ConfigurationTransitioningTo) SetBarrierReached2(v C.UInt32List) {
 	C.Struct(s).SetObject(12, C.Object(v))
 }
-func (s Configuration) SetStable() { C.Struct(s).Set16(8, 1) }
+func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
+	return ConditionPair_List(C.Struct(s).GetObject(13))
+}
+func (s ConfigurationTransitioningTo) SetPending(v ConditionPair_List) {
+	C.Struct(s).SetObject(13, C.Object(v))
+}
+func (s Configuration) SetStable() { C.Struct(s).Set16(16, 1) }
 func (s Configuration) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -111,6 +122,25 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.ClusterId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"clusterUUId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ClusterUUId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -329,11 +359,7 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 				if err != nil {
 					return err
 				}
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
+				err = s.WriteJSON(b)
 				if err != nil {
 					return err
 				}
@@ -487,6 +513,43 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 			}
 			{
 				s := s.LostRMIds()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(',')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("\"rootIndices\":")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.RootIndices()
 				{
 					err = b.WriteByte('[')
 					if err != nil {
@@ -684,6 +747,25 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.ClusterId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("clusterUUId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ClusterUUId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -902,11 +984,7 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 				if err != nil {
 					return err
 				}
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
+				err = s.WriteCapLit(b)
 				if err != nil {
 					return err
 				}
@@ -1060,6 +1138,43 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 			}
 			{
 				s := s.LostRMIds()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
+				if err != nil {
+					return err
+				}
+			}
+			_, err = b.WriteString(", ")
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("rootIndices = ")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.RootIndices()
 				{
 					err = b.WriteByte('[')
 					if err != nil {
@@ -1246,7 +1361,7 @@ func (s Configuration) MarshalCapLit() ([]byte, error) {
 type Configuration_List C.PointerList
 
 func NewConfigurationList(s *C.Segment, sz int) Configuration_List {
-	return Configuration_List(s.NewCompositeList(16, 13, sz))
+	return Configuration_List(s.NewCompositeList(24, 14, sz))
 }
 func (s Configuration_List) Len() int { return C.PointerList(s).Len() }
 func (s Configuration_List) At(i int) Configuration {
@@ -1261,6 +1376,303 @@ func (s Configuration_List) ToArray() []Configuration {
 	return a
 }
 func (s Configuration_List) Set(i int, item Configuration) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type Fingerprint C.Struct
+
+func NewFingerprint(s *C.Segment) Fingerprint      { return Fingerprint(s.NewStruct(0, 2)) }
+func NewRootFingerprint(s *C.Segment) Fingerprint  { return Fingerprint(s.NewRootStruct(0, 2)) }
+func AutoNewFingerprint(s *C.Segment) Fingerprint  { return Fingerprint(s.NewStructAR(0, 2)) }
+func ReadRootFingerprint(s *C.Segment) Fingerprint { return Fingerprint(s.Root(0).ToStruct()) }
+func (s Fingerprint) Sha256() []byte               { return C.Struct(s).GetObject(0).ToData() }
+func (s Fingerprint) SetSha256(v []byte)           { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Fingerprint) Roots() Root_List             { return Root_List(C.Struct(s).GetObject(1)) }
+func (s Fingerprint) SetRoots(v Root_List)         { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Fingerprint) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"sha256\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Sha256()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"roots\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Roots()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteJSON(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s Fingerprint) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s Fingerprint) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("sha256 = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Sha256()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("roots = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Roots()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteCapLit(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s Fingerprint) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type Fingerprint_List C.PointerList
+
+func NewFingerprintList(s *C.Segment, sz int) Fingerprint_List {
+	return Fingerprint_List(s.NewCompositeList(0, 2, sz))
+}
+func (s Fingerprint_List) Len() int             { return C.PointerList(s).Len() }
+func (s Fingerprint_List) At(i int) Fingerprint { return Fingerprint(C.PointerList(s).At(i).ToStruct()) }
+func (s Fingerprint_List) ToArray() []Fingerprint {
+	n := s.Len()
+	a := make([]Fingerprint, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s Fingerprint_List) Set(i int, item Fingerprint) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type Root C.Struct
+
+func NewRoot(s *C.Segment) Root      { return Root(s.NewStruct(0, 2)) }
+func NewRootRoot(s *C.Segment) Root  { return Root(s.NewRootStruct(0, 2)) }
+func AutoNewRoot(s *C.Segment) Root  { return Root(s.NewStructAR(0, 2)) }
+func ReadRootRoot(s *C.Segment) Root { return Root(s.Root(0).ToStruct()) }
+func (s Root) Name() string          { return C.Struct(s).GetObject(0).ToText() }
+func (s Root) NameBytes() []byte     { return C.Struct(s).GetObject(0).ToDataTrimLastByte() }
+func (s Root) SetName(v string)      { C.Struct(s).SetObject(0, s.Segment.NewText(v)) }
+func (s Root) Capability() capnp.Capability {
+	return capnp.Capability(C.Struct(s).GetObject(1).ToStruct())
+}
+func (s Root) SetCapability(v capnp.Capability) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s Root) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"name\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Name()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"capability\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Capability()
+		err = s.WriteJSON(b)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s Root) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s Root) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("name = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Name()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("capability = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Capability()
+		err = s.WriteCapLit(b)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s Root) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type Root_List C.PointerList
+
+func NewRootList(s *C.Segment, sz int) Root_List { return Root_List(s.NewCompositeList(0, 2, sz)) }
+func (s Root_List) Len() int                     { return C.PointerList(s).Len() }
+func (s Root_List) At(i int) Root                { return Root(C.PointerList(s).At(i).ToStruct()) }
+func (s Root_List) ToArray() []Root {
+	n := s.Len()
+	a := make([]Root, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s Root_List) Set(i int, item Root) { C.PointerList(s).Set(i, C.Object(item)) }
 
 type ConditionPair C.Struct
 
