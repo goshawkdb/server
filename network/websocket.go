@@ -297,6 +297,7 @@ type wssMsgPackClient struct {
 	peerCerts         []*x509.Certificate
 	roots             map[string]*common.Capability
 	rootsVar          map[common.VarUUId]*common.Capability
+	namespace         []byte
 	connectionManager *ConnectionManager
 	topology          *configuration.Topology
 	submitter         *client.ClientTxnSubmitter
@@ -375,6 +376,7 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	binary.BigEndian.PutUint32(namespace[0:4], wmpc.connectionNumber)
 	binary.BigEndian.PutUint32(namespace[4:8], wmpc.connectionManager.BootCount())
 	binary.BigEndian.PutUint32(namespace[8:], uint32(wmpc.connectionManager.RMId))
+	wmpc.namespace = namespace
 
 	roots := make([]*cmsgs.Root, 0, len(wmpc.roots))
 	rootsVar := make(map[common.VarUUId]*common.Capability, len(wmpc.roots))
@@ -415,7 +417,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 
 		wmpc.createReader()
 
-		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.connectionManager.RMId, wmpc.connectionManager.BootCount(), wmpc.rootsVar, wmpc.connectionManager)
+		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.connectionManager.RMId, wmpc.connectionManager.BootCount(), wmpc.rootsVar, wmpc.namespace, wmpc.connectionManager)
 		wmpc.submitter.TopologyChanged(wmpc.topology)
 		wmpc.submitter.ServerConnectionsChanged(servers)
 		return nil

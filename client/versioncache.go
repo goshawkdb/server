@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
@@ -10,7 +11,10 @@ import (
 	eng "goshawkdb.io/server/txnengine"
 )
 
-type versionCache map[common.VarUUId]*cached
+type versionCache struct {
+	cache     map[common.VarUUId]*cached
+	namespace []byte
+}
 
 type cached struct {
 	txnId      *common.TxnId
@@ -37,15 +41,22 @@ func (co cacheOverlay) String() string {
 	return fmt.Sprintf("@%v (%v) (inCache: %v, updateClient %v)", co.txnId, co.caps, co.inCache, co.updateClient)
 }
 
-func NewVersionCache(roots map[common.VarUUId]*common.Capability) versionCache {
+func NewVersionCache(roots map[common.VarUUId]*common.Capability, namespace []byte) *versionCache {
 	cache := make(map[common.VarUUId]*cached)
 	for vUUId, caps := range roots {
 		cache[vUUId] = &cached{caps: caps}
 	}
-	return cache
+	return &versionCache{
+		cache:     cache,
+		namespace: namespace,
+	}
 }
 
-func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
+func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.ClientTxn) error {
+	if !vc.hasNamespaceSuffix(ctxnId[:]) {
+		return fmt.Errorf("Transaction uses TxnId with incorrect namespace: %v", vc.namespace)
+	}
+
 	actions := cTxn.Actions()
 	if cTxn.Retry() {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
@@ -53,9 +64,9 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 			vUUId := common.MakeVarUUId(action.VarId())
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
-			} else if vc, found := vc[*vUUId]; !found {
+			} else if c, found := vc.cache[*vUUId]; !found {
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
-			} else if cap := vc.caps.Which(); !(cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE) {
+			} else if cap := c.caps.Which(); !(cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE) {
 				return fmt.Errorf("Retry transaction has attempted illegal read from object: %v", vUUId)
 			}
 		}
@@ -64,13 +75,13 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
-			vc, found := vc[*vUUId]
+			c, found := vc.cache[*vUUId]
 			switch act := action.Which(); act {
 			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
 				if !found {
 					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
 				} else {
-					cap := vc.caps.Which()
+					cap := c.caps.Which()
 					canRead := cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE
 					canWrite := cap == cmsgs.CAPABILITY_WRITE || cap == cmsgs.CAPABILITY_READWRITE
 					switch {
@@ -86,6 +97,8 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 			case cmsgs.CLIENTACTION_CREATE:
 				if found {
 					return fmt.Errorf("Transaction tries to create existing object %v", vUUId)
+				} else if !vc.hasNamespaceSuffix(vUUId[:]) {
+					return fmt.Errorf("Transaction tries to create object with VarUUId with incorrect namespace: %v", vc.namespace)
 				}
 
 			default:
@@ -96,11 +109,15 @@ func (vc versionCache) ValidateTransaction(cTxn *cmsgs.ClientTxn) error {
 	return nil
 }
 
-func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability) bool {
+func (vc *versionCache) hasNamespaceSuffix(thing []byte) bool {
+	return bytes.Equal(thing[8:], vc.namespace)
+}
+
+func (vc *versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability) bool {
 	if vc == nil {
 		return true
 	}
-	if c, found := vc[*vUUId]; found {
+	if c, found := vc.cache[*vUUId]; found {
 		if c.caps == common.MaxCapability {
 			return true
 		}
@@ -116,7 +133,7 @@ func (vc versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability)
 	return true
 }
 
-func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcome) {
+func (vc *versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcome) {
 	txnId := txn.Id
 	clock := eng.VectorClockFromData(outcome.Commit(), false)
 	actions := txn.Actions(true).Actions()
@@ -124,7 +141,7 @@ func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcom
 		action := actions.At(idx)
 		if act := action.Which(); act != msgs.ACTION_READ {
 			vUUId := common.MakeVarUUId(action.VarId())
-			c, found := vc[*vUUId]
+			c, found := vc.cache[*vUUId]
 			switch {
 			case !found && act == msgs.ACTION_CREATE:
 				create := action.Create()
@@ -135,7 +152,7 @@ func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcom
 					value:      create.Value(),
 					references: create.References().ToArray(),
 				}
-				vc[*vUUId] = c
+				vc.cache[*vUUId] = c
 			case !found, act == msgs.ACTION_CREATE:
 				panic(fmt.Sprintf("%v contained illegal action (%v) for %v", txnId, act, vUUId))
 			}
@@ -160,7 +177,7 @@ func (vc versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcom
 	}
 }
 
-func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.TxnId]*[]*update {
+func (vc *versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.TxnId]*[]*update {
 	updateGraph := make(map[common.VarUUId]*cacheOverlay)
 
 	// 1. update everything we know we can already reach, and filter out erroneous updates
@@ -195,7 +212,7 @@ func (vc versionCache) UpdateFromAbort(updatesCap *msgs.Update_List) map[common.
 	return validUpdates
 }
 
-func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph map[common.VarUUId]*cacheOverlay) {
+func (vc *versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph map[common.VarUUId]*cacheOverlay) {
 	for idx, l := 0, updatesCap.Len(); idx < l; idx++ {
 		updateCap := updatesCap.At(idx)
 		txnId := common.MakeTxnId(updateCap.TxnId())
@@ -214,7 +231,7 @@ func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph 
 				// value written was. The only safe thing we can do is
 				// remove it from the client.
 				// log.Printf("%v contains missing write action of %v\n", txnId, vUUId)
-				if c, found := vc[*vUUId]; found && c.txnId != nil {
+				if c, found := vc.cache[*vUUId]; found && c.txnId != nil {
 					cmp := c.txnId.Compare(txnId)
 					if cmp == common.EQ && clockElem != c.clockElem {
 						panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
@@ -236,7 +253,7 @@ func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph 
 
 			case msgs.ACTION_WRITE:
 				write := actionCap.Write()
-				if c, found := vc[*vUUId]; found {
+				if c, found := vc.cache[*vUUId]; found {
 					// If it's in vc then we can either reach it currently
 					// or we have been able to in the past.
 					updating := c.txnId == nil
@@ -289,7 +306,7 @@ func (vc versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph 
 	}
 }
 
-func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOverlay) {
+func (vc *versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOverlay) {
 	reaches := make(map[common.VarUUId][]msgs.VarIdPos)
 	worklist := make([]common.VarUUId, 0, len(updateGraph))
 
@@ -320,14 +337,14 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 				// adding to the capabilities the client now has on
 				// vUUIdRef so we need to record that. That in turn can
 				// mean we now have access to extra vars.
-				c, found = vc[*vUUIdRef]
+				c, found = vc.cache[*vUUIdRef]
 				if !found {
 					// We have no idea though what this var (vUUIdRef)
 					// actually points to. caps is just our capabilities to
 					// act on this var, so there's no extra work to do
 					// (c.reachableReferences will return []).
 					c = &cached{caps: caps}
-					vc[*vUUIdRef] = c
+					vc.cache[*vUUIdRef] = c
 				}
 			}
 			// We have two questions to answer: 1. Have we already
@@ -369,7 +386,7 @@ func (vc versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOver
 					// vUUIdRef. Therefore we must store vUUIdRef in the
 					// cache to record the capability.
 					overlay.inCache = true
-					vc[*vUUIdRef] = overlay.cached
+					vc.cache[*vUUIdRef] = overlay.cached
 				}
 				// If !updateClient then we know there has not yet been
 				// any evidence the client can read this var. Is there
