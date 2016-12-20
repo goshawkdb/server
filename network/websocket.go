@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type WebsocketListener struct {
@@ -304,6 +305,7 @@ type wssMsgPackClient struct {
 	submitter         *client.ClientTxnSubmitter
 	submitterIdle     *connectionMsgTopologyChanged
 	reader            *socketReader
+	beater            *wssBeater
 }
 
 func (wmpc *wssMsgPackClient) send(msg msgp.Encodable) error {
@@ -416,6 +418,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 	} else {
 		log.Printf("WSS Client connection established from %v\n", wmpc.remoteHost)
 
+		wmpc.createBeater()
 		wmpc.createReader()
 
 		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.connectionManager.RMId, wmpc.connectionManager.BootCount(), wmpc.rootsVar, wmpc.namespace, wmpc.connectionManager)
@@ -470,10 +473,17 @@ func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) 
 }
 
 func (wmpc *wssMsgPackClient) InternalShutdown() {
-	// TODO - reader?
+	if wmpc.reader != nil {
+		wmpc.reader.stop()
+		wmpc.reader = nil
+	}
 	if wmpc.submitter != nil {
 		wmpc.submitter.Shutdown()
 		wmpc.submitter = nil
+	}
+	if wmpc.beater != nil {
+		wmpc.beater.stop()
+		wmpc.beater = nil
 	}
 	if wmpc.socket != nil {
 		wmpc.socket.Close()
@@ -545,7 +555,7 @@ func (wmpc *wssMsgPackClient) submitTransaction(ctxn *cmsgs.ClientTxn) error {
 	return wmpc.submitter.SubmitClientTransaction(&ctxnCapn, func(clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
 		switch {
 		case err != nil: // error is non-fatal to connection
-			return wmpc.send(wmpc.clientTxnError(ctxn, err, origTxnId))
+			return wmpc.beater.sendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
 		case clientOutcome == nil: // shutdown
 			return nil
 		default:
@@ -577,4 +587,85 @@ func (wmpc *wssMsgPackClient) createReader() {
 		}
 		wmpc.reader.start()
 	}
+}
+
+func (wmpc *wssMsgPackClient) createBeater() {
+	if wmpc.beater == nil {
+		beater := &wssBeater{
+			wssMsgPackClient: wmpc,
+			conn:             wmpc.Connection,
+			terminate:        make(chan struct{}),
+			terminated:       make(chan struct{}),
+			ticker:           time.NewTicker(common.HeartbeatInterval),
+		}
+		beater.start()
+		wmpc.beater = beater
+	}
+}
+
+// WSS Beater
+
+type wssBeater struct {
+	*wssMsgPackClient
+	conn         *Connection
+	terminate    chan struct{}
+	terminated   chan struct{}
+	ticker       *time.Ticker
+	mustSendBeat bool
+}
+
+func (b *wssBeater) start() {
+	if b != nil {
+		go b.tick()
+	}
+}
+
+func (b *wssBeater) stop() {
+	if b != nil {
+		b.wssMsgPackClient = nil
+		select {
+		case <-b.terminated:
+		default:
+			close(b.terminate)
+			<-b.terminated
+		}
+	}
+}
+
+func (b *wssBeater) tick() {
+	defer func() {
+		b.ticker.Stop()
+		b.ticker = nil
+		close(b.terminated)
+	}()
+	for {
+		select {
+		case <-b.terminate:
+			return
+		case <-b.ticker.C:
+			if !b.conn.enqueueQuery(connectionExec(b.beat)) {
+				return
+			}
+		}
+	}
+}
+
+func (b *wssBeater) beat() error {
+	if b != nil && b.wssMsgPackClient != nil {
+		if b.mustSendBeat {
+			// do not set it back to false here!
+			return b.socket.WriteControl(websocket.PingMessage, nil, time.Time{})
+		} else {
+			b.mustSendBeat = true
+		}
+	}
+	return nil
+}
+
+func (b *wssBeater) sendMessage(msg msgp.Encodable) error {
+	if b != nil {
+		b.mustSendBeat = false
+		return b.send(msg)
+	}
+	return nil
 }

@@ -738,7 +738,6 @@ func (tcc *TLSCapnpClient) createReader() {
 // Beater
 
 type beater struct {
-	connectionMsgBasic
 	*TLSCapnpHandshaker
 	conn         *Connection
 	beatBytes    []byte
