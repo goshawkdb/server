@@ -151,7 +151,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine, useNextVersion bool, vc versionCache) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine, useNextVersion bool, vc *versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() || (sts.topology.NextConfiguration != nil && (!useNextVersion || !sts.topology.NextConfiguration.BarrierReached1For(sts.rmId))) {
 		fun := func() error {
@@ -237,7 +237,7 @@ func (sts *SimpleTxnSubmitter) Shutdown() {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc *versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
@@ -296,7 +296,7 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 }
 
 // translate from client representation to server representation
-func (sts *SimpleTxnSubmitter) translateActions(translationCallback eng.TranslationCallback, outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc versionCache) (map[common.RMId]*[]int, error) {
+func (sts *SimpleTxnSubmitter) translateActions(translationCallback eng.TranslationCallback, outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc *versionCache) (map[common.RMId]*[]int, error) {
 
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
@@ -391,7 +391,7 @@ func (sts *SimpleTxnSubmitter) translateRead(action *msgs.Action, clientRead cms
 	return nil
 }
 
-func (sts *SimpleTxnSubmitter) translateWrite(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientWrite cmsgs.ClientActionWrite) error {
+func (sts *SimpleTxnSubmitter) translateWrite(vc *versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientWrite cmsgs.ClientActionWrite) error {
 	action.SetWrite()
 	write := action.Write()
 	write.SetValue(clientWrite.Value())
@@ -404,7 +404,7 @@ func (sts *SimpleTxnSubmitter) translateWrite(vc versionCache, outgoingSeg *capn
 	return nil
 }
 
-func (sts *SimpleTxnSubmitter) translateReadWrite(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientReadWrite cmsgs.ClientActionReadwrite) error {
+func (sts *SimpleTxnSubmitter) translateReadWrite(vc *versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientReadWrite cmsgs.ClientActionReadwrite) error {
 	clientReferences := clientReadWrite.References()
 	action.SetReadwrite()
 	readWrite := action.Readwrite()
@@ -418,7 +418,7 @@ func (sts *SimpleTxnSubmitter) translateReadWrite(vc versionCache, outgoingSeg *
 	return nil
 }
 
-func (sts *SimpleTxnSubmitter) translateCreate(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientCreate cmsgs.ClientActionCreate) (*common.Positions, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) translateCreate(vc *versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, vUUId *common.VarUUId, action *msgs.Action, clientCreate cmsgs.ClientActionCreate) (*common.Positions, []common.RMId, error) {
 	action.SetCreate()
 	create := action.Create()
 	create.SetValue(clientCreate.Value())
@@ -436,7 +436,7 @@ func (sts *SimpleTxnSubmitter) translateCreate(vc versionCache, outgoingSeg *cap
 	return positions, hashCodes, nil
 }
 
-func (sts *SimpleTxnSubmitter) translateRoll(vc versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientRoll cmsgs.ClientActionRoll) error {
+func (sts *SimpleTxnSubmitter) translateRoll(vc *versionCache, outgoingSeg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, action *msgs.Action, clientRoll cmsgs.ClientActionRoll) error {
 	action.SetRoll()
 	roll := action.Roll()
 	roll.SetVersion(clientRoll.Version())
@@ -450,7 +450,7 @@ func (sts *SimpleTxnSubmitter) translateRoll(vc versionCache, outgoingSeg *capn.
 	return nil
 }
 
-func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, clientReferences *cmsgs.ClientVarIdPos_List) (*msgs.VarIdPos_List, error) {
+func copyReferences(vc *versionCache, seg *capn.Segment, referencesInNeedOfPositions *[]*msgs.VarIdPos, clientReferences *cmsgs.ClientVarIdPos_List) (*msgs.VarIdPos_List, error) {
 	refs := msgs.NewVarIdPosList(seg, clientReferences.Len())
 	for idx, l := 0, clientReferences.Len(); idx < l; idx++ {
 		clientRef := clientReferences.At(idx)
@@ -467,7 +467,7 @@ func copyReferences(vc versionCache, seg *capn.Segment, referencesInNeedOfPositi
 	return &refs, nil
 }
 
-func validateCapability(vc versionCache, target *common.VarUUId, cap cmsgs.Capability) error {
+func validateCapability(vc *versionCache, target *common.VarUUId, cap cmsgs.Capability) error {
 	if !vc.EnsureSubset(target, cap) {
 		return fmt.Errorf("Attempt made to grant wider capabilities on %v than acceptable", target)
 	}

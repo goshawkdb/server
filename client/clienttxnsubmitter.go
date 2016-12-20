@@ -16,16 +16,16 @@ type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error) error
 
 type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
-	versionCache versionCache
+	versionCache *versionCache
 	txnLive      bool
 	backoff      *server.BinaryBackoffEngine
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, cm paxos.ConnectionManager) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ConnectionManager) *ClientTxnSubmitter {
 	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,
-		versionCache:       NewVersionCache(roots),
+		versionCache:       NewVersionCache(roots, namespace),
 		txnLive:            false,
 		backoff:            server.NewBinaryBackoffEngine(sts.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 	}
@@ -42,7 +42,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		return continuation(nil, fmt.Errorf("Cannot submit client as a live txn already exists"))
 	}
 
-	if err := cts.versionCache.ValidateTransaction(ctxnCap); err != nil {
+	curTxnId := common.MakeTxnId(ctxnCap.Id())
+	if err := cts.versionCache.ValidateTransaction(curTxnId, ctxnCap); err != nil {
 		return continuation(nil, err)
 	}
 
@@ -50,7 +51,6 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	clientOutcome := cmsgs.NewClientTxnOutcome(seg)
 	clientOutcome.SetId(ctxnCap.Id())
 
-	curTxnId := common.MakeTxnId(ctxnCap.Id())
 	cts.backoff.Shrink(server.SubmissionMinSubmitDelay)
 
 	var cont TxnCompletionConsumer
