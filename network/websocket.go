@@ -208,6 +208,7 @@ func (l *WebsocketListener) acceptLoop() {
 		ClientCAs:                roots,
 		RootCAs:                  roots,
 		ClientAuth:               tls.RequireAnyClientCert,
+		NextProtos:               []string{"h2", "http/1.1"},
 	}
 
 	connCount := uint32(0)
