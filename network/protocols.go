@@ -484,6 +484,7 @@ type TLSCapnpClient struct {
 	peerCerts     []*x509.Certificate
 	roots         map[string]*common.Capability
 	rootsVar      map[common.VarUUId]*common.Capability
+	namespace     []byte
 	submitter     *client.ClientTxnSubmitter
 	submitterIdle *connectionMsgTopologyChanged
 	reader        *socketReader
@@ -538,6 +539,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	binary.BigEndian.PutUint32(namespace[0:4], tcc.connectionNumber)
 	binary.BigEndian.PutUint32(namespace[4:8], tcc.connectionManager.BootCount())
 	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.connectionManager.RMId))
+	tcc.namespace = namespace
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(tcc.roots))
 	idy := 0
@@ -573,7 +575,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		tcc.createBeater(conn, server.SegToBytes(seg))
 		tcc.createReader()
 
-		tcc.submitter = client.NewClientTxnSubmitter(tcc.connectionManager.RMId, tcc.connectionManager.BootCount(), tcc.rootsVar, tcc.connectionManager)
+		tcc.submitter = client.NewClientTxnSubmitter(tcc.connectionManager.RMId, tcc.connectionManager.BootCount(), tcc.rootsVar, tcc.namespace, tcc.connectionManager)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil
