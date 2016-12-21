@@ -15,6 +15,7 @@ import (
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
+	"net"
 	"sync"
 )
 
@@ -613,11 +614,11 @@ func (cm *ConnectionManager) setDesiredServers(local string, remote []string) er
 	cm.Unlock()
 
 	if localHostChanged {
-		clusterName := ""
-		if cm.topology != nil {
-			clusterName = cm.topology.ClusterId
+		localHost, _, err := net.SplitHostPort(local)
+		if err != nil {
+			return err
 		}
-		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, clusterName, local)
+		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, localHost, cm.topology.ClusterId)
 		if err != nil {
 			return err
 		}
