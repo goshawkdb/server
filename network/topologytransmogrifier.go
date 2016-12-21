@@ -307,17 +307,16 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 
 	if tt.task == nil {
 		if next := topology.NextConfiguration; next == nil {
-			tt.installTopology(topology, nil)
 			localHost, remoteHosts, err := tt.active.LocalRemoteHosts(tt.listenPort)
 			if err != nil {
 				return err
 			}
+			tt.installTopology(topology, nil, localHost, remoteHosts)
 			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
 
 			future := tt.db.WithEnv(func(env *mdb.Env) (interface{}, error) {
 				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
 			})
-			tt.connectionManager.SetDesiredServers(localHost, remoteHosts)
 			for version := range tt.migrations {
 				if version <= topology.Version {
 					delete(tt.migrations, version)
@@ -336,7 +335,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 	return nil
 }
 
-func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func() error) {
+func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func() error, localHost string, remoteHosts []string) {
 	server.Log("Topology: Installing topology to connection manager, et al:", topology)
 	if tt.localEstablished != nil {
 		if callbacks == nil {
@@ -360,7 +359,7 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 		cbCopy := cb
 		wrapped[subType] = func() { tt.enqueueQuery(topologyTransmogrifierMsgExe(cbCopy)) }
 	}
-	tt.connectionManager.SetTopology(topology, wrapped)
+	tt.connectionManager.SetTopology(topology, wrapped, localHost, remoteHosts)
 }
 
 func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfiguration) error {
@@ -806,12 +805,11 @@ func (task *joinCluster) tick() error {
 	active := task.active.Clone()
 	active.ClusterId = task.config.ClusterId
 
-	// Must install to connectionManager before launching any connections
-	task.installTopology(active, nil)
-	// we may not have the youngest topology and there could be other
+	// Must install to connectionManager before launching any connections.
+	// We may not have the youngest topology and there could be other
 	// hosts who have connected to us who are trying to send us a more
 	// up to date topology. So we shouldn't kill off those connections.
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	task.installTopology(active, nil, localHost, remoteHosts)
 
 	// It's possible that different members of our goal are trying to
 	// achieve different goals, so in all cases, we should share our
@@ -987,8 +985,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		}
 	}
 
-	task.installTopology(task.active, nil)
-	task.connectionManager.SetDesiredServers(localHost, allRemoteHosts)
+	task.installTopology(task.active, nil, localHost, allRemoteHosts)
 
 	// the -1 is because allRemoteHosts will not include localHost
 	hostsAddedList := allRemoteHosts[len(hostsOld)-1:]
@@ -1191,9 +1188,8 @@ func (task *installTargetNew) tick() error {
 		return task.fatal(err)
 	}
 
-	task.installTopology(task.active, nil)
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	task.installTopology(task.active, nil, localHost, remoteHosts)
 	task.shareGoalWithAll()
 
 	if !task.isInRMs(next.NewRMIds) {
@@ -1315,6 +1311,7 @@ func (task *awaitBarrier1) tick() error {
 		task.proposerBarrierReached = nil
 		task.connectionBarrierReached = nil
 		task.connectionManagerBarrierReached = nil
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
 			eng.VarSubscriber: func() error {
 				if activeNextConfig == task.installing {
@@ -1352,9 +1349,7 @@ func (task *awaitBarrier1) tick() error {
 				}
 				return nil
 			},
-		})
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+		}, localHost, remoteHosts)
 	}
 
 	task.shareGoalWithAll()
@@ -1422,6 +1417,7 @@ func (task *awaitBarrier2) tick() error {
 	} else if activeNextConfig != task.installing {
 		task.installing = activeNextConfig
 		task.varBarrierReached = nil
+		remoteHosts := task.allHostsBarLocalHost(localHost, next)
 		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
 			eng.VarSubscriber: func() error {
 				if activeNextConfig == task.installing {
@@ -1432,9 +1428,7 @@ func (task *awaitBarrier2) tick() error {
 				}
 				return nil
 			},
-		})
-		remoteHosts := task.allHostsBarLocalHost(localHost, next)
-		task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+		}, localHost, remoteHosts)
 	}
 
 	task.shareGoalWithAll()
@@ -1462,8 +1456,7 @@ func (task *migrate) tick() error {
 	}
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
-	task.installTopology(task.active, nil)
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	task.installTopology(task.active, nil, localHost, remoteHosts)
 	task.shareGoalWithAll()
 
 	if task.isInRMs(task.active.RMs) {
@@ -1572,9 +1565,8 @@ func (task *installCompletion) tick() error {
 		return task.fatal(err)
 	}
 
-	task.installTopology(task.active, nil)
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
-	task.connectionManager.SetDesiredServers(localHost, remoteHosts)
+	task.installTopology(task.active, nil, localHost, remoteHosts)
 	task.shareGoalWithAll()
 
 	// As before, we use the new topology now and we only need to
