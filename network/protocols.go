@@ -220,7 +220,7 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 }
 
 func (tch *TLSCapnpHandshaker) baseTLSConfig() *tls.Config {
-	nodeCertPrivKeyPair := tch.connectionManager.NodeCertificatePrivateKeyPair
+	nodeCertPrivKeyPair := tch.connectionManager.NodeCertificatePrivateKeyPair()
 	roots := x509.NewCertPool()
 	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
 

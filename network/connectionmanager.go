@@ -15,6 +15,7 @@ import (
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
+	"net"
 	"sync"
 )
 
@@ -27,7 +28,8 @@ type ConnectionManager struct {
 	localHost                     string
 	RMId                          common.RMId
 	bootcount                     uint32
-	NodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
+	certificate                   []byte
+	nodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
 	Transmogrifier                *TopologyTransmogrifier
 	topology                      *configuration.Topology
 	cellTail                      *cc.ChanCellTail
@@ -127,12 +129,6 @@ type connectionManagerMsgShutdown chan struct{}
 
 func (cmms connectionManagerMsgShutdown) witness() connectionManagerMsg { return cmms }
 
-type connectionManagerMsgSetDesired struct {
-	connectionManagerMsgBasic
-	local  string
-	remote []string
-}
-
 type connectionManagerMsgServerEstablished struct {
 	connectionManagerMsgBasic
 	*Connection
@@ -180,6 +176,8 @@ type connectionManagerMsgSetTopology struct {
 	connectionManagerMsgBasic
 	topology  *configuration.Topology
 	callbacks map[eng.TopologyChangeSubscriberType]func()
+	local     string
+	remote    []string
 }
 
 type connectionManagerMsgTopologyAddSubscriber struct {
@@ -212,13 +210,6 @@ func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
 	if sync == paxos.Sync {
 		<-c
 	}
-}
-
-func (cm *ConnectionManager) SetDesiredServers(localhost string, remotehosts []string) {
-	cm.enqueueQuery(connectionManagerMsgSetDesired{
-		local:  localhost,
-		remote: remotehosts,
-	})
 }
 
 func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, clusterUUId uint64, flushCallback func()) {
@@ -286,6 +277,12 @@ func (cm *ConnectionManager) LocalHost() string {
 	return cm.localHost
 }
 
+func (cm *ConnectionManager) NodeCertificatePrivateKeyPair() *certs.NodeCertificatePrivateKeyPair {
+	cm.RLock()
+	defer cm.RUnlock()
+	return cm.nodeCertificatePrivateKeyPair
+}
+
 func (cm *ConnectionManager) AddServerConnectionSubscriber(obs paxos.ServerConnectionSubscriber) {
 	cm.enqueueQuery(connectionManagerMsgServerConnAddSubscriber{ServerConnectionSubscriber: obs})
 }
@@ -294,10 +291,12 @@ func (cm *ConnectionManager) RemoveServerConnectionSubscriber(obs paxos.ServerCo
 	cm.enqueueQuery(connectionManagerMsgServerConnRemoveSubscriber{ServerConnectionSubscriber: obs})
 }
 
-func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
+func (cm *ConnectionManager) SetTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func(), localhost string, remotehosts []string) {
 	cm.enqueueQuery(connectionManagerMsgSetTopology{
 		topology:  topology,
 		callbacks: callbacks,
+		local:     localhost,
+		remote:    remotehosts,
 	})
 }
 
@@ -349,11 +348,11 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, nodeCertPrivKeyPair *certs.NodeCertificatePrivateKeyPair, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
 	cm := &ConnectionManager{
-		RMId:                          rmId,
-		bootcount:                     bootCount,
-		NodeCertificatePrivateKeyPair: nodeCertPrivKeyPair,
+		RMId:              rmId,
+		bootcount:         bootCount,
+		certificate:       certificate,
 		servers:           make(map[string]*connectionManagerMsgServerEstablished),
 		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
 		flushedServers:    make(map[common.RMId]server.EmptyStruct),
@@ -423,8 +422,6 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			case connectionManagerMsgShutdown:
 				shutdownChan = msgT
 				terminate = true
-			case connectionManagerMsgSetDesired:
-				cm.setDesiredServers(msgT)
 			case *connectionManagerMsgServerEstablished:
 				cm.serverEstablished(msgT)
 			case connectionManagerMsgServerLost:
@@ -435,6 +432,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 				cm.clientEstablished(msgT)
 			case connectionManagerMsgSetTopology:
 				cm.setTopology(msgT.topology, msgT.callbacks)
+				err = cm.setDesiredServers(msgT.local, msgT.remote)
 			case connectionManagerMsgServerConnAddSubscriber:
 				cm.serverConnSubscribers.AddSubscriber(msgT.ServerConnectionSubscriber)
 			case connectionManagerMsgServerConnRemoveSubscriber:
@@ -471,43 +469,6 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	cm.RUnlock()
 	if shutdownChan != nil {
 		close(shutdownChan)
-	}
-}
-
-func (cm *ConnectionManager) setDesiredServers(hosts connectionManagerMsgSetDesired) {
-	cm.desired = hosts.remote
-
-	localHostChanged := cm.localHost != hosts.local
-	cm.Lock()
-	cm.localHost = hosts.local
-	cm.Unlock()
-
-	if localHostChanged {
-		cd := cm.rmToServer[cm.RMId]
-		delete(cm.rmToServer, cd.rmId)
-		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
-		cd = cd.clone()
-		cd.host = hosts.local
-		cm.rmToServer[cd.rmId] = cd
-		cm.servers[cd.host] = cd
-		cm.serverConnSubscribers.ServerConnEstablished(cd, func() { cm.ServerConnectionFlushed(cd.rmId) })
-	}
-
-	desiredMap := make(map[string]server.EmptyStruct, len(hosts.remote))
-	for _, host := range hosts.remote {
-		desiredMap[host] = server.EmptyStructVal
-		if _, found := cm.servers[host]; !found {
-			cm.servers[host] = &connectionManagerMsgServerEstablished{
-				Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
-				host:       host,
-			}
-		}
-	}
-	for host, sconn := range cm.servers {
-		if _, found := desiredMap[host]; !found && !sconn.established {
-			sconn.Shutdown(paxos.Async)
-			delete(cm.servers, host)
-		}
 	}
 }
 
@@ -642,6 +603,56 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callb
 		cm.servers[cd.host] = cd
 		cm.serverConnSubscribers.ServerConnEstablished(cd, func() { cm.ServerConnectionFlushed(cd.rmId) })
 	}
+}
+
+func (cm *ConnectionManager) setDesiredServers(local string, remote []string) error {
+	cm.desired = remote
+
+	localHostChanged := cm.localHost != local
+	cm.Lock()
+	cm.localHost = local
+	cm.Unlock()
+
+	if localHostChanged {
+		localHost, _, err := net.SplitHostPort(local)
+		if err != nil {
+			return err
+		}
+		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, localHost, cm.topology.ClusterId)
+		if err != nil {
+			return err
+		}
+		cm.Lock()
+		cm.nodeCertificatePrivateKeyPair = nodeCertPrivKeyPair
+		cm.Unlock()
+
+		cd := cm.rmToServer[cm.RMId]
+		delete(cm.rmToServer, cd.rmId)
+		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
+		cd = cd.clone()
+		cd.host = local
+		cm.rmToServer[cd.rmId] = cd
+		cm.servers[cd.host] = cd
+		cm.serverConnSubscribers.ServerConnEstablished(cd, func() { cm.ServerConnectionFlushed(cd.rmId) })
+	}
+
+	desiredMap := make(map[string]server.EmptyStruct, len(remote))
+	for _, host := range remote {
+		desiredMap[host] = server.EmptyStructVal
+		if _, found := cm.servers[host]; !found {
+			cm.servers[host] = &connectionManagerMsgServerEstablished{
+				Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
+				host:       host,
+			}
+		}
+	}
+	for host, sconn := range cm.servers {
+		if _, found := desiredMap[host]; !found && !sconn.established {
+			sconn.Shutdown(paxos.Async)
+			delete(cm.servers, host)
+		}
+	}
+	return nil
 }
 
 func (cm *ConnectionManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {

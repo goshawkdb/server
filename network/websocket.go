@@ -192,7 +192,7 @@ func (l *WebsocketListener) getTopology() *configuration.Topology {
 }
 
 func (l *WebsocketListener) acceptLoop() {
-	nodeCertPrivKeyPair := l.connectionManager.NodeCertificatePrivateKeyPair
+	nodeCertPrivKeyPair := l.connectionManager.NodeCertificatePrivateKeyPair()
 	roots := x509.NewCertPool()
 	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
 
