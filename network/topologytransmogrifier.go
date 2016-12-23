@@ -1613,8 +1613,6 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 
 	seg := capn.NewBuffer(nil)
 	txn := msgs.NewRootTxn(seg)
-	txn.SetSubmitter(uint32(task.connectionManager.RMId))
-	txn.SetSubmitterBootCount(task.connectionManager.BootCount())
 
 	actionsSeg := capn.NewBuffer(nil)
 	actionsWrapper := msgs.NewRootActionListWrapper(actionsSeg)

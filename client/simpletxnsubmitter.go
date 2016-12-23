@@ -243,8 +243,6 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.Transla
 
 	txnCap.SetId(clientTxnCap.Id())
 	txnCap.SetRetry(clientTxnCap.Retry())
-	txnCap.SetSubmitter(uint32(sts.rmId))
-	txnCap.SetSubmitterBootCount(sts.bootCount)
 	txnCap.SetFInc(sts.topology.FInc)
 	txnCap.SetTopologyVersion(topologyVersion)
 

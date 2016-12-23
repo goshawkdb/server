@@ -115,8 +115,8 @@ func (arb *acceptorReceiveBallots) init(a *Acceptor, txn *eng.TxnReader) {
 	arb.Acceptor = a
 	arb.ballotAccumulator = NewBallotAccumulator(txn)
 	arb.txn = txn
-	arb.txnSubmitter = common.RMId(txn.Txn.Submitter())
-	arb.txnSubmitterBootCount = txn.Txn.SubmitterBootCount()
+	arb.txnSubmitter = txn.Id.RMId()
+	arb.txnSubmitterBootCount = txn.Id.BootCount()
 }
 
 func (arb *acceptorReceiveBallots) start() {
@@ -290,7 +290,7 @@ type acceptorAwaitLocallyComplete struct {
 func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *eng.TxnReader) {
 	aalc.Acceptor = a
 	aalc.tlcsReceived = make(map[common.RMId]server.EmptyStruct, aalc.ballotAccumulator.txn.Txn.Allocations().Len())
-	aalc.txnSubmitter = common.RMId(txn.Txn.Submitter())
+	aalc.txnSubmitter = txn.Id.RMId()
 }
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
@@ -347,7 +347,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 
 	} else {
 		server.Log(aalc.txnId, "Adding sender for 2B")
-		submitter := common.RMId(aalc.ballotAccumulator.txn.Txn.Submitter())
+		submitter := common.RMId(aalc.ballotAccumulator.txn.Id.RMId())
 		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, aalc.tgcRecipients...)
 		aalc.acceptorManager.AddServerConnectionSubscriber(aalc.twoBSender)
 	}
