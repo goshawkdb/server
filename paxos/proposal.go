@@ -483,9 +483,30 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 		// There's a chance that only we received this txn, so we need
 		// to abort for all other active RMs.
 		s.proposal.proposerManager.Exe.Enqueue(func() {
-			// Only start a new proposal if we're not finished - there's
-			// a race otherwise: the final 2b could be on its way to us
-			// at the same time as we notice the failure.
+			// Only start a new proposal if we're not finished. If we are
+			// finished, we're either fully finished (i.e. all acceptors
+			// agree on the outcome and there's no more proposal work to
+			// do), or the current proposal is finished, though there may
+			// be later stages. In the first case, the point is we must
+			// have made contact with at least F+1 acceptors and got
+			// answers back from them, in which case we know that all the
+			// active voters have also contacted acceptors (if they have
+			// not, we would definitely note have F+1 results), which
+			// means they have all received the txn itself. In the second
+			// case, we know there are going to be future proposal
+			// stages, so we will pick up any failures at that time. So
+			// in these cases, if the submitter dies, we have no work to
+			// do because the txn has already made it out as far as
+			// necessary (or will do one way or another).
+			//
+			// However, if we are not finished, then there's the
+			// possibility that not all active voters have even received
+			// the txn (which could very well be _why_ we're not
+			// finished). Therefore, we attempt to abort for everyone
+			// other than ourselves. We could of course try to just
+			// resend the txn submission instead, but that's just more
+			// code paths and more complexity. In general, we always opt
+			// for a fail-fast solution.
 			if s.proposal.finished {
 				return
 			}
