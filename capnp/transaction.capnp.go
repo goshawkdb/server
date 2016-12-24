@@ -12,26 +12,22 @@ import (
 
 type Txn C.Struct
 
-func NewTxn(s *C.Segment) Txn                  { return Txn(s.NewStruct(16, 3)) }
-func NewRootTxn(s *C.Segment) Txn              { return Txn(s.NewRootStruct(16, 3)) }
-func AutoNewTxn(s *C.Segment) Txn              { return Txn(s.NewStructAR(16, 3)) }
+func NewTxn(s *C.Segment) Txn                  { return Txn(s.NewStruct(8, 3)) }
+func NewRootTxn(s *C.Segment) Txn              { return Txn(s.NewRootStruct(8, 3)) }
+func AutoNewTxn(s *C.Segment) Txn              { return Txn(s.NewStructAR(8, 3)) }
 func ReadRootTxn(s *C.Segment) Txn             { return Txn(s.Root(0).ToStruct()) }
 func (s Txn) Id() []byte                       { return C.Struct(s).GetObject(0).ToData() }
 func (s Txn) SetId(v []byte)                   { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Txn) Submitter() uint32                { return C.Struct(s).Get32(0) }
-func (s Txn) SetSubmitter(v uint32)            { C.Struct(s).Set32(0, v) }
-func (s Txn) SubmitterBootCount() uint32       { return C.Struct(s).Get32(4) }
-func (s Txn) SetSubmitterBootCount(v uint32)   { C.Struct(s).Set32(4, v) }
-func (s Txn) Retry() bool                      { return C.Struct(s).Get1(64) }
-func (s Txn) SetRetry(v bool)                  { C.Struct(s).Set1(64, v) }
+func (s Txn) Retry() bool                      { return C.Struct(s).Get1(0) }
+func (s Txn) SetRetry(v bool)                  { C.Struct(s).Set1(0, v) }
 func (s Txn) Actions() []byte                  { return C.Struct(s).GetObject(1).ToData() }
 func (s Txn) SetActions(v []byte)              { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s Txn) Allocations() Allocation_List     { return Allocation_List(C.Struct(s).GetObject(2)) }
 func (s Txn) SetAllocations(v Allocation_List) { C.Struct(s).SetObject(2, C.Object(v)) }
-func (s Txn) FInc() uint8                      { return C.Struct(s).Get8(9) }
-func (s Txn) SetFInc(v uint8)                  { C.Struct(s).Set8(9, v) }
-func (s Txn) TopologyVersion() uint32          { return C.Struct(s).Get32(12) }
-func (s Txn) SetTopologyVersion(v uint32)      { C.Struct(s).Set32(12, v) }
+func (s Txn) FInc() uint8                      { return C.Struct(s).Get8(1) }
+func (s Txn) SetFInc(v uint8)                  { C.Struct(s).Set8(1, v) }
+func (s Txn) TopologyVersion() uint32          { return C.Struct(s).Get32(4) }
+func (s Txn) SetTopologyVersion(v uint32)      { C.Struct(s).Set32(4, v) }
 func (s Txn) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -47,44 +43,6 @@ func (s Txn) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.Id()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	err = b.WriteByte(',')
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("\"submitter\":")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.Submitter()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	err = b.WriteByte(',')
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("\"submitterBootCount\":")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.SubmitterBootCount()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -243,44 +201,6 @@ func (s Txn) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("submitter = ")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.Submitter()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = b.WriteString(", ")
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("submitterBootCount = ")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.SubmitterBootCount()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = b.WriteString(", ")
-	if err != nil {
-		return err
-	}
 	_, err = b.WriteString("retry = ")
 	if err != nil {
 		return err
@@ -401,7 +321,7 @@ func (s Txn) MarshalCapLit() ([]byte, error) {
 
 type Txn_List C.PointerList
 
-func NewTxnList(s *C.Segment, sz int) Txn_List { return Txn_List(s.NewCompositeList(16, 3, sz)) }
+func NewTxnList(s *C.Segment, sz int) Txn_List { return Txn_List(s.NewCompositeList(8, 3, sz)) }
 func (s Txn_List) Len() int                    { return C.PointerList(s).Len() }
 func (s Txn_List) At(i int) Txn                { return Txn(C.PointerList(s).At(i).ToStruct()) }
 func (s Txn_List) ToArray() []Txn {
