@@ -347,8 +347,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 
 	} else {
 		server.Log(aalc.txnId, "Adding sender for 2B")
-		submitter := common.RMId(aalc.ballotAccumulator.txn.Id.RMId())
-		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, submitter, aalc.tgcRecipients...)
+		aalc.twoBSender = newTwoBTxnVotesSender((*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, aalc.txnSubmitter, aalc.tgcRecipients...)
 		aalc.acceptorManager.AddServerConnectionSubscriber(aalc.twoBSender)
 	}
 }
