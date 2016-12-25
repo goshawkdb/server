@@ -1616,9 +1616,9 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 
 	actionsSeg := capn.NewBuffer(nil)
 	actionsWrapper := msgs.NewRootActionListWrapper(actionsSeg)
-	actions := msgs.NewActionList(actionsSeg, 1)
+	rootRefs, actions := task.specialTopologyTransactionActions(seg, read, write)
 	actionsWrapper.SetActions(actions)
-	action := actions.At(0)
+	action := actions.At(actions.Len() - 1)
 	action.SetVarId(configuration.TopologyVarUUId[:])
 
 	switch {
@@ -1691,6 +1691,9 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 	}
 
 	return &txn
+}
+
+func (task *targetConfig) specialTopologyTransactionActions(seg *capn.Segment, read, write *configuration.TopologyVarUUId) (msgs.VarIdPos_List, msgs.Action_List) {
 }
 
 func (task *targetConfig) getTopologyFromLocalDatabase() (*configuration.Topology, error) {

@@ -251,6 +251,34 @@ func (config *Configuration) String() string {
 		config.ClusterId, config.ClusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.RMs, config.RMsRemoved, config.Roots, config.NextConfiguration)
 }
 
+func (config *Configuration) ToConfigurationJSON() *ConfigurationJSON {
+	result := &ConfigurationJSON{
+		ClusterId:  config.ClusterId,
+		Version:    config.Version,
+		Hosts:      config.Hosts,
+		F:          config.F,
+		MaxRMCount: config.MaxRMCount,
+		NoSync:     config.NoSync,
+	}
+
+	fingerprints := make(map[string]map[string]*CapabilityJSON, len(config.Fingerprints))
+	result.ClientCertificateFingerprints = fingerprints
+	for fingerprint, rootsMap := range config.Fingerprints {
+		accountRootsMap := make(map[string]*CapabilityJSON, len(rootsMap))
+		fingerprints[hex.EncodeToString(fingerprint[:])] = accountRootsMap
+
+		for rootName, rootCaps := range rootsMap {
+			whichCap := rootCaps.Which()
+			accountRootsMap[rootName] = &CapabilityJSON{
+				Read:  whichCap == cmsgs.CAPABILITY_READ || whichCap == cmsgs.CAPABILITY_READWRITE,
+				Write: whichCap == cmsgs.CAPABILITY_WRITE || whichCap == cmsgs.CAPABILITY_READWRITE,
+			}
+		}
+	}
+
+	return result
+}
+
 func (config *Configuration) Clone() *Configuration {
 	clone := &Configuration{
 		ClusterId:         config.ClusterId,
@@ -384,8 +412,8 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		c.RMsRemoved[common.RMId(rmsRemoved.At(idx))] = server.EmptyStructVal
 	}
 
-	rootsName := []string{}
 	rootsMap := make(map[string]server.EmptyStruct)
+	rootsMap["system:config"] = server.EmptyStructVal
 	fingerprints := config.Fingerprints()
 	fingerprintsMap := make(map[Fingerprint]map[string]*common.Capability, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
@@ -399,14 +427,16 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			name := rootCap.Name()
 			capability := rootCap.Capability()
 			roots[name] = common.NewCapability(capability)
-			if _, found := rootsMap[name]; !found {
-				rootsMap[name] = server.EmptyStructVal
-				rootsName = append(rootsName, name)
-			}
+			rootsMap[name] = server.EmptyStructVal
 		}
 		fingerprintsMap[ary] = roots
 	}
 	c.Fingerprints = fingerprintsMap
+
+	rootsName := make([]string, 0, len(rootsMap))
+	for name := range rootsMap {
+		rootsName = append(rootsName, name)
+	}
 	sort.Strings(rootsName)
 	c.Roots = rootsName
 
