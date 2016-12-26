@@ -413,7 +413,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	}
 
 	rootsMap := make(map[string]server.EmptyStruct)
-	rootsMap["system:config"] = server.EmptyStructVal
+	rootsMap[server.ConfigRootName] = server.EmptyStructVal
 	fingerprints := config.Fingerprints()
 	fingerprintsMap := make(map[Fingerprint]map[string]*common.Capability, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
