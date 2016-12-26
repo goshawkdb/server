@@ -45,7 +45,7 @@ func NewProposal(pm *ProposerManager, txn *eng.TxnReader, fInc int, ballots []*e
 		activeRMIds:        activeRMIds,
 		fInc:               fInc,
 		txn:                txn,
-		submitter:          txn.Id.RMId(),
+		submitter:          txn.Id.RMId(pm.RMId),
 		submitterBootCount: txn.Id.BootCount(),
 		skipPhase1:         skipPhase1,
 		instances:          make(map[common.VarUUId]*proposalInstance, len(ballots)),

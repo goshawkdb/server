@@ -1,7 +1,6 @@
 package network
 
 import (
-	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
@@ -69,8 +68,8 @@ func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Me
 		outcome := msg.SubmissionOutcome()
 		txn := eng.TxnReaderFromData(outcome.Txn())
 		txnId := txn.Id
-		connNumber := binary.BigEndian.Uint32(txnId[8:12])
-		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
+		connNumber := txnId.ConnectionCount()
+		bootNumber := txnId.BootCount()
 		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
 			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)

@@ -212,7 +212,9 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 	for !terminate {
 		if oldTask != tt.task {
 			oldTask = tt.task
-			if oldTask != nil {
+			err = tt.maybePublishConfig()
+			terminate = err != nil
+			if !terminate && oldTask != nil {
 				err = oldTask.tick()
 				terminate = err != nil
 			}
@@ -428,6 +430,17 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 			TopologyTransmogrifier: tt,
 			config:                 goal,
 		}
+	}
+	return nil
+}
+
+func (tt *TopologyTransmogrifier) maybePublishConfig() error {
+	if tt.active != nil {
+		json, err := tt.active.ToJSONString()
+		if err != nil {
+			return err
+		}
+		log.Printf("Publishing: %s", string(json))
 	}
 	return nil
 }

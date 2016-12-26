@@ -115,7 +115,7 @@ func (arb *acceptorReceiveBallots) init(a *Acceptor, txn *eng.TxnReader) {
 	arb.Acceptor = a
 	arb.ballotAccumulator = NewBallotAccumulator(txn)
 	arb.txn = txn
-	arb.txnSubmitter = txn.Id.RMId()
+	arb.txnSubmitter = txn.Id.RMId(a.acceptorManager.RMId)
 	arb.txnSubmitterBootCount = txn.Id.BootCount()
 }
 
@@ -290,7 +290,7 @@ type acceptorAwaitLocallyComplete struct {
 func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *eng.TxnReader) {
 	aalc.Acceptor = a
 	aalc.tlcsReceived = make(map[common.RMId]server.EmptyStruct, aalc.ballotAccumulator.txn.Txn.Allocations().Len())
-	aalc.txnSubmitter = txn.Id.RMId()
+	aalc.txnSubmitter = txn.Id.RMId(a.acceptorManager.RMId)
 }
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
@@ -477,7 +477,7 @@ func newTwoBTxnVotesSender(outcome *msgs.Outcome, txnId *common.TxnId, submitter
 	msg.SetTwoBTxnVotes(twoB)
 	twoB.SetOutcome(*outcome)
 
-	server.Log(txnId, "Sending 2B to", recipients)
+	server.Log(txnId, "Sending 2B to", recipients, submitter)
 
 	return &twoBTxnVotesSender{
 		msg:          server.SegToBytes(seg),

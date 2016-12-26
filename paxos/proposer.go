@@ -206,7 +206,7 @@ func (pab *proposerAwaitBallots) init(proposer *Proposer) {
 func (pab *proposerAwaitBallots) start() {
 	pab.txn.Start(true)
 	txnId := pab.txn.TxnReader.Id
-	pab.submitter = txnId.RMId()
+	pab.submitter = txnId.RMId(pab.proposerManager.RMId)
 	pab.submitterBootCount = txnId.BootCount()
 	if pab.txn.Retry {
 		// We need to observe whether or not the submitter dies. If it
