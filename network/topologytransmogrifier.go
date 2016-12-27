@@ -435,13 +435,14 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 }
 
 func (tt *TopologyTransmogrifier) maybePublishConfig() error {
-	if tt.active != nil {
-		json, err := tt.active.ToJSONString()
-		if err != nil {
-			return err
-		}
-		log.Printf("Publishing: %s", string(json))
+	if tt.active == nil {
+		return nil
 	}
+	json, err := tt.active.ToJSONString()
+	if err != nil {
+		return err
+	}
+	log.Printf("Publishing: %s", string(json))
 	return nil
 }
 

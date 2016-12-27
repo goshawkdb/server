@@ -469,7 +469,7 @@ func (s *proposalSender) ConnectedRMs(conns map[common.RMId]Connection) {
 			s.ConnectionLost(rmId, conns)
 		}
 	}
-	if conn, found := conns[s.proposal.submitter]; !found || conn.BootCount() != s.submitterBootCount {
+	if conn, found := conns[s.proposal.submitter]; !found || (conn.BootCount() != s.submitterBootCount && s.submitterBootCount > 0) {
 		s.ConnectionLost(s.proposal.submitter, conns)
 	}
 }

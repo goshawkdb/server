@@ -169,7 +169,7 @@ func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst
 }
 
 func (arb *acceptorReceiveBallots) ConnectedRMs(conns map[common.RMId]Connection) {
-	if conn, found := conns[arb.txnSubmitter]; !found || conn.BootCount() != arb.txnSubmitterBootCount {
+	if conn, found := conns[arb.txnSubmitter]; !found || (conn.BootCount() != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0) {
 		arb.enqueueCreateTxnSender()
 	}
 }
@@ -179,7 +179,7 @@ func (arb *acceptorReceiveBallots) ConnectionLost(rmId common.RMId, conns map[co
 	}
 }
 func (arb *acceptorReceiveBallots) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
-	if rmId == arb.txnSubmitter && conn.BootCount() != arb.txnSubmitterBootCount {
+	if rmId == arb.txnSubmitter && conn.BootCount() != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
 		arb.enqueueCreateTxnSender()
 	}
 	done()
