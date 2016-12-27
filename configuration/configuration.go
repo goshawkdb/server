@@ -128,7 +128,6 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 
 	seg := capn.NewBuffer(nil)
 	allRootNamesMap := make(map[string]server.EmptyStruct)
-	allRootNamesMap[server.ConfigRootName] = server.EmptyStructVal
 	for fingerprint, rootsMap := range config.ClientCertificateFingerprints {
 		fingerprintBytes, err := hex.DecodeString(fingerprint)
 		if err != nil {
