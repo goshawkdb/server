@@ -12,6 +12,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/stats"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"net"
@@ -347,7 +348,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier, *stats.StatsPublisher) {
 	cm := &ConnectionManager{
 		RMId:              rmId,
 		bootcount:         bootCount,
@@ -398,11 +399,12 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 	cm.servers[cd.host] = cd
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), db, lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, ss, config)
+	sp := stats.NewStatsPublisher(lc)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, sp, port, ss, config)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	<-localEstablished
-	return cm, transmogrifier
+	return cm, transmogrifier, sp
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
