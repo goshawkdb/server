@@ -79,7 +79,7 @@ type locationChecker struct {
 }
 
 func newLocationChecker(stores stores) *locationChecker {
-	resolver := ch.NewResolver(stores[0].topology.RMs(), stores[0].topology.TwoFInc)
+	resolver := ch.NewResolver(stores[0].topology.RMs, stores[0].topology.TwoFInc)
 	m := make(map[common.RMId]*store, len(stores))
 	for _, s := range stores {
 		m[s.rmId] = s

@@ -20,4 +20,5 @@ const (
 	MostRandomByteIndex           = 7 // will be the lsb of a big-endian client-n in the txnid.
 	MigrationBatchElemCount       = 64
 	PoissonSamples                = 64
+	ConfigRootName                = "system:config"
 )

@@ -172,10 +172,11 @@ func (s *server) start() {
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig)
+	cm, transmogrifier, statsPublisher := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig)
 	s.certificate = nil
 	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
 	s.addOnShutdown(transmogrifier.Shutdown)
+	s.addOnShutdown(statsPublisher.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 

@@ -9,13 +9,11 @@ using Var = import "var.capnp";
 
 struct Txn {
   id                 @0: Data;
-  submitter          @1: UInt32;
-  submitterBootCount @2: UInt32;
-  retry              @3: Bool;
-  actions            @4: Data;
-  allocations        @5: List(Allocation);
-  fInc               @6: UInt8;
-  topologyVersion    @7: UInt32;
+  retry              @1: Bool;
+  actions            @2: Data;
+  allocations        @3: List(Allocation);
+  fInc               @4: UInt8;
+  topologyVersion    @5: UInt32;
 }
 
 struct ActionListWrapper {

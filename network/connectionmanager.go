@@ -1,7 +1,6 @@
 package network
 
 import (
-	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	cc "github.com/msackman/chancell"
@@ -13,6 +12,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/stats"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"net"
@@ -69,8 +69,8 @@ func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Me
 		outcome := msg.SubmissionOutcome()
 		txn := eng.TxnReaderFromData(outcome.Txn())
 		txnId := txn.Id
-		connNumber := binary.BigEndian.Uint32(txnId[8:12])
-		bootNumber := binary.BigEndian.Uint32(txnId[12:16])
+		connNumber := txnId.ConnectionCount()
+		bootNumber := txnId.BootCount()
 		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
 			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
@@ -348,7 +348,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier, *stats.StatsPublisher) {
 	cm := &ConnectionManager{
 		RMId:              rmId,
 		bootcount:         bootCount,
@@ -399,11 +399,12 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 	cm.servers[cd.host] = cd
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), db, lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, ss, config)
+	sp := stats.NewStatsPublisher(lc)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, sp, port, ss, config)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	<-localEstablished
-	return cm, transmogrifier
+	return cm, transmogrifier, sp
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
