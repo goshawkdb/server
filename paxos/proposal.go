@@ -45,7 +45,7 @@ func NewProposal(pm *ProposerManager, txn *eng.TxnReader, fInc int, ballots []*e
 		activeRMIds:        activeRMIds,
 		fInc:               fInc,
 		txn:                txn,
-		submitter:          txn.Id.RMId(),
+		submitter:          txn.Id.RMId(pm.RMId),
 		submitterBootCount: txn.Id.BootCount(),
 		skipPhase1:         skipPhase1,
 		instances:          make(map[common.VarUUId]*proposalInstance, len(ballots)),
@@ -469,7 +469,7 @@ func (s *proposalSender) ConnectedRMs(conns map[common.RMId]Connection) {
 			s.ConnectionLost(rmId, conns)
 		}
 	}
-	if conn, found := conns[s.proposal.submitter]; !found || conn.BootCount() != s.submitterBootCount {
+	if conn, found := conns[s.proposal.submitter]; !found || (conn.BootCount() != s.submitterBootCount && s.submitterBootCount > 0) {
 		s.ConnectionLost(s.proposal.submitter, conns)
 	}
 }

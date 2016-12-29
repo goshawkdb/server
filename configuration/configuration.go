@@ -28,6 +28,7 @@ type ConfigurationJSON struct {
 	MaxRMCount                    uint16
 	NoSync                        bool
 	ClientCertificateFingerprints map[string]map[string]*CapabilityJSON
+	Next                          *ConfigurationJSON
 }
 
 type CapabilityJSON struct {
@@ -102,11 +103,17 @@ func (config *ConfigurationJSON) validate() error {
 			}
 			for rootName, capability := range roots {
 				if !(capability.Read || capability.Write) {
-					return fmt.Errorf("Invalid configured: Account with fingerprint %v, root %v: no capability has been granted.",
+					return fmt.Errorf("Invalid configuration: Account with fingerprint %v, root %s: no capability has been granted.",
 						fingerprint, rootName)
+				}
+				if rootName == server.ConfigRootName && capability.Write {
+					return fmt.Errorf("Invalid configuration: Write capability on root %s is not possible. (Account with fingerprint %v)", server.ConfigRootName, fingerprint)
 				}
 			}
 		}
+	}
+	if config.Next != nil {
+		return errors.New("Invalid configuration: Next may not be specified.")
 	}
 	return nil
 }
@@ -120,7 +127,6 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		MaxRMCount:   config.MaxRMCount,
 		NoSync:       config.NoSync,
 		Fingerprints: make(map[Fingerprint]map[string]*common.Capability, len(config.ClientCertificateFingerprints)),
-		Roots:        make([]string, 0, len(config.ClientCertificateFingerprints)),
 	}
 
 	seg := capn.NewBuffer(nil)
@@ -137,10 +143,7 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		result.Fingerprints[fingerprintAry] = accountRootsMap
 
 		for rootName, rootCaps := range rootsMap {
-			if _, found := allRootNamesMap[rootName]; !found {
-				allRootNamesMap[rootName] = server.EmptyStructVal
-				result.Roots = append(result.Roots, rootName)
-			}
+			allRootNamesMap[rootName] = server.EmptyStructVal
 
 			var capability *common.Capability
 			if rootCaps.Read && rootCaps.Write {
@@ -161,6 +164,10 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 			}
 			accountRootsMap[rootName] = capability
 		}
+	}
+	result.Roots = make([]string, 0, len(allRootNamesMap))
+	for rootName := range allRootNamesMap {
+		result.Roots = append(result.Roots, rootName)
 	}
 	sort.Strings(result.Roots)
 
@@ -249,6 +256,42 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 func (config *Configuration) String() string {
 	return fmt.Sprintf("Configuration{ClusterId: %v(%v), Version: %v, Hosts: %v, F: %v, MaxRMCount: %v, NoSync: %v, RMs: %v, Removed: %v, RootNames: %v, %v}",
 		config.ClusterId, config.ClusterUUId, config.Version, config.Hosts, config.F, config.MaxRMCount, config.NoSync, config.RMs, config.RMsRemoved, config.Roots, config.NextConfiguration)
+}
+
+func (config *Configuration) ToConfigurationJSON() *ConfigurationJSON {
+	result := &ConfigurationJSON{
+		ClusterId:  config.ClusterId,
+		Version:    config.Version,
+		Hosts:      config.Hosts,
+		F:          config.F,
+		MaxRMCount: config.MaxRMCount,
+		NoSync:     config.NoSync,
+	}
+
+	fingerprints := make(map[string]map[string]*CapabilityJSON, len(config.Fingerprints))
+	result.ClientCertificateFingerprints = fingerprints
+	for fingerprint, rootsMap := range config.Fingerprints {
+		accountRootsMap := make(map[string]*CapabilityJSON, len(rootsMap))
+		fingerprints[hex.EncodeToString(fingerprint[:])] = accountRootsMap
+
+		for rootName, rootCaps := range rootsMap {
+			whichCap := rootCaps.Which()
+			accountRootsMap[rootName] = &CapabilityJSON{
+				Read:  whichCap == cmsgs.CAPABILITY_READ || whichCap == cmsgs.CAPABILITY_READWRITE,
+				Write: whichCap == cmsgs.CAPABILITY_WRITE || whichCap == cmsgs.CAPABILITY_READWRITE,
+			}
+		}
+	}
+
+	if config.NextConfiguration != nil {
+		result.Next = config.NextConfiguration.ToConfigurationJSON()
+	}
+
+	return result
+}
+
+func (config *Configuration) ToJSONString() ([]byte, error) {
+	return json.MarshalIndent(config.ToConfigurationJSON(), "", "\t")
 }
 
 func (config *Configuration) Clone() *Configuration {
@@ -384,7 +427,6 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		c.RMsRemoved[common.RMId(rmsRemoved.At(idx))] = server.EmptyStructVal
 	}
 
-	rootsName := []string{}
 	rootsMap := make(map[string]server.EmptyStruct)
 	fingerprints := config.Fingerprints()
 	fingerprintsMap := make(map[Fingerprint]map[string]*common.Capability, fingerprints.Len())
@@ -399,14 +441,16 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			name := rootCap.Name()
 			capability := rootCap.Capability()
 			roots[name] = common.NewCapability(capability)
-			if _, found := rootsMap[name]; !found {
-				rootsMap[name] = server.EmptyStructVal
-				rootsName = append(rootsName, name)
-			}
+			rootsMap[name] = server.EmptyStructVal
 		}
 		fingerprintsMap[ary] = roots
 	}
 	c.Fingerprints = fingerprintsMap
+
+	rootsName := make([]string, 0, len(rootsMap))
+	for name := range rootsMap {
+		rootsName = append(rootsName, name)
+	}
 	sort.Strings(rootsName)
 	c.Roots = rootsName
 
