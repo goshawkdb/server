@@ -47,13 +47,13 @@ func LoadJSONFromPath(path string) (*ConfigurationJSON, error) {
 	if err = decoder.Decode(config); err != nil {
 		return nil, err
 	}
-	if err = config.validate(); err != nil {
+	if err = config.Validate(); err != nil {
 		return nil, err
 	}
 	return config, nil
 }
 
-func (config *ConfigurationJSON) validate() error {
+func (config *ConfigurationJSON) Validate() error {
 	if config.ClusterId == "" {
 		return fmt.Errorf("Invalid configuration: cluster id must not be empty.")
 	}
@@ -116,6 +116,30 @@ func (config *ConfigurationJSON) validate() error {
 		return errors.New("Invalid configuration: Next may not be specified.")
 	}
 	return nil
+}
+
+func (config *ConfigurationJSON) Clone() *ConfigurationJSON {
+	c := &ConfigurationJSON{
+		ClusterId:  config.ClusterId,
+		Version:    config.Version,
+		Hosts:      make([]string, len(config.Hosts)),
+		F:          config.F,
+		MaxRMCount: config.MaxRMCount,
+		NoSync:     config.NoSync,
+		ClientCertificateFingerprints: make(map[string]map[string]*CapabilityJSON, len(config.ClientCertificateFingerprints)),
+	}
+	for idx, host := range config.Hosts {
+		c.Hosts[idx] = host
+	}
+	for fingerprint, roots := range config.ClientCertificateFingerprints {
+		r := make(map[string]*CapabilityJSON, len(roots))
+		c.ClientCertificateFingerprints[fingerprint] = r
+		for root, cap := range roots {
+			capCopy := *cap
+			r[root] = &capCopy
+		}
+	}
+	return c
 }
 
 func (config *ConfigurationJSON) ToConfiguration() *Configuration {
