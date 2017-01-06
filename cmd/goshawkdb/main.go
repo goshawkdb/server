@@ -190,6 +190,9 @@ func (s *server) addOnShutdown(f func()) {
 }
 
 func (s *server) shutdown(err error) {
+	if err != nil {
+		log.Println("Shutting down due to fatal error:", err)
+	}
 	for idx := len(s.onShutdown) - 1; idx >= 0; idx-- {
 		s.onShutdown[idx]()
 	}

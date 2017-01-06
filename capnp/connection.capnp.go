@@ -13,13 +13,13 @@ import (
 type HelloServerFromServer C.Struct
 
 func NewHelloServerFromServer(s *C.Segment) HelloServerFromServer {
-	return HelloServerFromServer(s.NewStruct(24, 2))
+	return HelloServerFromServer(s.NewStruct(16, 2))
 }
 func NewRootHelloServerFromServer(s *C.Segment) HelloServerFromServer {
-	return HelloServerFromServer(s.NewRootStruct(24, 2))
+	return HelloServerFromServer(s.NewRootStruct(16, 2))
 }
 func AutoNewHelloServerFromServer(s *C.Segment) HelloServerFromServer {
-	return HelloServerFromServer(s.NewStructAR(24, 2))
+	return HelloServerFromServer(s.NewStructAR(16, 2))
 }
 func ReadRootHelloServerFromServer(s *C.Segment) HelloServerFromServer {
 	return HelloServerFromServer(s.Root(0).ToStruct())
@@ -33,15 +33,13 @@ func (s HelloServerFromServer) RmId() uint32          { return C.Struct(s).Get32
 func (s HelloServerFromServer) SetRmId(v uint32)      { C.Struct(s).Set32(0, v) }
 func (s HelloServerFromServer) BootCount() uint32     { return C.Struct(s).Get32(4) }
 func (s HelloServerFromServer) SetBootCount(v uint32) { C.Struct(s).Set32(4, v) }
-func (s HelloServerFromServer) TieBreak() uint32      { return C.Struct(s).Get32(8) }
-func (s HelloServerFromServer) SetTieBreak(v uint32)  { C.Struct(s).Set32(8, v) }
 func (s HelloServerFromServer) ClusterId() string     { return C.Struct(s).GetObject(1).ToText() }
 func (s HelloServerFromServer) ClusterIdBytes() []byte {
 	return C.Struct(s).GetObject(1).ToDataTrimLastByte()
 }
 func (s HelloServerFromServer) SetClusterId(v string)   { C.Struct(s).SetObject(1, s.Segment.NewText(v)) }
-func (s HelloServerFromServer) ClusterUUId() uint64     { return C.Struct(s).Get64(16) }
-func (s HelloServerFromServer) SetClusterUUId(v uint64) { C.Struct(s).Set64(16, v) }
+func (s HelloServerFromServer) ClusterUUId() uint64     { return C.Struct(s).Get64(8) }
+func (s HelloServerFromServer) SetClusterUUId(v uint64) { C.Struct(s).Set64(8, v) }
 func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -95,25 +93,6 @@ func (s HelloServerFromServer) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.BootCount()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	err = b.WriteByte(',')
-	if err != nil {
-		return err
-	}
-	_, err = b.WriteString("\"tieBreak\":")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.TieBreak()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -239,25 +218,6 @@ func (s HelloServerFromServer) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("tieBreak = ")
-	if err != nil {
-		return err
-	}
-	{
-		s := s.TieBreak()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = b.WriteString(", ")
-	if err != nil {
-		return err
-	}
 	_, err = b.WriteString("clusterId = ")
 	if err != nil {
 		return err
@@ -308,7 +268,7 @@ func (s HelloServerFromServer) MarshalCapLit() ([]byte, error) {
 type HelloServerFromServer_List C.PointerList
 
 func NewHelloServerFromServerList(s *C.Segment, sz int) HelloServerFromServer_List {
-	return HelloServerFromServer_List(s.NewCompositeList(24, 2, sz))
+	return HelloServerFromServer_List(s.NewCompositeList(16, 2, sz))
 }
 func (s HelloServerFromServer_List) Len() int { return C.PointerList(s).Len() }
 func (s HelloServerFromServer_List) At(i int) HelloServerFromServer {
