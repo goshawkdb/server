@@ -21,7 +21,6 @@ type ConnectionManager interface {
 	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
-	BootCount() uint32
 }
 
 type ServerConnectionPublisher interface {
@@ -39,7 +38,6 @@ type Connection interface {
 	Host() string
 	RMId() common.RMId
 	BootCount() uint32
-	TieBreak() uint32
 	ClusterUUId() uint64
 	Send(msg []byte)
 }

@@ -61,6 +61,9 @@ func (p *Poisson) interval(now time.Time) time.Duration {
 	}
 }
 
+// Can return NaN if length is 0
+// Can return +Inf if length > 0 and interval gives 0
+// Can return < 0 if length > 0 and interval gives < 0 (think: leap seconds)
 func (p *Poisson) λ(now time.Time) float64 {
 	return float64(p.length) / float64(p.interval(now))
 }
@@ -70,8 +73,11 @@ func (p *Poisson) P(t time.Duration, k int64, now time.Time) float64 {
 	λt := p.λ(now) * float64(t)
 	if math.IsNaN(λt) {
 		return 1
+	} else if math.IsInf(λt, 0) || λt < 0 {
+		return 0
+	} else {
+		return (math.Pow(λt, float64(k)) * math.Exp(-λt)) / float64(fac(k))
 	}
-	return (math.Pow(λt, float64(k)) * math.Exp(-λt)) / float64(fac(k))
 }
 
 func fac(n int64) int64 {

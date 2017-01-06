@@ -377,7 +377,7 @@ func (wmpc *wssMsgPackClient) verifyHello(hello *cmsgs.Hello) bool {
 func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], wmpc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], wmpc.connectionManager.BootCount())
+	binary.BigEndian.PutUint32(namespace[4:8], wmpc.connectionManager.BootCount)
 	binary.BigEndian.PutUint32(namespace[8:], uint32(wmpc.connectionManager.RMId))
 	wmpc.namespace = namespace
 
@@ -421,7 +421,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 		wmpc.createBeater()
 		wmpc.createReader()
 
-		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.connectionManager.RMId, wmpc.connectionManager.BootCount(), wmpc.rootsVar, wmpc.namespace, wmpc.connectionManager)
+		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.connectionManager.RMId, wmpc.connectionManager.BootCount, wmpc.rootsVar, wmpc.namespace, wmpc.connectionManager)
 		wmpc.submitter.TopologyChanged(wmpc.topology)
 		wmpc.submitter.ServerConnectionsChanged(servers)
 		return nil

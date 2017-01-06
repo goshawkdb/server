@@ -192,7 +192,7 @@ func (tch *TLSCapnpHandshaker) send(msg []byte) error {
 }
 
 func (tch *TLSCapnpHandshaker) readOne() (*capn.Segment, error) {
-	if err := tch.socket.SetReadDeadline(time.Now().Add(common.HeartbeatInterval * 2)); err != nil {
+	if err := tch.socket.SetReadDeadline(time.Now().Add(common.HeartbeatInterval << 1)); err != nil {
 		return nil, err
 	}
 	return capn.ReadFromStream(tch.socket, nil)
@@ -257,7 +257,8 @@ func (tch *TLSCapnpHandshaker) createBeater(conn *Connection, beatBytes []byte) 
 			conn:               conn,
 			terminate:          make(chan struct{}),
 			terminated:         make(chan struct{}),
-			ticker:             time.NewTicker(common.HeartbeatInterval),
+			ticker:             time.NewTicker(common.HeartbeatInterval >> 1),
+			mustSendBeat:       true,
 		}
 		beater.start()
 		tch.beater = beater
@@ -272,7 +273,6 @@ type TLSCapnpServer struct {
 	remoteRMId        common.RMId
 	remoteClusterUUId uint64
 	remoteBootCount   uint32
-	combinedTieBreak  uint32
 	reader            *socketReader
 }
 
@@ -342,7 +342,6 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 
 			tcs.remoteClusterUUId = hello.ClusterUUId()
 			tcs.remoteBootCount = hello.BootCount()
-			tcs.combinedTieBreak = tcs.combinedTieBreak ^ hello.TieBreak()
 			return nil
 		} else {
 			return fmt.Errorf("Unequal remote topology (%v, %v)", tcs.remoteHost, tcs.remoteRMId)
@@ -358,10 +357,7 @@ func (tcs *TLSCapnpServer) makeHelloServer() *capn.Segment {
 	localHost := tcs.connectionManager.LocalHost()
 	hello.SetLocalHost(localHost)
 	hello.SetRmId(uint32(tcs.connectionManager.RMId))
-	hello.SetBootCount(tcs.connectionManager.BootCount())
-	tieBreak := tcs.rng.Uint32()
-	tcs.combinedTieBreak = tieBreak
-	hello.SetTieBreak(tieBreak)
+	hello.SetBootCount(tcs.connectionManager.BootCount)
 	hello.SetClusterId(tcs.topology.ClusterId)
 	hello.SetClusterUUId(tcs.topology.ClusterUUId)
 	return seg
@@ -390,7 +386,7 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	flushMsg := msgs.NewRootMessage(flushSeg)
 	flushMsg.SetFlushed()
 	flushBytes := server.SegToBytes(flushSeg)
-	tcs.connectionManager.ServerEstablished(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.combinedTieBreak, tcs.remoteClusterUUId, func() { tcs.Send(flushBytes) })
+	tcs.connectionManager.ServerEstablished(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteClusterUUId, func() { tcs.Send(flushBytes) })
 
 	return nil
 }
@@ -415,16 +411,20 @@ func (tcs *TLSCapnpServer) Send(msg []byte) {
 }
 
 func (tcs *TLSCapnpServer) RestartDialer() Dialer {
-	tcs.InternalShutdown()
+	tcs.internalShutdown(tcs.dialer != nil)
 	return tcs.dialer
 }
 
 func (tcs *TLSCapnpServer) InternalShutdown() {
+	tcs.internalShutdown(false)
+}
+
+func (tcs *TLSCapnpServer) internalShutdown(restarting bool) {
 	if tcs.reader != nil {
 		tcs.reader.stop()
 		tcs.reader = nil
 	}
-	tcs.connectionManager.ServerLost(tcs, tcs.remoteRMId, false)
+	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, restarting)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
 }
 
@@ -524,7 +524,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], tcc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.connectionManager.BootCount())
+	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.connectionManager.BootCount)
 	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.TLSCapnpHandshaker.connectionManager.RMId))
 	tcc.namespace = namespace
 	hello.SetNamespace(namespace)
@@ -563,7 +563,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount(), tcc.rootsVar, tcc.namespace, cm)
+		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace, cm)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil
@@ -786,8 +786,7 @@ func (b *beater) tick() {
 func (b *beater) beat() error {
 	if b != nil && b.TLSCapnpHandshaker != nil {
 		if b.mustSendBeat {
-			// do not set it back to false here!
-			return b.send(b.beatBytes)
+			return b.sendMessage(b.beatBytes)
 		} else {
 			b.mustSendBeat = true
 		}

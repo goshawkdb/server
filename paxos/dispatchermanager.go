@@ -16,7 +16,7 @@ type Dispatchers struct {
 	connectionManager  ConnectionManager
 }
 
-func NewDispatchers(cm ConnectionManager, rmId common.RMId, count uint8, db *db.Databases, lc eng.LocalConnection) *Dispatchers {
+func NewDispatchers(cm ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc eng.LocalConnection) *Dispatchers {
 	// It actually doesn't matter at this point what order we start up
 	// the acceptors. This is because we are called from the
 	// ConnectionManager constructor, and its actor loop hasn't been
@@ -31,7 +31,7 @@ func NewDispatchers(cm ConnectionManager, rmId common.RMId, count uint8, db *db.
 		VarDispatcher:      eng.NewVarDispatcher(count, rmId, cm, db, lc),
 		connectionManager:  cm,
 	}
-	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, cm, db, d.VarDispatcher)
+	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, bootCount, cm, db, d.VarDispatcher)
 
 	return d
 }

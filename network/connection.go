@@ -1,6 +1,7 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/server"
@@ -169,8 +170,9 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = conn.queryChan, cell }
 	head.WithCell(chanFun)
 	if conn.topology == nil {
-		panic("Nil topology on connection start!")
-		// err = errors.New("No local topology, not ready for any connections")
+		// Most likely is that the connection manager has shutdown due
+		// to some other error and so the sync enqueue failed.
+		err = errors.New("No local topology, not ready for any connections.")
 	}
 
 	terminate := err != nil
@@ -388,6 +390,7 @@ func (cr *connectionRun) start() (bool, error) {
 
 func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
 	if cr.Protocol == nil {
+		tc.maybeClose()
 		return nil
 	} else {
 		return cr.Protocol.TopologyChanged(tc)
