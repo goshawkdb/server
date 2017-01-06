@@ -38,11 +38,11 @@ type ProposerManager struct {
 	topology      *configuration.Topology
 }
 
-func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerManager {
+func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerManager {
 	pm := &ProposerManager{
 		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
 		RMId:          rmId,
-		BootCount:     cm.BootCount(),
+		BootCount:     bootCount,
 		proposals:     make(map[instanceIdPrefix]*proposal),
 		proposers:     make(map[common.TxnId]*Proposer),
 		VarDispatcher: varDispatcher,
