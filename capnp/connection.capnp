@@ -15,9 +15,8 @@ struct HelloServerFromServer {
  localHost   @0: Text;
  rmId        @1: UInt32;
  bootCount   @2: UInt32;
- tieBreak    @3: UInt32;
- clusterId   @4: Text;
- clusterUUId @5: UInt64;
+ clusterId   @3: Text;
+ clusterUUId @4: UInt64;
 }
 
 struct Message {

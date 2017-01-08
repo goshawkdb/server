@@ -27,7 +27,7 @@ type ConnectionManager struct {
 	sync.RWMutex
 	localHost                     string
 	RMId                          common.RMId
-	bootcount                     uint32
+	BootCount                     uint32
 	certificate                   []byte
 	nodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
 	Transmogrifier                *TopologyTransmogrifier
@@ -35,7 +35,7 @@ type ConnectionManager struct {
 	cellTail                      *cc.ChanCellTail
 	enqueueQueryInner             func(connectionManagerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan                     <-chan connectionManagerMsg
-	servers                       map[string]*connectionManagerMsgServerEstablished
+	servers                       map[string][]*connectionManagerMsgServerEstablished
 	rmToServer                    map[common.RMId]*connectionManagerMsgServerEstablished
 	flushedServers                map[common.RMId]server.EmptyStruct
 	connCountToClient             map[uint32]paxos.ClientConnection
@@ -53,10 +53,6 @@ type serverConnSubscribers struct {
 type topologySubscribers struct {
 	*ConnectionManager
 	subscribers []map[eng.TopologySubscriber]server.EmptyStruct
-}
-
-func (cm *ConnectionManager) BootCount() uint32 {
-	return cm.bootcount
 }
 
 func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg msgs.Message) {
@@ -133,18 +129,18 @@ type connectionManagerMsgServerEstablished struct {
 	connectionManagerMsgBasic
 	*Connection
 	send          func([]byte)
-	established   bool
 	host          string
 	rmId          common.RMId
 	bootCount     uint32
-	tieBreak      uint32
 	clusterUUId   uint64
 	flushCallback func()
+	established   bool
 }
 
 type connectionManagerMsgServerLost struct {
 	connectionManagerMsgBasic
 	*Connection
+	host       string
 	rmId       common.RMId
 	restarting bool
 }
@@ -212,23 +208,23 @@ func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
 	}
 }
 
-func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rmId common.RMId, bootCount uint32, tieBreak uint32, clusterUUId uint64, flushCallback func()) {
+func (cm *ConnectionManager) ServerEstablished(conn *Connection, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func()) {
 	cm.enqueueQuery(&connectionManagerMsgServerEstablished{
 		Connection:    conn,
 		send:          conn.Send,
-		established:   true,
 		host:          host,
 		rmId:          rmId,
 		bootCount:     bootCount,
-		tieBreak:      tieBreak,
 		clusterUUId:   clusterUUId,
 		flushCallback: flushCallback,
+		established:   true,
 	})
 }
 
-func (cm *ConnectionManager) ServerLost(conn *Connection, rmId common.RMId, restarting bool) {
+func (cm *ConnectionManager) ServerLost(conn *Connection, host string, rmId common.RMId, restarting bool) {
 	cm.enqueueQuery(connectionManagerMsgServerLost{
 		Connection: conn,
+		host:       host,
 		rmId:       rmId,
 		restarting: restarting,
 	})
@@ -263,7 +259,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConn
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
-	if bootNumber != cm.bootcount && bootNumber != 0 {
+	if bootNumber != cm.BootCount && bootNumber != 0 {
 		return nil
 	}
 	cm.RLock()
@@ -350,10 +346,11 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 
 func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier, *stats.StatsPublisher) {
 	cm := &ConnectionManager{
+		localHost:         "",
 		RMId:              rmId,
-		bootcount:         bootCount,
+		BootCount:         bootCount,
 		certificate:       certificate,
-		servers:           make(map[string]*connectionManagerMsgServerEstablished),
+		servers:           make(map[string][]*connectionManagerMsgServerEstablished),
 		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
 		flushedServers:    make(map[common.RMId]server.EmptyStruct),
 		connCountToClient: make(map[uint32]paxos.ClientConnection),
@@ -391,14 +388,15 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 		})
 	cd := &connectionManagerMsgServerEstablished{
 		send:        cm.Send,
-		established: true,
+		host:        cm.localHost,
 		rmId:        rmId,
 		bootCount:   bootCount,
+		established: true,
 	}
 	cm.rmToServer[cd.rmId] = cd
-	cm.servers[cd.host] = cd
+	cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
-	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, uint8(procs), db, lc)
+	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, bootCount, uint8(procs), db, lc)
 	sp := stats.NewStatsPublisher(lc)
 	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, sp, port, ss, config)
 	cm.Transmogrifier = transmogrifier
@@ -457,11 +455,15 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		panic(err)
+		log.Fatalf("ConnectionManager encountered an error: %v", err)
 	}
 	cm.cellTail.Terminate()
-	for _, cd := range cm.servers {
-		cd.Shutdown(paxos.Sync)
+	for _, cds := range cm.servers {
+		for _, cd := range cds {
+			if cd != nil {
+				cd.Shutdown(paxos.Sync)
+			}
+		}
 	}
 	cm.RLock()
 	for _, cc := range cm.connCountToClient {
@@ -474,99 +476,101 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 }
 
 func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServerEstablished) {
-	if cd, found := cm.servers[connEst.host]; found && cd.Connection == connEst.Connection {
-		// fall through to where we do the safe insert of connEst
-
-	} else if found {
-		killOld, killNew := false, false
-		switch {
-		case !cd.established:
-			killOld = true
-		case cd.rmId != connEst.rmId:
-			killOld, killNew = true, true
-		case cd.bootCount < connEst.bootCount:
-			killOld = true
-		case cd.bootCount > connEst.bootCount:
-			killNew = true
-		case cd.tieBreak == connEst.tieBreak:
-			killOld, killNew = true, true
-		default:
-			killOld = cd.tieBreak < connEst.tieBreak
-			killNew = !killOld
-		}
-
-		if killOld {
-			cd.Shutdown(paxos.Async)
-			if cd.established {
-				delete(cm.rmToServer, cd.rmId)
-				cm.serverConnSubscribers.ServerConnLost(cd.rmId)
-			}
-		}
-		if killNew {
-			connEst.Shutdown(paxos.Async)
-			if killOld {
-				cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
-					Connection: NewConnectionTCPTLSCapnpDialer(cd.host, cm),
-					host:       cd.host,
-				}
-			}
-			return
-		}
-	}
-
-	if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.rmId == cm.RMId {
-		log.Printf("%v is claiming to have the same RMId as ourself! (%v)",
-			connEst.host, cm.RMId)
+	if connEst.rmId == cm.RMId {
+		log.Printf("%v is claiming to have the same RMId as ourself! (%v)", connEst.host, cm.RMId)
 		connEst.Shutdown(paxos.Async)
-		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
-			Connection: NewConnectionTCPTLSCapnpDialer(connEst.host, cm),
-			host:       connEst.host,
-		}
+		return
 
-	} else if found && connEst.host != cd.host {
+	} else if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.host != cd.host {
 		log.Printf("%v claimed by multiple servers: %v and %v. Recreating both connections.",
 			connEst.rmId, cd.host, connEst.host)
 		cd.Shutdown(paxos.Async)
 		connEst.Shutdown(paxos.Async)
 		delete(cm.rmToServer, cd.rmId)
 		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
-		cm.servers[cd.host] = &connectionManagerMsgServerEstablished{
-			Connection: NewConnectionTCPTLSCapnpDialer(cd.host, cm),
-			host:       cd.host,
+		return
+
+	} else if !found {
+		cm.rmToServer[connEst.rmId] = connEst
+		cm.serverConnSubscribers.ServerConnEstablished(connEst, connEst.flushCallback)
+	}
+
+	cds, found := cm.servers[connEst.host]
+	if found {
+		holeIdx := -1
+		foundIdx := -1
+		for idx, cd := range cds {
+			if cd == nil && holeIdx == -1 && idx > 0 { // idx 0 is reserved for dialers
+				holeIdx = idx
+			} else if cd != nil && cd.Connection == connEst.Connection {
+				foundIdx = idx
+				break
+			}
 		}
-		cm.servers[connEst.host] = &connectionManagerMsgServerEstablished{
-			Connection: NewConnectionTCPTLSCapnpDialer(connEst.host, cm),
-			host:       connEst.host,
+
+		// Due to acceptable races, we can be in a situation where we
+		// think there are multiple listener connections. That's all fine.
+		switch {
+		case foundIdx == -1 && holeIdx == -1:
+			cds = append(cds, connEst)
+			cm.servers[connEst.host] = cds
+		case foundIdx == -1:
+			cds[holeIdx] = connEst
+		default: // foundIdx != -1
+			cds[foundIdx] = connEst
 		}
 
 	} else {
-		cm.servers[connEst.host] = connEst
-		cm.rmToServer[connEst.rmId] = connEst
-		cm.serverConnSubscribers.ServerConnEstablished(connEst, connEst.flushCallback)
+		// It's a connection we're not expecting, but maybe it's from a
+		// server with a newer topology than us. So it's wrong to reject
+		// this connection.
+		cds = make([]*connectionManagerMsgServerEstablished, 2)
+		// idx 0 is reserved for dialers, which *we* create.
+		cds[1] = connEst
+		cm.servers[connEst.host] = cds
 	}
 }
 
 func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost) {
 	rmId := connLost.rmId
-	if cd, found := cm.rmToServer[connLost.rmId]; found && cd.Connection == connLost.Connection {
-		log.Printf("Connection to RMId %v lost\n", rmId)
+	host := connLost.host
+	if cds, found := cm.servers[host]; found {
+		if connLost.restarting { // just need to find it and set !established
+			for _, cd := range cds {
+				if cd != nil && cd.Connection == connLost.Connection {
+					cd.established = false
+					break
+				}
+			}
+		} else { // need to remove it completely
+			allNil := true
+			for idx, cd := range cds {
+				if cd != nil && cd.Connection == connLost.Connection {
+					cds[idx] = nil
+				} else if cd != nil {
+					allNil = false
+				}
+			}
+			if allNil {
+				delete(cm.servers, host)
+			}
+		}
+	}
+	if cd, found := cm.rmToServer[rmId]; found && cd.Connection == connLost.Connection {
+		log.Printf("Connection to %v lost\n", rmId)
 		cd.established = false
 		delete(cm.rmToServer, rmId)
-		if !connLost.restarting {
-			if cd1, found := cm.servers[cd.host]; found && cd1 == cd {
-				delete(cm.servers, cd.host)
-				for _, host := range cm.desired {
-					if host == cd.host {
-						cm.servers[host] = &connectionManagerMsgServerEstablished{
-							Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
-							host:       host,
-						}
-						break
-					}
+		cm.serverConnSubscribers.ServerConnLost(rmId)
+		if cds, found := cm.servers[host]; found {
+			for _, cd := range cds {
+				if cd != nil && cd.established { // backup connection found
+					log.Printf("Alternative connection to %v found\n", rmId)
+					cm.rmToServer[rmId] = cd
+					cm.serverConnSubscribers.ServerConnEstablished(cd, cd.flushCallback)
+					break
 				}
 			}
 		}
-		cm.serverConnSubscribers.ServerConnLost(rmId)
 	}
 }
 
@@ -601,56 +605,82 @@ func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callb
 		cd = cd.clone()
 		cd.clusterUUId = clusterUUId
 		cm.rmToServer[cm.RMId] = cd
-		cm.servers[cd.host] = cd
+		// do *not* change this localHost to cd.host - localhost change is taken care of in setDesiredServers
+		cm.servers[cm.localHost][0] = cd
 		cm.serverConnSubscribers.ServerConnEstablished(cd, func() { cm.ServerConnectionFlushed(cd.rmId) })
 	}
 }
 
-func (cm *ConnectionManager) setDesiredServers(local string, remote []string) error {
+func (cm *ConnectionManager) setDesiredServers(localHost string, remote []string) error {
 	cm.desired = remote
 
-	localHostChanged := cm.localHost != local
-	cm.Lock()
-	cm.localHost = local
-	cm.Unlock()
+	if cm.localHost != localHost {
+		oldLocalHost := cm.localHost
 
-	if localHostChanged {
-		localHost, _, err := net.SplitHostPort(local)
+		host, _, err := net.SplitHostPort(localHost)
 		if err != nil {
 			return err
 		}
-		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, localHost, cm.topology.ClusterId)
+		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, host, cm.topology.ClusterId)
 		if err != nil {
 			return err
 		}
 		cm.Lock()
+		cm.localHost = localHost
 		cm.nodeCertificatePrivateKeyPair = nodeCertPrivKeyPair
 		cm.Unlock()
 
 		cd := cm.rmToServer[cm.RMId]
 		delete(cm.rmToServer, cd.rmId)
+		delete(cm.servers, oldLocalHost)
 		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
 		cd = cd.clone()
-		cd.host = local
+		cd.host = localHost
 		cm.rmToServer[cd.rmId] = cd
-		cm.servers[cd.host] = cd
+		cm.servers[localHost] = []*connectionManagerMsgServerEstablished{cd}
 		cm.serverConnSubscribers.ServerConnEstablished(cd, func() { cm.ServerConnectionFlushed(cd.rmId) })
 	}
 
 	desiredMap := make(map[string]server.EmptyStruct, len(remote))
 	for _, host := range remote {
 		desiredMap[host] = server.EmptyStructVal
-		if _, found := cm.servers[host]; !found {
-			cm.servers[host] = &connectionManagerMsgServerEstablished{
+		if cds, found := cm.servers[host]; !found || len(cds) == 0 || cds[0] == nil {
+			// In all cases, we need to start a dialer
+			cd := &connectionManagerMsgServerEstablished{
 				Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
 				host:       host,
 			}
+			if !found || len(cds) == 0 {
+				cds := make([]*connectionManagerMsgServerEstablished, 1, 2)
+				cds[0] = cd
+				cm.servers[host] = cds
+			} else {
+				cds[0] = cd
+			}
 		}
 	}
-	for host, sconn := range cm.servers {
-		if _, found := desiredMap[host]; !found && !sconn.established {
-			sconn.Shutdown(paxos.Async)
+	// The intention here is to shutdown any dialers that are trying to
+	// connect to hosts that are no longer desired. There is a
+	// possibility the connection is actually now established and such
+	// a message is waiting in our own queue. This is fine because
+	// we've managed to get to this point without needing that
+	// connection anyway. We don't shutdown established connections
+	// though because we have the possibility that the remote end of
+	// the established connection is lagging behind us. If we shutdown
+	// then it could just recreate the connection in order to try to
+	// catch up. So we leave the connection up and allow the remote end
+	// to choose when to shut it down itself.
+	for host, cds := range cm.servers {
+		if host == cm.localHost {
+			continue
+		}
+		if _, found := desiredMap[host]; !found {
 			delete(cm.servers, host)
+			for _, cd := range cds {
+				if cd != nil && !cd.established {
+					cd.Shutdown(paxos.Async)
+				}
+			}
 		}
 	}
 	return nil
@@ -685,8 +715,8 @@ func (cm *ConnectionManager) cloneRMToServer() map[common.RMId]paxos.Connection 
 }
 
 func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
+	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.BootCount))
 	sc.Emit(fmt.Sprintf("Address: %v", cm.localHost))
-	sc.Emit(fmt.Sprintf("Boot Count: %v", cm.bootcount))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", cm.topology))
 	if cm.topology != nil && cm.topology.NextConfiguration != nil {
 		sc.Emit(fmt.Sprintf("Next Topology: %v", cm.topology.NextConfiguration))
@@ -708,9 +738,11 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Active Server RMIds: %v", rms))
 	sc.Emit(fmt.Sprintf("Active Server Connections: %v", serverConnections))
 	sc.Emit(fmt.Sprintf("Desired Server Connections: %v", cm.desired))
-	for _, conn := range cm.servers {
-		if conn.Connection != nil {
-			conn.Connection.Status(sc.Fork())
+	for _, cds := range cm.servers {
+		for _, cd := range cds {
+			if cd != nil && cd.Connection != nil {
+				cd.Connection.Status(sc.Fork())
+			}
 		}
 	}
 	cm.RLock()
@@ -828,10 +860,6 @@ func (cd *connectionManagerMsgServerEstablished) BootCount() uint32 {
 	return cd.bootCount
 }
 
-func (cd *connectionManagerMsgServerEstablished) TieBreak() uint32 {
-	return cd.tieBreak
-}
-
 func (cd *connectionManagerMsgServerEstablished) ClusterUUId() uint64 {
 	return cd.clusterUUId
 }
@@ -850,11 +878,9 @@ func (cd *connectionManagerMsgServerEstablished) clone() *connectionManagerMsgSe
 	return &connectionManagerMsgServerEstablished{
 		Connection:  cd.Connection,
 		send:        cd.send,
-		established: cd.established,
 		host:        cd.host,
 		rmId:        cd.rmId,
 		bootCount:   cd.bootCount,
-		tieBreak:    cd.tieBreak,
 		clusterUUId: cd.clusterUUId,
 	}
 }
