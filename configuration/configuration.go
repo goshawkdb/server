@@ -36,6 +36,13 @@ type CapabilityJSON struct {
 	Write bool
 }
 
+func (a *CapabilityJSON) Equal(b *CapabilityJSON) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Read == b.Read && a.Write == b.Write
+}
+
 func LoadJSONFromPath(path string) (*ConfigurationJSON, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -51,6 +58,32 @@ func LoadJSONFromPath(path string) (*ConfigurationJSON, error) {
 		return nil, err
 	}
 	return config, nil
+}
+
+func (a *ConfigurationJSON) Equal(b *ConfigurationJSON) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.ClientCertificateFingerprints) == len(b.ClientCertificateFingerprints)) {
+		return false
+	}
+	for idx, aHost := range a.Hosts {
+		if b.Hosts[idx] != aHost {
+			return false
+		}
+	}
+	for fingerprint, aRootsMap := range a.ClientCertificateFingerprints {
+		if bRootsMap, found := b.ClientCertificateFingerprints[fingerprint]; found && len(aRootsMap) == len(bRootsMap) {
+			for rootName, aCap := range aRootsMap {
+				if bCap, found := bRootsMap[rootName]; !found || !aCap.Equal(bCap) {
+					return false
+				}
+			}
+		} else {
+			return false
+		}
+	}
+	return a.Next.Equal(b.Next)
 }
 
 func (config *ConfigurationJSON) Validate() error {
@@ -264,14 +297,14 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 		}
 	}
 	for fingerprint, aRoots := range a.Fingerprints {
-		if bRoots, found := b.Fingerprints[fingerprint]; !found || len(aRoots) != len(bRoots) {
-			return false
-		} else {
+		if bRoots, found := b.Fingerprints[fingerprint]; found && len(aRoots) == len(bRoots) {
 			for name, aRootCaps := range aRoots {
 				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
 					return false
 				}
 			}
+		} else {
+			return false
 		}
 	}
 	return true
