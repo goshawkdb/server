@@ -67,8 +67,12 @@ func (a *ConfigurationJSON) Equal(b *ConfigurationJSON) bool {
 	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.ClientCertificateFingerprints) == len(b.ClientCertificateFingerprints)) {
 		return false
 	}
-	for idx, aHost := range a.Hosts {
-		if b.Hosts[idx] != aHost {
+	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
+	for _, aHost := range a.Hosts {
+		aHosts[aHost] = server.EmptyStructVal
+	}
+	for _, bHost := range b.Hosts {
+		if _, found := aHosts[bHost]; !found {
 			return false
 		}
 	}
@@ -291,8 +295,12 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Fingerprints) == len(b.Fingerprints)) {
 		return false
 	}
-	for idx, aHost := range a.Hosts {
-		if aHost != b.Hosts[idx] {
+	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
+	for _, aHost := range a.Hosts {
+		aHosts[aHost] = server.EmptyStructVal
+	}
+	for _, bHost := range b.Hosts {
+		if _, found := aHosts[bHost]; !found {
 			return false
 		}
 	}

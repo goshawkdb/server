@@ -43,6 +43,7 @@ type ConnectionManager struct {
 	serverConnSubscribers         serverConnSubscribers
 	topologySubscribers           topologySubscribers
 	Dispatchers                   *paxos.Dispatchers
+	localConnection               *client.LocalConnection
 }
 
 type serverConnSubscribers struct {
@@ -396,6 +397,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 	cm.rmToServer[cd.rmId] = cd
 	cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
+	cm.localConnection = lc
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, bootCount, uint8(procs), db, lc)
 	sp := stats.NewStatsPublisher(lc)
 	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, sp, port, ss, config)
@@ -465,6 +467,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			}
 		}
 	}
+	cm.localConnection.Shutdown(paxos.Sync)
 	cm.RLock()
 	for _, cc := range cm.connCountToClient {
 		cc.Shutdown(paxos.Sync)
