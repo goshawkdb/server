@@ -148,10 +148,10 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 
 		} else {
 			acceptors := GetAcceptorsFromTxn(txnCap)
-			fInc := int(txnCap.FInc())
+			twoFInc := int(txnCap.TwoFInc())
 			alloc := AllocForRMId(txnCap, pm.RMId)
 			ballots := MakeAbortBallots(txn, alloc)
-			pm.NewPaxosProposals(txn, fInc, ballots, acceptors, pm.RMId, true)
+			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, true)
 			// ActiveLearner is right - we don't want the proposer to
 			// vote, but it should exist to collect the 2Bs that should
 			// come back.
@@ -162,7 +162,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 	}
 }
 
-func (pm *ProposerManager) NewPaxosProposals(txn *eng.TxnReader, fInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
+func (pm *ProposerManager) NewPaxosProposals(txn *eng.TxnReader, twoFInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	txnId := txn.Id
@@ -170,7 +170,7 @@ func (pm *ProposerManager) NewPaxosProposals(txn *eng.TxnReader, fInc int, ballo
 	binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], uint32(rmId))
 	if _, found := pm.proposals[instId]; !found {
 		server.Log(txnId, "NewPaxos; acceptors:", acceptors, "; instance:", rmId)
-		prop := NewProposal(pm, txn, fInc, ballots, rmId, acceptors, skipPhase1)
+		prop := NewProposal(pm, txn, twoFInc, ballots, rmId, acceptors, skipPhase1)
 		pm.proposals[instId] = prop
 		prop.Start()
 	}
@@ -252,9 +252,9 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			// them.
 			acceptors := GetAcceptorsFromTxn(txnCap)
 			server.Log(txnId, "Starting abort proposals with acceptors", acceptors)
-			fInc := int(txnCap.FInc())
+			twoFInc := int(txnCap.TwoFInc())
 			ballots := MakeAbortBallots(txn, alloc)
-			pm.NewPaxosProposals(txn, fInc, ballots, acceptors, pm.RMId, false)
+			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, false)
 
 			proposer := NewProposer(pm, txn, ProposerActiveLearner, pm.topology)
 			pm.proposers[*txnId] = proposer
@@ -346,8 +346,7 @@ func (pm *ProposerManager) Status(sc *server.StatusConsumer) {
 }
 
 func GetAcceptorsFromTxn(txnCap msgs.Txn) common.RMIds {
-	fInc := int(txnCap.FInc())
-	twoFInc := fInc + fInc - 1
+	twoFInc := int(txnCap.TwoFInc())
 	acceptors := make([]common.RMId, twoFInc)
 	allocations := txnCap.Allocations()
 	idx := 0
@@ -355,7 +354,8 @@ func GetAcceptorsFromTxn(txnCap msgs.Txn) common.RMIds {
 		alloc := allocations.At(idx)
 		acceptors[idx] = common.RMId(alloc.RmId())
 	}
-	// Danger! For the initial topology txns, there are _not_ twoFInc acceptors
+	// Danger! For the topology txns, there are generally _not_ twoFInc
+	// acceptors!
 	return acceptors[:idx]
 }
 

@@ -14,6 +14,7 @@ type proposal struct {
 	instanceRMId       common.RMId
 	acceptors          []common.RMId
 	activeRMIds        map[common.RMId]uint32
+	twoFInc            int
 	fInc               int
 	txn                *eng.TxnReader
 	submitter          common.RMId
@@ -25,7 +26,7 @@ type proposal struct {
 	finished           bool
 }
 
-func NewProposal(pm *ProposerManager, txn *eng.TxnReader, fInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
+func NewProposal(pm *ProposerManager, txn *eng.TxnReader, twoFInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
 	txnCap := txn.Txn
 	allocs := txnCap.Allocations()
 	activeRMIds := make(map[common.RMId]uint32, allocs.Len())
@@ -43,7 +44,8 @@ func NewProposal(pm *ProposerManager, txn *eng.TxnReader, fInc int, ballots []*e
 		instanceRMId:       instanceRMId,
 		acceptors:          acceptors,
 		activeRMIds:        activeRMIds,
-		fInc:               fInc,
+		twoFInc:            twoFInc,
+		fInc:               (twoFInc >> 1) + 1,
 		txn:                txn,
 		submitter:          txn.Id.RMId(pm.RMId),
 		submitterBootCount: txn.Id.BootCount(),
@@ -533,7 +535,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 					server.Log(s.proposal.txn.Id, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
 					s.proposal.abortInstances = append(s.proposal.abortInstances, rmId)
 					s.proposal.proposerManager.NewPaxosProposals(
-						s.txn, s.fInc, ballots, s.proposal.acceptors, rmId, false)
+						s.txn, s.twoFInc, ballots, s.proposal.acceptors, rmId, false)
 				}
 			}
 		})
@@ -557,7 +559,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 		server.Log(s.proposal.txn.Id, "Trying to abort for", lost, "Found actions:", len(ballots))
 		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
 		s.proposal.proposerManager.NewPaxosProposals(
-			s.txn, s.fInc, ballots, s.proposal.acceptors, lost, false)
+			s.txn, s.twoFInc, ballots, s.proposal.acceptors, lost, false)
 	})
 }
 

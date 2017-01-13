@@ -34,7 +34,7 @@ type txnOutcome struct {
 	outcomeReceivedCount int
 }
 
-func NewOutcomeAccumulator(fInc int, acceptors common.RMIds) *OutcomeAccumulator {
+func NewOutcomeAccumulator(twoFInc int, acceptors common.RMIds) *OutcomeAccumulator {
 	acceptorOutcomes := make(map[common.RMId]*acceptorIndexWithTxnOutcome, len(acceptors))
 	ids := make([]acceptorIndexWithTxnOutcome, len(acceptors))
 	for idx, rmId := range acceptors {
@@ -48,7 +48,7 @@ func NewOutcomeAccumulator(fInc int, acceptors common.RMIds) *OutcomeAccumulator
 		winningOutcome:   nil,
 		allKnownOutcomes: make([]*txnOutcome, 0, 1),
 		pendingTGC:       len(acceptors),
-		fInc:             fInc,
+		fInc:             (twoFInc >> 1) + 1,
 	}
 }
 

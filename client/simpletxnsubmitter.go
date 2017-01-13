@@ -25,7 +25,6 @@ type SimpleTxnSubmitter struct {
 	connPub             paxos.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
 	onShutdown          map[*func(bool) error]server.EmptyStruct
-	resolver            *ch.Resolver
 	hashCache           *ch.ConsistentHashCache
 	topology            *configuration.Topology
 	rng                 *rand.Rand
@@ -135,7 +134,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	shutdownFunPtr := &shutdownFun
 	sts.onShutdown[shutdownFunPtr] = server.EmptyStructVal
 
-	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.FInc()), acceptors)
+	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.TwoFInc()), acceptors)
 	consumer := func(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
@@ -184,8 +183,7 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 		return nil
 	}
 	sts.topology = topology
-	sts.resolver = ch.NewResolver(topology.RMs, topology.TwoFInc)
-	sts.hashCache.SetResolver(sts.resolver)
+	sts.hashCache.SetResolver(ch.NewResolver(topology.RMs, topology.TwoFInc))
 	if topology.Roots != nil {
 		for _, root := range topology.RootVarUUIds {
 			sts.hashCache.AddPosition(root.VarUUId, root.Positions)
@@ -243,7 +241,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.Transla
 
 	txnCap.SetId(clientTxnCap.Id())
 	txnCap.SetRetry(clientTxnCap.Retry())
-	txnCap.SetFInc(sts.topology.FInc)
+	txnCap.SetTwoFInc(sts.topology.TwoFInc)
 	txnCap.SetTopologyVersion(topologyVersion)
 
 	clientActions := clientTxnCap.Actions()
