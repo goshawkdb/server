@@ -28,7 +28,7 @@ type Proposer struct {
 	txnId           *common.TxnId
 	acceptors       common.RMIds
 	topology        *configuration.Topology
-	fInc            int
+	twoFInc         int
 	currentState    proposerStateMachineComponent
 	proposerAwaitBallots
 	proposerReceiveOutcomes
@@ -49,7 +49,7 @@ func NewProposer(pm *ProposerManager, txn *eng.TxnReader, mode ProposerMode, top
 		txnId:           txn.Id,
 		acceptors:       GetAcceptorsFromTxn(txnCap),
 		topology:        topology,
-		fInc:            int(txnCap.FInc()),
+		twoFInc:         int(txnCap.TwoFInc()),
 	}
 	if mode == ProposerActiveVoter {
 		p.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, p, pm.RMId, txn)
@@ -73,14 +73,14 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 	}
 	// We were on disk. Thus we received outcomes from all
 	// acceptors. So we don't need to worry about the outcome
-	// accumulator's fInc, hence just use -1 here.
+	// accumulator's twoFInc, hence just use -1 here.
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            proposerTLCSender,
 		txnId:           txnId,
 		acceptors:       acceptors,
 		topology:        topology,
-		fInc:            -1,
+		twoFInc:         -1,
 	}
 	p.init()
 	p.allAcceptorsAgreed = true
@@ -225,7 +225,7 @@ func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 	if pab.currentState == pab {
 		server.Log(pab.txnId, "TxnBallotsComplete callback. Acceptors:", pab.acceptors)
 		if !pab.allAcceptorsAgreed {
-			pab.proposerManager.NewPaxosProposals(pab.txn.TxnReader, pab.fInc, ballots, pab.acceptors, pab.proposerManager.RMId, true)
+			pab.proposerManager.NewPaxosProposals(pab.txn.TxnReader, pab.twoFInc, ballots, pab.acceptors, pab.proposerManager.RMId, true)
 		}
 		pab.nextState()
 
@@ -282,7 +282,7 @@ type proposerReceiveOutcomes struct {
 
 func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 	pro.Proposer = proposer
-	pro.outcomeAccumulator = NewOutcomeAccumulator(pro.fInc, pro.acceptors)
+	pro.outcomeAccumulator = NewOutcomeAccumulator(pro.twoFInc, pro.acceptors)
 }
 
 func (pro *proposerReceiveOutcomes) start() {

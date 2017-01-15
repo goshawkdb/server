@@ -398,11 +398,12 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 }
 
 func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+	defer tc.maybeClose()
+
 	topology := tc.topology
 	tcs.topology = topology
 
 	server.Log("Connection", tcs, "topologyChanged", tc, "(isServer)")
-	tc.maybeClose()
 	if topology != nil && tcs.dialer != nil {
 		if _, found := topology.RMsRemoved[tcs.remoteRMId]; found {
 			tcs.dialer = nil
@@ -679,12 +680,23 @@ func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.R
 	}))
 }
 func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	tcc.conn.enqueueQuery(connectionExec(func() error {
-		if done != nil {
-			defer done()
-		}
+	finished := make(chan struct{})
+	enqueued := tcc.conn.enqueueQuery(connectionExec(func() error {
+		defer close(finished)
 		return tcc.serverConnectionsChanged(servers)
 	}))
+
+	if enqueued {
+		go func() {
+			select {
+			case <-finished:
+			case <-tcc.conn.cellTail.Terminated:
+			}
+			done()
+		}()
+	} else {
+		done()
+	}
 }
 
 func (tcc *TLSCapnpClient) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
@@ -757,27 +769,6 @@ func (tcc *TLSCapnpClient) createReader() {
 		}
 		tcc.reader.start()
 	}
-}
-
-// WebSocketMsgPackClient
-
-type WebsocketMsgPackClient struct {
-}
-
-func (wmc *WebsocketMsgPackClient) PerformHandshake(*configuration.Topology) (*WebsocketMsgPackClient, error) {
-	return wmc, nil
-}
-
-func (wmc *WebsocketMsgPackClient) RestartDialer() Dialer {
-	return nil // client connections are never restarted
-}
-
-func (wmc *WebsocketMsgPackClient) Run() error {
-	return nil
-}
-
-func (wmc *WebsocketMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
-	return nil
 }
 
 // Beater

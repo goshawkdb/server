@@ -12,7 +12,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
-	"goshawkdb.io/server/stats"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"net"
@@ -43,6 +42,7 @@ type ConnectionManager struct {
 	serverConnSubscribers         serverConnSubscribers
 	topologySubscribers           topologySubscribers
 	Dispatchers                   *paxos.Dispatchers
+	localConnection               *client.LocalConnection
 }
 
 type serverConnSubscribers struct {
@@ -344,7 +344,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier, *stats.StatsPublisher) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
 	cm := &ConnectionManager{
 		localHost:         "",
 		RMId:              rmId,
@@ -396,13 +396,13 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 	cm.rmToServer[cd.rmId] = cd
 	cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
 	lc := client.NewLocalConnection(rmId, bootCount, cm)
+	cm.localConnection = lc
 	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, bootCount, uint8(procs), db, lc)
-	sp := stats.NewStatsPublisher(lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, sp, port, ss, config)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, ss, config)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	<-localEstablished
-	return cm, transmogrifier, sp
+	return cm, transmogrifier, lc
 }
 
 func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
@@ -465,6 +465,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 			}
 		}
 	}
+	cm.localConnection.Shutdown(paxos.Sync)
 	cm.RLock()
 	for _, cc := range cm.connCountToClient {
 		cc.Shutdown(paxos.Sync)
@@ -534,8 +535,21 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost) {
 	rmId := connLost.rmId
 	host := connLost.host
+	server.Log("Server Connection reported down:", rmId, host, connLost.restarting, cm.desired)
 	if cds, found := cm.servers[host]; found {
-		if connLost.restarting { // just need to find it and set !established
+		restarting := connLost.restarting
+		if restarting {
+			// it may be restarting, but we could have changed our
+			// desired servers in the mean time, so we need to look up
+			// whether or not we want it to be restarting.
+			restarting = false
+			for _, desiredHost := range cm.desired {
+				if restarting = desiredHost == host; restarting {
+					break
+				}
+			}
+		}
+		if restarting { // just need to find it and set !established
 			for _, cd := range cds {
 				if cd != nil && cd.Connection == connLost.Connection {
 					cd.established = false
@@ -547,6 +561,10 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 			for idx, cd := range cds {
 				if cd != nil && cd.Connection == connLost.Connection {
 					cds[idx] = nil
+					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
+						log.Printf("Shutting down connection to %v\n", rmId)
+						cd.Shutdown(paxos.Async)
+					}
 				} else if cd != nil {
 					allNil = false
 				}
@@ -686,6 +704,7 @@ func (cm *ConnectionManager) setDesiredServers(localHost string, remote []string
 	return nil
 }
 
+// This is called from the CM go-routine.
 func (cm *ConnectionManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
 	cm.checkFlushed(topology)
 	done(true)
@@ -766,6 +785,13 @@ func (cm *ConnectionManager) Send(b []byte) {
 }
 
 // serverConnSubscribers
+//
+// We want this to be synchronous to the extent that two calls to this
+// does not end up with msgs enqueued in a different order in
+// subscribers. But we do not want to block waiting for the callback
+// to be hit. So that means every subscriber needs to make the
+// decision for itself as to whether it's going to block and hit the
+// callback straight away, or do some async thing.
 func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsgServerEstablished, callback func()) {
 	rmToServerCopy := subs.cloneRMToServer()
 	// we cope with the possibility that subscribers can change during iteration
@@ -777,11 +803,14 @@ func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsg
 		ob.ConnectionEstablished(cd.rmId, cd, rmToServerCopy, done)
 	}
 	go func() {
+		server.Log("ServerConnEstablished expecting results:", expected)
 		for expected > 0 {
 			<-resultChan
 			expected--
 		}
-		callback()
+		if callback != nil {
+			callback()
+		}
 	}()
 }
 
@@ -806,6 +835,8 @@ func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubs
 }
 
 // topologySubscribers
+//
+// see notes at serverConnSubscribers
 func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
 	// again, we try to cope with the possibility that subsMap changes during iteration
 	for subType, subsMap := range subs.subscribers {
@@ -817,22 +848,22 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 			expected++
 			sub.TopologyChanged(topology, done)
 		}
-		if cb, found := callbacks[eng.TopologyChangeSubscriberType(subType)]; found {
-			cbCopy := cb
-			go func() {
-				server.Log("CM TopologyChanged", subTypeCopy, "expects", expected, "Dones")
-				for expected > 0 {
-					if result := <-resultChan; result {
-						expected--
-					} else {
-						server.Log("CM TopologyChanged", subTypeCopy, "failed")
-						return
-					}
+		cb := callbacks[eng.TopologyChangeSubscriberType(subTypeCopy)]
+		go func() {
+			server.Log("CM TopologyChanged", subTypeCopy, "expects", expected, "Dones")
+			for expected > 0 {
+				success := <-resultChan
+				expected--
+				if !success {
+					server.Log("CM TopologyChanged", subTypeCopy, "failed")
+					cb = nil
 				}
+			}
+			if cb != nil {
 				server.Log("CM TopologyChanged", subTypeCopy, "all done")
-				cbCopy()
-			}()
-		}
+				cb()
+			}
+		}()
 	}
 }
 

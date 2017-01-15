@@ -15,6 +15,7 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/stats"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -165,11 +166,12 @@ func (s *server) start() {
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier, statsPublisher := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig)
+	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig)
 	s.certificate = nil
-	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
 	s.addOnShutdown(transmogrifier.Shutdown)
-	s.addOnShutdown(statsPublisher.Shutdown)
+	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
+	sp := stats.NewStatsPublisher(cm, lc)
+	s.addOnShutdown(sp.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 

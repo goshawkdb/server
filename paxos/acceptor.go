@@ -195,7 +195,7 @@ func (arb *acceptorReceiveBallots) createTxnSender() {
 		seg := capn.NewBuffer(nil)
 		msg := msgs.NewRootMessage(seg)
 		msg.SetTxnSubmission(arb.txn.Data)
-		activeRMs := make([]common.RMId, 0, arb.txn.Txn.FInc()*2-1)
+		activeRMs := make([]common.RMId, 0, arb.txn.Txn.TwoFInc())
 		allocs := arb.txn.Txn.Allocations()
 		for idx := 0; idx < allocs.Len(); idx++ {
 			alloc := allocs.At(idx)

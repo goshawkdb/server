@@ -80,7 +80,7 @@ func (tr *TxnReader) AsDeflated() *TxnReader {
 		root.SetRetry(cap.Retry())
 		root.SetActions(actions.Data)
 		root.SetAllocations(cap.Allocations())
-		root.SetFInc(cap.FInc())
+		root.SetTwoFInc(cap.TwoFInc())
 		root.SetTopologyVersion(cap.TopologyVersion())
 
 		tr.deflated = &TxnReader{
