@@ -562,7 +562,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 				if cd != nil && cd.Connection == connLost.Connection {
 					cds[idx] = nil
 					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
-						log.Printf("Shutting down connection to %v\n", rmId)
+						server.Log("Shutting down connection to", rmId)
 						cd.Shutdown(paxos.Async)
 					}
 				} else if cd != nil {
