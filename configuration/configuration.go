@@ -29,12 +29,18 @@ type ConfigurationJSON struct {
 	MaxRMCount                    uint16
 	NoSync                        bool
 	ClientCertificateFingerprints map[string]map[string]*CapabilityJSON
-	Next                          *ConfigurationJSON
 }
 
 type CapabilityJSON struct {
 	Read  bool
 	Write bool
+}
+
+func (a *CapabilityJSON) Equal(b *CapabilityJSON) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Read == b.Read && a.Write == b.Write
 }
 
 func LoadJSONFromPath(path string) (*ConfigurationJSON, error) {
@@ -48,13 +54,43 @@ func LoadJSONFromPath(path string) (*ConfigurationJSON, error) {
 	if err = decoder.Decode(config); err != nil {
 		return nil, err
 	}
-	if err = config.validate(); err != nil {
+	if err = config.Validate(); err != nil {
 		return nil, err
 	}
 	return config, nil
 }
 
-func (config *ConfigurationJSON) validate() error {
+func (a *ConfigurationJSON) Equal(b *ConfigurationJSON) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.ClientCertificateFingerprints) == len(b.ClientCertificateFingerprints)) {
+		return false
+	}
+	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
+	for _, aHost := range a.Hosts {
+		aHosts[aHost] = server.EmptyStructVal
+	}
+	for _, bHost := range b.Hosts {
+		if _, found := aHosts[bHost]; !found {
+			return false
+		}
+	}
+	for fingerprint, aRootsMap := range a.ClientCertificateFingerprints {
+		if bRootsMap, found := b.ClientCertificateFingerprints[fingerprint]; found && len(aRootsMap) == len(bRootsMap) {
+			for rootName, aCap := range aRootsMap {
+				if bCap, found := bRootsMap[rootName]; !found || !aCap.Equal(bCap) {
+					return false
+				}
+			}
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
+func (config *ConfigurationJSON) Validate() error {
 	if config.ClusterId == "" {
 		return fmt.Errorf("Invalid configuration: cluster id must not be empty.")
 	}
@@ -113,10 +149,31 @@ func (config *ConfigurationJSON) validate() error {
 			}
 		}
 	}
-	if config.Next != nil {
-		return errors.New("Invalid configuration: Next may not be specified.")
-	}
 	return nil
+}
+
+func (config *ConfigurationJSON) Clone() *ConfigurationJSON {
+	c := &ConfigurationJSON{
+		ClusterId:  config.ClusterId,
+		Version:    config.Version,
+		Hosts:      make([]string, len(config.Hosts)),
+		F:          config.F,
+		MaxRMCount: config.MaxRMCount,
+		NoSync:     config.NoSync,
+		ClientCertificateFingerprints: make(map[string]map[string]*CapabilityJSON, len(config.ClientCertificateFingerprints)),
+	}
+	for idx, host := range config.Hosts {
+		c.Hosts[idx] = host
+	}
+	for fingerprint, roots := range config.ClientCertificateFingerprints {
+		r := make(map[string]*CapabilityJSON, len(roots))
+		c.ClientCertificateFingerprints[fingerprint] = r
+		for root, cap := range roots {
+			capCopy := *cap
+			r[root] = &capCopy
+		}
+	}
+	return c
 }
 
 func (config *ConfigurationJSON) ToConfiguration() *Configuration {
@@ -235,20 +292,24 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Fingerprints) == len(b.Fingerprints)) {
 		return false
 	}
-	for idx, aHost := range a.Hosts {
-		if aHost != b.Hosts[idx] {
+	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
+	for _, aHost := range a.Hosts {
+		aHosts[aHost] = server.EmptyStructVal
+	}
+	for _, bHost := range b.Hosts {
+		if _, found := aHosts[bHost]; !found {
 			return false
 		}
 	}
 	for fingerprint, aRoots := range a.Fingerprints {
-		if bRoots, found := b.Fingerprints[fingerprint]; !found || len(aRoots) != len(bRoots) {
-			return false
-		} else {
+		if bRoots, found := b.Fingerprints[fingerprint]; found && len(aRoots) == len(bRoots) {
 			for name, aRootCaps := range aRoots {
 				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
 					return false
 				}
 			}
+		} else {
+			return false
 		}
 	}
 	return true
@@ -282,10 +343,6 @@ func (config *Configuration) ToConfigurationJSON() *ConfigurationJSON {
 				Write: whichCap == cmsgs.CAPABILITY_WRITE || whichCap == cmsgs.CAPABILITY_READWRITE,
 			}
 		}
-	}
-
-	if config.NextConfiguration != nil {
-		result.Next = config.NextConfiguration.ToConfigurationJSON()
 	}
 
 	return result

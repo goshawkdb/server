@@ -138,7 +138,7 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 }
 
 func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	resultChan := make(chan struct{})
+	finished := make(chan struct{})
 	enqueued := am.Exe.Enqueue(func() {
 		am.Topology = topology
 		for _, ai := range am.acceptors {
@@ -146,19 +146,15 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, don
 				ai.acceptor.TopologyChanged(topology)
 			}
 		}
-		close(resultChan)
-		done(true)
+		close(finished)
 	})
 	if enqueued {
 		go am.Exe.WithTerminatedChan(func(terminated chan struct{}) {
 			select {
-			case <-resultChan:
+			case <-finished:
+				done(true)
 			case <-terminated:
-				select {
-				case <-resultChan:
-				default:
-					done(false)
-				}
+				done(false)
 			}
 		})
 	} else {

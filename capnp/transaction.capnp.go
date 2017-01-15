@@ -24,8 +24,8 @@ func (s Txn) Actions() []byte                  { return C.Struct(s).GetObject(1)
 func (s Txn) SetActions(v []byte)              { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s Txn) Allocations() Allocation_List     { return Allocation_List(C.Struct(s).GetObject(2)) }
 func (s Txn) SetAllocations(v Allocation_List) { C.Struct(s).SetObject(2, C.Object(v)) }
-func (s Txn) FInc() uint8                      { return C.Struct(s).Get8(1) }
-func (s Txn) SetFInc(v uint8)                  { C.Struct(s).Set8(1, v) }
+func (s Txn) TwoFInc() uint16                  { return C.Struct(s).Get16(2) }
+func (s Txn) SetTwoFInc(v uint16)              { C.Struct(s).Set16(2, v) }
 func (s Txn) TopologyVersion() uint32          { return C.Struct(s).Get32(4) }
 func (s Txn) SetTopologyVersion(v uint32)      { C.Struct(s).Set32(4, v) }
 func (s Txn) WriteJSON(w io.Writer) error {
@@ -127,12 +127,12 @@ func (s Txn) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"fInc\":")
+	_, err = b.WriteString("\"twoFInc\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.FInc()
+		s := s.TwoFInc()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -272,12 +272,12 @@ func (s Txn) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("fInc = ")
+	_, err = b.WriteString("twoFInc = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.FInc()
+		s := s.TwoFInc()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err

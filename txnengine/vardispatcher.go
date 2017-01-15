@@ -29,6 +29,7 @@ const (
 	ConnectionSubscriber              TopologyChangeSubscriberType = iota
 	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
 	EmigratorSubscriber               TopologyChangeSubscriberType = iota
+	MiscSubscriber                    TopologyChangeSubscriberType = iota
 	TopologyChangeSubscriberTypeLimit int                          = iota
 )
 

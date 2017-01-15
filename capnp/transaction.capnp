@@ -12,7 +12,7 @@ struct Txn {
   retry              @1: Bool;
   actions            @2: Data;
   allocations        @3: List(Allocation);
-  fInc               @4: UInt8;
+  twoFInc            @4: UInt16;
   topologyVersion    @5: UInt32;
 }
 

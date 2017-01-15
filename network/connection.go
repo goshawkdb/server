@@ -63,14 +63,15 @@ func (conn *Connection) Shutdown(sync paxos.Blocking) {
 }
 
 func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	finished := make(chan struct{})
 	msg := &connectionMsgTopologyChanged{
-		resultChan: make(chan struct{}),
+		resultChan: finished,
 		topology:   topology,
 	}
 	if conn.enqueueQuery(msg) {
 		go func() {
 			select {
-			case <-msg.resultChan:
+			case <-finished:
 			case <-conn.cellTail.Terminated:
 			}
 			done(true) // connection drop is not a problem
@@ -389,11 +390,12 @@ func (cr *connectionRun) start() (bool, error) {
 }
 
 func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
-	if cr.Protocol == nil {
+	switch {
+	case cr.Protocol != nil:
+		return cr.Protocol.TopologyChanged(tc)
+	default:
 		tc.maybeClose()
 		return nil
-	} else {
-		return cr.Protocol.TopologyChanged(tc)
 	}
 }
 

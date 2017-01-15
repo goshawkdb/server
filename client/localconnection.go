@@ -178,12 +178,7 @@ func (lc *LocalConnection) TopologyChanged(topology *configuration.Topology, don
 			case <-msg.resultChan:
 				done(true)
 			case <-lc.cellTail.Terminated:
-				select {
-				case <-msg.resultChan:
-					done(true)
-				default:
-					done(false)
-				}
+				done(false)
 			}
 		}()
 	} else {
@@ -229,16 +224,28 @@ type localConnectionMsgServerConnectionsChanged struct {
 func (lcmscc localConnectionMsgServerConnectionsChanged) witness() localConnectionMsg { return lcmscc }
 
 func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers})
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers, done: func() {}})
 }
 func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers})
+	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{servers: servers, done: func() {}})
 }
 func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{
+	finished := make(chan struct{})
+	enqueued := lc.enqueueQuery(localConnectionMsgServerConnectionsChanged{
 		servers: servers,
-		done:    done,
+		done:    func() { close(finished) },
 	})
+	if enqueued {
+		go func() {
+			select {
+			case <-finished:
+			case <-lc.cellTail.Terminated:
+			}
+			done()
+		}()
+	} else {
+		done()
+	}
 }
 
 func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *LocalConnection {
@@ -311,9 +318,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 				err = lc.submitter.SubmissionOutcomeReceived(msgT.sender, msgT.txn, msgT.outcome)
 			case localConnectionMsgServerConnectionsChanged:
 				err = lc.submitter.ServerConnectionsChanged(msgT.servers)
-				if msgT.done != nil {
-					msgT.done()
-				}
+				msgT.done()
 			case localConnectionMsgStatus:
 				lc.status(msgT.StatusConsumer)
 			default:
