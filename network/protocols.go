@@ -680,12 +680,23 @@ func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.R
 	}))
 }
 func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	tcc.conn.enqueueQuery(connectionExec(func() error {
-		if done != nil {
-			defer done()
-		}
+	finished := make(chan struct{})
+	enqueued := tcc.conn.enqueueQuery(connectionExec(func() error {
+		defer close(finished)
 		return tcc.serverConnectionsChanged(servers)
 	}))
+
+	if enqueued {
+		go func() {
+			select {
+			case <-finished:
+			case <-tcc.conn.cellTail.Terminated:
+			}
+			done()
+		}()
+	} else {
+		done()
+	}
 }
 
 func (tcc *TLSCapnpClient) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {

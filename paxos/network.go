@@ -100,7 +100,8 @@ func (pub *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, serv
 }
 
 func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn Connection, servers map[common.RMId]Connection, callback func()) {
-	pub.exe.Enqueue(func() {
+	finished := make(chan struct{})
+	enqueued := pub.exe.Enqueue(func() {
 		pub.servers = servers
 		resultChan := make(chan server.EmptyStruct, len(pub.subs))
 		done := func() { resultChan <- server.EmptyStructVal }
@@ -110,13 +111,26 @@ func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.R
 			sub.ConnectionEstablished(gained, conn, servers, done)
 		}
 		go func() {
+			server.Log("ServerConnEstablished Proxy expecting results:", expected)
 			for expected > 0 {
 				<-resultChan
 				expected--
 			}
-			callback()
+			close(finished)
 		}()
 	})
+
+	if enqueued {
+		go pub.exe.WithTerminatedChan(func(terminated chan struct{}) {
+			select {
+			case <-finished:
+			case <-terminated:
+			}
+			callback()
+		})
+	} else {
+		callback()
+	}
 }
 
 type OneShotSender struct {
@@ -161,7 +175,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 		conn.Send(s.msg)
 		if len(s.remaining) == 0 {
 			server.Log(s, "Removing one shot sender")
-			s.connPub.RemoveServerConnectionSubscriber(s)
+			s.connPub.RemoveServerConnectionSubscriber(s) // this is async
 		}
 	}
 	done()

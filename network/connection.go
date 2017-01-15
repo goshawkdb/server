@@ -71,14 +71,15 @@ func (conn *Connection) Send(msg []byte) {
 }
 
 func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	finished := make(chan struct{})
 	msg := &connectionMsgTopologyChanged{
-		resultChan: make(chan struct{}),
+		resultChan: finished,
 		topology:   topology,
 	}
 	if conn.enqueueQuery(msg) {
 		go func() {
 			select {
-			case <-msg.resultChan:
+			case <-finished:
 			case <-conn.cellTail.Terminated:
 			}
 			done(true) // connection drop is not a problem

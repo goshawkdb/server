@@ -28,7 +28,6 @@ type ConfigurationJSON struct {
 	MaxRMCount                    uint16
 	NoSync                        bool
 	ClientCertificateFingerprints map[string]map[string]*CapabilityJSON
-	Next                          *ConfigurationJSON
 }
 
 type CapabilityJSON struct {
@@ -87,7 +86,7 @@ func (a *ConfigurationJSON) Equal(b *ConfigurationJSON) bool {
 			return false
 		}
 	}
-	return a.Next.Equal(b.Next)
+	return true
 }
 
 func (config *ConfigurationJSON) Validate() error {
@@ -148,9 +147,6 @@ func (config *ConfigurationJSON) Validate() error {
 				}
 			}
 		}
-	}
-	if config.Next != nil {
-		return errors.New("Invalid configuration: Next may not be specified.")
 	}
 	return nil
 }
@@ -346,10 +342,6 @@ func (config *Configuration) ToConfigurationJSON() *ConfigurationJSON {
 				Write: whichCap == cmsgs.CAPABILITY_WRITE || whichCap == cmsgs.CAPABILITY_READWRITE,
 			}
 		}
-	}
-
-	if config.NextConfiguration != nil {
-		result.Next = config.NextConfiguration.ToConfigurationJSON()
 	}
 
 	return result

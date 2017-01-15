@@ -571,7 +571,7 @@ func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection
 		}
 	}
 	if bootCount, found := s.proposal.activeRMIds[rmId]; found && bootCount != conn.BootCount() {
-		s.ConnectionLost(rmId, conns)
+		s.ConnectionLost(rmId, conns) // at worst, this just enqueues some functinos so nothing to worry about
 	}
 	done()
 }

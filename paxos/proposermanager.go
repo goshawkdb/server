@@ -67,25 +67,21 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 }
 
 func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	resultChan := make(chan struct{})
+	finished := make(chan struct{})
 	enqueued := pm.Exe.Enqueue(func() {
 		pm.topology = topology
 		for _, proposer := range pm.proposers {
 			proposer.TopologyChange(topology)
 		}
-		close(resultChan)
-		done(true)
+		close(finished)
 	})
 	if enqueued {
 		go pm.Exe.WithTerminatedChan(func(terminated chan struct{}) {
 			select {
-			case <-resultChan:
+			case <-finished:
+				done(true)
 			case <-terminated:
-				select {
-				case <-resultChan:
-				default:
-					done(false)
-				}
+				done(false)
 			}
 		})
 	} else {

@@ -48,7 +48,7 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 }
 
 func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	resultChan := make(chan struct{})
+	finished := make(chan bool)
 	enqueued := vm.exe.Enqueue(func() {
 		if od := vm.onDisk; od != nil {
 			vm.onDisk = nil
@@ -56,17 +56,14 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 		}
 		vm.Topology = topology
 		oldRollAllowed := vm.RollAllowed
-		if !vm.RollAllowed {
+		if !oldRollAllowed {
 			vm.RollAllowed = topology == nil || !topology.NextConfiguration.BarrierReached1For(vm.RMId)
 		}
 		server.Log("VarManager", fmt.Sprintf("%p", vm), "rollAllowed:", oldRollAllowed, "->", vm.RollAllowed, fmt.Sprintf("%p", topology))
 
 		goingToDisk := topology != nil && topology.NextConfiguration.BarrierReached1For(vm.RMId) && !topology.NextConfiguration.BarrierReached2For(vm.RMId)
 
-		doneWrapped := func(result bool) {
-			close(resultChan)
-			done(result)
-		}
+		doneWrapped := func(result bool) { finished <- result }
 		if goingToDisk {
 			vm.onDisk = doneWrapped
 			vm.checkAllDisk()
@@ -78,13 +75,10 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 	if enqueued {
 		go vm.exe.WithTerminatedChan(func(terminated chan struct{}) {
 			select {
-			case <-resultChan:
+			case success := <-finished:
+				done(success)
 			case <-terminated:
-				select {
-				case <-resultChan:
-				default:
-					done(false)
-				}
+				done(false)
 			}
 		})
 	} else {

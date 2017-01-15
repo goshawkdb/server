@@ -13,6 +13,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/network"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"math/rand"
@@ -21,6 +22,7 @@ import (
 
 type StatsPublisher struct {
 	localConnection   *client.LocalConnection
+	connectionManager *network.ConnectionManager
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(statsPublisherMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan statsPublisherMsg
@@ -44,21 +46,12 @@ func (sp *StatsPublisher) Shutdown() {
 	}
 }
 
-type statsPublisherMsgConfig struct {
-	statsPublisherMsgBasic
-	topology *configuration.Topology
-}
-
-func (sp *StatsPublisher) PublishConfig(topology *configuration.Topology) {
-	sp.enqueueQuery(statsPublisherMsgConfig{topology: topology})
-}
-
 type statsPublisherExe func() error
 
 func (spe statsPublisherExe) witness() statsPublisherMsg { return spe }
 
-func (sp *StatsPublisher) exec(fun func() error) {
-	sp.enqueueQuery(statsPublisherExe(fun))
+func (sp *StatsPublisher) exec(fun func() error) bool {
+	return sp.enqueueQuery(statsPublisherExe(fun))
 }
 
 func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
@@ -69,10 +62,11 @@ func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
 	return sp.cellTail.WithCell(f)
 }
 
-func NewStatsPublisher(lc *client.LocalConnection) *StatsPublisher {
+func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection) *StatsPublisher {
 	sp := &StatsPublisher{
-		localConnection: lc,
-		rng:             rand.New(rand.NewSource(time.Now().UnixNano())),
+		localConnection:   lc,
+		connectionManager: cm,
+		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	var head *cc.ChanCellHead
 	head, sp.cellTail = cc.NewChanCellTail(
@@ -114,8 +108,6 @@ func (sp *StatsPublisher) actorLoop(head *cc.ChanCellHead) {
 			switch msgT := msg.(type) {
 			case statsPublisherMsgShutdown:
 				terminate = true
-			case statsPublisherMsgConfig:
-				err = sp.configPublisher.maybePublishConfig(msgT.topology)
 			case statsPublisherExe:
 				err = msgT()
 			default:
@@ -144,6 +136,28 @@ type configPublisher struct {
 func (cp *configPublisher) init(sp *StatsPublisher) {
 	cp.StatsPublisher = sp
 	cp.vsn = common.VersionZero
+	topology := cp.connectionManager.AddTopologySubscriber(eng.MiscSubscriber, cp)
+	cp.TopologyChanged(topology, func(bool) {})
+}
+
+func (cp *configPublisher) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	finished := make(chan struct{})
+	enqueued := cp.exec(func() error {
+		defer close(finished)
+		return cp.maybePublishConfig(topology)
+	})
+	if enqueued {
+		go func() {
+			select {
+			case <-finished:
+				done(true)
+			case <-cp.cellTail.Terminated:
+				done(false)
+			}
+		}()
+	} else {
+		done(false)
+	}
 }
 
 func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) error {
@@ -151,6 +165,10 @@ func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) 
 	cp.topology = nil
 	cp.backoff = nil
 	cp.json = nil
+
+	if topology.NextConfiguration != nil {
+		return nil
+	}
 
 	var root *configuration.Root
 	for idx, rootName := range topology.Roots {
@@ -176,7 +194,7 @@ func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) 
 
 func (cp *configPublisher) publishConfig() error {
 	for {
-		if cp.root == nil {
+		if cp.root == nil || cp.json == nil {
 			return nil
 		}
 		seg := capn.NewBuffer(nil)
@@ -209,9 +227,16 @@ func (cp *configPublisher) publishConfig() error {
 			return nil
 		} else if abort := result.Abort(); abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
 			server.Log("StatsPublisher: Publishing Config requires resubmit")
+			backoff := cp.backoff
 			cp.backoff.Advance()
 			cp.backoff.After(func() {
-				cp.exec(cp.publishConfig)
+				cp.exec(func() error {
+					if cp.backoff == backoff {
+						return cp.publishConfig()
+					} else {
+						return nil
+					}
+				})
 			})
 			return nil
 		} else {
@@ -247,9 +272,7 @@ func (cp *configPublisher) publishConfig() error {
 				if inDB.Version > cp.topology.Version {
 					server.Log("StatsPublisher: Existing copy in database is ahead of us. Nothing more to do.")
 					return nil
-				} else if inDB.Version == cp.topology.Version &&
-					((cp.topology.NextConfiguration == nil) ||
-						(inDB.Next != nil && inDB.Next.Version >= cp.topology.NextConfiguration.Version)) {
+				} else if inDB.Version == cp.topology.Version {
 					server.Log("StatsPublisher: Existing copy in database is at least as up to date as us. Nothing more to do.")
 					return nil
 				}

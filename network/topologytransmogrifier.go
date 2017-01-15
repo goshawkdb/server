@@ -16,7 +16,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
-	"goshawkdb.io/server/stats"
 	eng "goshawkdb.io/server/txnengine"
 	"log"
 	"math/rand"
@@ -28,7 +27,6 @@ type TopologyTransmogrifier struct {
 	db                   *db.Databases
 	connectionManager    *ConnectionManager
 	localConnection      *client.LocalConnection
-	statsPublisher       *stats.StatsPublisher
 	active               *configuration.Topology
 	installedOnProposers *configuration.Topology
 	hostToConnection     map[string]paxos.Connection
@@ -121,12 +119,11 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(f)
 }
 
-func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, sp *stats.StatsPublisher, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
 		db:                db,
 		connectionManager: cm,
 		localConnection:   lc,
-		statsPublisher:    sp,
 		migrations:        make(map[uint32]map[common.RMId]*int32),
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -173,10 +170,22 @@ func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[com
 }
 
 func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{
+	finished := make(chan struct{})
+	enqueued := tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{
 		servers: conns,
-		done:    done,
+		done:    func() { close(finished) },
 	})
+	if enqueued {
+		go func() {
+			select {
+			case <-finished:
+			case <-tt.cellTail.Terminated:
+			}
+			done()
+		}()
+	} else {
+		done()
+	}
 }
 
 func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
@@ -330,8 +339,6 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 			if err != nil {
 				return err
 			}
-
-			tt.statsPublisher.PublishConfig(topology)
 
 		} else {
 			return tt.selectGoal(next)
@@ -945,7 +952,7 @@ func (task *installTargetOld) tick() error {
 	// acceptors. We will require a majority of them are alive, which
 	// we've checked once above.
 	twoFInc := uint16(task.active.RMs.NonEmptyLen())
-	result, committed, resubmit, err := task.rewriteTopology(task.active, targetTopology, twoFInc, active, passive)
+	_, committed, resubmit, err := task.rewriteTopology(task.active, targetTopology, twoFInc, active, passive)
 	if err != nil {
 		return task.fatal(err)
 	} else if resubmit {
@@ -954,7 +961,6 @@ func (task *installTargetOld) tick() error {
 		task.enqueueTick(task, task.targetConfig)
 		return nil
 	} else if committed {
-		task.statsPublisher.PublishConfig(result)
 		return nil
 	} else {
 		// Must be badread, which means again we should receive the
