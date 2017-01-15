@@ -399,11 +399,12 @@ func (cr *connectionRun) start() (bool, error) {
 }
 
 func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
-	if cr.Protocol == nil {
+	switch {
+	case cr.Protocol != nil:
+		return cr.Protocol.TopologyChanged(tc)
+	default:
 		tc.maybeClose()
 		return nil
-	} else {
-		return cr.Protocol.TopologyChanged(tc)
 	}
 }
 

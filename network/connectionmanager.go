@@ -538,7 +538,19 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 	rmId := connLost.rmId
 	host := connLost.host
 	if cds, found := cm.servers[host]; found {
-		if connLost.restarting { // just need to find it and set !established
+		restarting := connLost.restarting
+		if restarting {
+			// it may be restarting, but we could have changed our
+			// desired servers in the mean time, so we need to look up
+			// whether or not we want it to be restarting.
+			restarting = false
+			for _, desiredHost := range cm.desired {
+				if restarting = desiredHost == host; restarting {
+					break
+				}
+			}
+		}
+		if restarting { // just need to find it and set !established
 			for _, cd := range cds {
 				if cd != nil && cd.Connection == connLost.Connection {
 					cd.established = false
@@ -550,6 +562,10 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 			for idx, cd := range cds {
 				if cd != nil && cd.Connection == connLost.Connection {
 					cds[idx] = nil
+					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
+						log.Printf("Shutting down connection to %v\n", rmId)
+						cd.Shutdown(paxos.Async)
+					}
 				} else if cd != nil {
 					allNil = false
 				}
