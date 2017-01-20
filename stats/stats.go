@@ -143,7 +143,7 @@ func (cp *configPublisher) init(sp *StatsPublisher) {
 func (cp *configPublisher) TopologyChanged(topology *configuration.Topology, done func(bool)) {
 	finished := make(chan struct{})
 	enqueued := cp.exec(func() error {
-		defer close(finished)
+		close(finished)
 		return cp.maybePublishConfig(topology)
 	})
 	if enqueued {
@@ -167,6 +167,7 @@ func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) 
 	cp.json = nil
 
 	if topology.NextConfiguration != nil {
+		// it's not safe to publish during topology changes.
 		return nil
 	}
 
