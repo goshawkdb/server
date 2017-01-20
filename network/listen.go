@@ -115,7 +115,7 @@ func (l *Listener) actorLoop(head *cc.ChanCellHead) {
 				err = msgT
 			case *listenerConnMsg:
 				connectionCount++
-				NewConnectionTCPTLSCapnpHandshaker((*net.TCPConn)(msgT), l.connectionManager, connectionCount)
+				NewConnectionTCPTLSCapnpHandshaker((*net.TCPConn)(msgT), l.connectionManager, connectionCount*2)
 			}
 			terminate = terminate || err != nil
 		} else {

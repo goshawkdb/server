@@ -46,8 +46,8 @@ func main() {
 
 func newServer() (*server, error) {
 	var configFile, dataDir, certFile string
-	var port int
-	var version, genClusterCert, genClientCert bool
+	var port, wssPort int
+	var wss, version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
@@ -56,6 +56,8 @@ func newServer() (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
+	flag.BoolVar(&wss, "wss", false, "Enable the HTTP and WebSocket service.")
+	flag.IntVar(&wssPort, "wssport", 0, fmt.Sprintf("Port to provide HTTP and WebSocket service on. Implies -wss. (default %d)", common.DefaultWSSPort))
 	flag.Parse()
 
 	if version {
@@ -111,7 +113,15 @@ func newServer() (*server, error) {
 	}
 
 	if !(0 < port && port < 65536) {
-		return nil, fmt.Errorf("Supplied port is illegal (%v). Port must be > 0 and < 65536", port)
+		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
+	}
+
+	if wss && wssPort == 0 { // wss is enabled, but no port is provided. Use default port
+		wssPort = common.DefaultWSSPort
+	}
+	wss = wss || wssPort != 0 // -wssport implies -wss
+	if wss && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
+		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
 	}
 
 	s := &server{
@@ -121,6 +131,9 @@ func newServer() (*server, error) {
 		port:         uint16(port),
 		onShutdown:   []func(){},
 		shutdownChan: make(chan goshawk.EmptyStruct),
+	}
+	if wss {
+		s.wssPort = uint16(wssPort)
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -138,6 +151,7 @@ type server struct {
 	certificate       []byte
 	dataDir           string
 	port              uint16
+	wssPort           uint16
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
@@ -180,6 +194,12 @@ func (s *server) start() {
 	listener, err := network.NewListener(s.port, cm)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
+
+	if s.wssPort != 0 {
+		wssListener, err := network.NewWebsocketListener(s.wssPort, cm)
+		s.maybeShutdown(err)
+		s.addOnShutdown(wssListener.Shutdown)
+	}
 
 	defer s.shutdown(nil)
 	<-s.shutdownChan

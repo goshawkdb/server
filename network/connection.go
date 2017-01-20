@@ -37,10 +37,6 @@ func (cmb connectionMsgBasic) witness() connectionMsg { return cmb }
 
 type connectionMsgShutdown struct{ connectionMsgBasic }
 
-type connectionMsgSend []byte
-
-func (cms connectionMsgSend) witness() connectionMsg { return cms }
-
 type connectionMsgTopologyChanged struct {
 	connectionMsgBasic
 	topology   *configuration.Topology
@@ -64,10 +60,6 @@ func (conn *Connection) Shutdown(sync paxos.Blocking) {
 	if conn.enqueueQuery(connectionMsgShutdown{}) && sync == paxos.Sync {
 		conn.cellTail.Wait()
 	}
-}
-
-func (conn *Connection) Send(msg []byte) {
-	conn.enqueueQuery(connectionMsgSend(msg))
 }
 
 func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
@@ -212,8 +204,6 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 		err = msgT.error
 	case connectionExec:
 		err = msgT()
-	case connectionMsgSend:
-		err = conn.sendMessage(msgT)
 	case *connectionMsgTopologyChanged:
 		err = conn.topologyChanged(msgT)
 	case connectionMsgStatus:
@@ -406,14 +396,6 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 	default:
 		tc.maybeClose()
 		return nil
-	}
-}
-
-func (cr *connectionRun) sendMessage(msg []byte) error {
-	if cr.Protocol == nil {
-		return nil
-	} else {
-		return cr.Protocol.SendMessage(msg)
 	}
 }
 
