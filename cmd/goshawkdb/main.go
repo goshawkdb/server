@@ -47,7 +47,7 @@ func main() {
 func newServer() (*server, error) {
 	var configFile, dataDir, certFile string
 	var port, wssPort int
-	var version, genClusterCert, genClientCert bool
+	var wss, version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
@@ -56,7 +56,8 @@ func newServer() (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.IntVar(&wssPort, "wssPort", 0, "Port to server wss on (default of 0 disables WebSocket listener")
+	flag.BoolVar(&wss, "wss", false, fmt.Sprintf("Enable the HTTP and WebSocket service. (default wssport is %d)", common.DefaultWSSPort))
+	flag.IntVar(&wssPort, "wssport", -1, "Port to provide HTTP and WebSocket service on. Implies -wss")
 	flag.Parse()
 
 	if version {
@@ -115,8 +116,13 @@ func newServer() (*server, error) {
 		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
 	}
 
-	if !(0 <= wssPort && wssPort < 65536 && wssPort != port) {
-		return nil, fmt.Errorf("Supplied wss port is illegal (%d). Port must be >= 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
+	if wss && wssPort == -1 { // wss is enabled, but no port is provided. Use default port
+		wssPort = common.DefaultWSSPort
+	} else if !wss && wssPort > 0 { // -wssport implies -wss
+		wss = true
+	}
+	if wss && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
+		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
 	}
 
 	s := &server{
@@ -124,9 +130,11 @@ func newServer() (*server, error) {
 		certificate:  certificate,
 		dataDir:      dataDir,
 		port:         uint16(port),
-		wssPort:      uint16(wssPort),
 		onShutdown:   []func(){},
 		shutdownChan: make(chan goshawk.EmptyStruct),
+	}
+	if wss {
+		s.wssPort = uint16(wssPort)
 	}
 
 	if err = s.ensureRMId(); err != nil {
