@@ -56,8 +56,8 @@ func newServer() (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.BoolVar(&wss, "wss", false, fmt.Sprintf("Enable the HTTP and WebSocket service. (default wssport is %d)", common.DefaultWSSPort))
-	flag.IntVar(&wssPort, "wssport", -1, "Port to provide HTTP and WebSocket service on. Implies -wss")
+	flag.BoolVar(&wss, "wss", false, "Enable the HTTP and WebSocket service.")
+	flag.IntVar(&wssPort, "wssport", 0, fmt.Sprintf("Port to provide HTTP and WebSocket service on. Implies -wss. (default %d)", common.DefaultWSSPort))
 	flag.Parse()
 
 	if version {
@@ -116,11 +116,10 @@ func newServer() (*server, error) {
 		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
 	}
 
-	if wss && wssPort == -1 { // wss is enabled, but no port is provided. Use default port
+	if wss && wssPort == 0 { // wss is enabled, but no port is provided. Use default port
 		wssPort = common.DefaultWSSPort
-	} else if !wss && wssPort > 0 { // -wssport implies -wss
-		wss = true
 	}
+	wss = wss || wssPort != 0 // -wssport implies -wss
 	if wss && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
 		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
 	}
