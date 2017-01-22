@@ -361,7 +361,7 @@ func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {
 func (lc *LocalConnection) getNextTxnId() *common.TxnId {
 	txnId := common.MakeTxnId(lc.namespace)
 	binary.BigEndian.PutUint64(txnId[0:8], lc.nextTxnNumber)
-	lc.nextTxnNumber++
+	lc.nextTxnNumber += 1 + uint64(lc.submitter.rng.Intn(8))
 	return txnId
 }
 

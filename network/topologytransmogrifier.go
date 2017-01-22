@@ -2151,6 +2151,7 @@ func (sb *sendBatch) flush() {
 	migration.SetVersion(sb.version)
 	elems := msgs.NewMigrationElementList(seg, len(sb.elems))
 	for idx, elem := range sb.elems {
+		sb.elems[idx] = nil
 		elemCap := msgs.NewMigrationElement(seg)
 		elemCap.SetTxn(elem.txn.Data)
 		vars := msgs.NewVarList(seg, len(elem.vars))
