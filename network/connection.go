@@ -56,6 +56,11 @@ type connectionMsgStatus struct {
 	*server.StatusConsumer
 }
 
+// for paxos.Actorish
+type connectionMsgExec func()
+
+func (cme connectionMsgExec) witness() connectionMsg { return cme }
+
 func (conn *Connection) Shutdown(sync paxos.Blocking) {
 	if conn.enqueueQuery(connectionMsgShutdown{}) && sync == paxos.Sync {
 		conn.cellTail.Wait()
@@ -83,6 +88,16 @@ func (conn *Connection) TopologyChanged(topology *configuration.Topology, done f
 
 func (conn *Connection) Status(sc *server.StatusConsumer) {
 	conn.enqueueQuery(connectionMsgStatus{StatusConsumer: sc})
+}
+
+// This is for the paxos.Actorish interface
+func (conn *Connection) Enqueue(fun func()) bool {
+	return conn.enqueueQuery(connectionMsgExec(fun))
+}
+
+// This is for the paxos.Actorish interface
+func (conn *Connection) WithTerminatedChan(fun func(chan struct{})) {
+	fun(conn.cellTail.Terminated)
 }
 
 func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
@@ -202,7 +217,9 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error)
 		msgT.received()
 	case connectionReadError:
 		err = msgT.error
-	case connectionExec:
+	case connectionMsgExec:
+		msgT()
+	case connectionMsgExecError:
 		err = msgT()
 	case *connectionMsgTopologyChanged:
 		err = conn.topologyChanged(msgT)
@@ -406,6 +423,6 @@ type connectionReadError struct {
 	error
 }
 
-type connectionExec func() error
+type connectionMsgExecError func() error
 
-func (ce connectionExec) witness() connectionMsg { return ce }
+func (cmee connectionMsgExecError) witness() connectionMsg { return cmee }

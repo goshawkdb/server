@@ -408,7 +408,7 @@ func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) err
 }
 
 func (tcs *TLSCapnpServer) Send(msg []byte) {
-	tcs.Connection.enqueueQuery(connectionExec(func() error { return tcs.beater.sendMessage(msg) }))
+	tcs.Connection.enqueueQuery(connectionMsgExecError(func() error { return tcs.beater.sendMessage(msg) }))
 }
 
 func (tcs *TLSCapnpServer) RestartDialer() Dialer {
@@ -564,7 +564,8 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace, cm)
+		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace,
+			paxos.NewServerConnectionPublisherProxy(tcc.Connection, cm), tcc.Connection)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil
@@ -637,7 +638,7 @@ func (tcc *TLSCapnpClient) String() string {
 }
 
 func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	tcc.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionMsgExecError(func() error {
 		return tcc.outcomeReceived(sender, txn, outcome)
 	}))
 }
@@ -654,18 +655,18 @@ func (tcc *TLSCapnpClient) outcomeReceived(sender common.RMId, txn *eng.TxnReade
 }
 
 func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	tcc.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionMsgExecError(func() error {
 		return tcc.serverConnectionsChanged(servers)
 	}))
 }
 func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	tcc.enqueueQuery(connectionExec(func() error {
+	tcc.enqueueQuery(connectionMsgExecError(func() error {
 		return tcc.serverConnectionsChanged(servers)
 	}))
 }
 func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
 	finished := make(chan struct{})
-	enqueued := tcc.enqueueQuery(connectionExec(func() error {
+	enqueued := tcc.enqueueQuery(connectionMsgExecError(func() error {
 		defer close(finished)
 		return tcc.serverConnectionsChanged(servers)
 	}))
@@ -698,7 +699,7 @@ func (tcc *TLSCapnpClient) readAndHandleOneMsg() error {
 		return nil // do nothing
 	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		// submitter is accessed from the connection go routine, so we must relay this
-		tcc.enqueueQuery(connectionExec(func() error {
+		tcc.enqueueQuery(connectionMsgExecError(func() error {
 			return tcc.submitTransaction(msg.ClientTxnSubmission())
 		}))
 		return nil
@@ -788,7 +789,7 @@ func (b *beater) tick() {
 		case <-b.terminate:
 			return
 		case <-b.ticker.C:
-			if !b.conn.enqueueQuery(connectionExec(b.beat)) {
+			if !b.conn.enqueueQuery(connectionMsgExecError(b.beat)) {
 				return
 			}
 		}

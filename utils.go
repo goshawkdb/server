@@ -75,13 +75,14 @@ func (bbe *BinaryBackoffEngine) Advance() time.Duration {
 }
 
 func (bbe *BinaryBackoffEngine) After(fun func()) {
-	duration := bbe.Cur
-	go func() {
-		if duration > 0 {
-			time.Sleep(duration)
-		}
+	if duration := bbe.Cur; duration == 0 {
 		fun()
-	}()
+	} else {
+		go func() {
+			time.Sleep(duration)
+			fun()
+		}()
+	}
 }
 
 func (bbe *BinaryBackoffEngine) Shrink(roundToZero time.Duration) {

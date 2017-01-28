@@ -57,6 +57,11 @@ type localConnectionMsgTopologyChanged struct {
 	topology *configuration.Topology
 }
 
+// for paxos.Actorish
+type localConnectionMsgExec func()
+
+func (lcme localConnectionMsgExec) witness() localConnectionMsg { return lcme }
+
 type localConnectionTxnQuery interface {
 	errored(error)
 }
@@ -127,6 +132,16 @@ func (lc *LocalConnection) NextVarUUId() *common.VarUUId {
 	binary.BigEndian.PutUint64(vUUId[0:8], lc.nextVarNumber)
 	lc.nextVarNumber++
 	return vUUId
+}
+
+// This is for the paxos.Actorish interface
+func (lc *LocalConnection) Enqueue(fun func()) bool {
+	return lc.enqueueQuery(localConnectionMsgExec(fun))
+}
+
+// This is for the paxos.Actorish interface
+func (lc *LocalConnection) WithTerminatedChan(fun func(chan struct{})) {
+	fun(lc.cellTail.Terminated)
 }
 
 func (lc *LocalConnection) enqueueQuery(msg localConnectionMsg) bool {
@@ -256,10 +271,10 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 		rmId:              rmId,
 		connectionManager: cm,
 		namespace:         namespace,
-		submitter:         NewSimpleTxnSubmitter(rmId, bootCount, cm),
 		nextTxnNumber:     0,
 		nextVarNumber:     0,
 	}
+	lc.submitter = NewSimpleTxnSubmitter(rmId, bootCount, paxos.NewServerConnectionPublisherProxy(lc, cm), lc)
 	var head *cc.ChanCellHead
 	head, lc.cellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
@@ -319,6 +334,8 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 			case localConnectionMsgServerConnectionsChanged:
 				err = lc.submitter.ServerConnectionsChanged(msgT.servers)
 				msgT.done()
+			case localConnectionMsgExec:
+				msgT()
 			case localConnectionMsgStatus:
 				lc.status(msgT.StatusConsumer)
 			default:

@@ -4,7 +4,6 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
 )
 
@@ -53,14 +52,19 @@ type Shutdownable interface {
 	Shutdown(sync Blocking)
 }
 
+type Actorish interface {
+	Enqueue(func()) bool
+	WithTerminatedChan(func(chan struct{}))
+}
+
 type serverConnectionPublisherProxy struct {
-	exe      *dispatcher.Executor
+	exe      Actorish
 	upstream ServerConnectionPublisher
 	servers  map[common.RMId]Connection
 	subs     map[ServerConnectionSubscriber]server.EmptyStruct
 }
 
-func NewServerConnectionPublisherProxy(exe *dispatcher.Executor, upstream ServerConnectionPublisher) ServerConnectionPublisher {
+func NewServerConnectionPublisherProxy(exe Actorish, upstream ServerConnectionPublisher) ServerConnectionPublisher {
 	pub := &serverConnectionPublisherProxy{
 		exe:      exe,
 		upstream: upstream,

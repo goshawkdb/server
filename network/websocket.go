@@ -421,7 +421,9 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 		wmpc.createBeater()
 		wmpc.createReader()
 
-		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.connectionManager.RMId, wmpc.connectionManager.BootCount, wmpc.rootsVar, wmpc.namespace, wmpc.connectionManager)
+		cm := wmpc.connectionManager
+		wmpc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, wmpc.rootsVar, wmpc.namespace,
+			paxos.NewServerConnectionPublisherProxy(wmpc.Connection, cm), wmpc.Connection)
 		wmpc.submitter.TopologyChanged(wmpc.topology)
 		wmpc.submitter.ServerConnectionsChanged(servers)
 		return nil
@@ -493,7 +495,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 }
 
 func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	wmpc.enqueueQuery(connectionExec(func() error {
+	wmpc.enqueueQuery(connectionMsgExecError(func() error {
 		return wmpc.outcomeReceived(sender, txn, outcome)
 	}))
 }
@@ -510,17 +512,17 @@ func (wmpc *wssMsgPackClient) outcomeReceived(sender common.RMId, txn *eng.TxnRe
 }
 
 func (wmpc *wssMsgPackClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	wmpc.enqueueQuery(connectionExec(func() error {
+	wmpc.enqueueQuery(connectionMsgExecError(func() error {
 		return wmpc.serverConnectionsChanged(servers)
 	}))
 }
 func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	wmpc.enqueueQuery(connectionExec(func() error {
+	wmpc.enqueueQuery(connectionMsgExecError(func() error {
 		return wmpc.serverConnectionsChanged(servers)
 	}))
 }
 func (wmpc *wssMsgPackClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	wmpc.enqueueQuery(connectionExec(func() error {
+	wmpc.enqueueQuery(connectionMsgExecError(func() error {
 		if done != nil {
 			defer done()
 		}
@@ -539,7 +541,7 @@ func (wmpc *wssMsgPackClient) readAndHandleOneMsg() error {
 	}
 	switch {
 	case msg.ClientTxnSubmission != nil:
-		wmpc.enqueueQuery(connectionExec(func() error {
+		wmpc.enqueueQuery(connectionMsgExecError(func() error {
 			return wmpc.submitTransaction(msg.ClientTxnSubmission)
 		}))
 		return nil
@@ -643,7 +645,7 @@ func (b *wssBeater) tick() {
 		case <-b.terminate:
 			return
 		case <-b.ticker.C:
-			if !b.conn.enqueueQuery(connectionExec(b.beat)) {
+			if !b.conn.enqueueQuery(connectionMsgExecError(b.beat)) {
 				return
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	eng "goshawkdb.io/server/txnengine"
 	"math/rand"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,12 +30,13 @@ type SimpleTxnSubmitter struct {
 	topology            *configuration.Topology
 	rng                 *rand.Rand
 	bufferedSubmissions []func() error
+	actor               paxos.Actorish
 }
 
 type txnOutcomeConsumer func(common.RMId, *eng.TxnReader, *msgs.Outcome) error
 type TxnCompletionConsumer func(*eng.TxnReader, *msgs.Outcome, error) error
 
-func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher) *SimpleTxnSubmitter {
+func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher, actor paxos.Actorish) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	cache := ch.NewCache(nil, rng)
 
@@ -47,6 +49,7 @@ func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.Ser
 		onShutdown:       make(map[*func(bool) error]server.EmptyStruct),
 		hashCache:        cache,
 		rng:              rng,
+		actor:            actor,
 	}
 	return sts
 }
@@ -90,16 +93,17 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 
 	server.Log(txnId, "Submitting txn with actives:", activeRMs)
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
+	removeNeeded := uint32(0)
 	sleeping := delay != nil && delay.Cur > 0
-	var removeSenderCh chan chan server.EmptyStruct
 	if sleeping {
-		removeSenderCh = make(chan chan server.EmptyStruct)
 		// fmt.Printf("%v ", delay.Cur)
 		delay.After(func() {
-			sts.connPub.AddServerConnectionSubscriber(txnSender)
-			doneChan := <-removeSenderCh
-			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
-			close(doneChan)
+			sts.actor.Enqueue(func() {
+				if atomic.CompareAndSwapUint32(&removeNeeded, 0, 1) {
+					// we swapped ok, so we got here first, so we do work
+					sts.connPub.AddServerConnectionSubscriber(txnSender)
+				}
+			})
 		})
 	} else {
 		sts.connPub.AddServerConnectionSubscriber(txnSender)
@@ -110,9 +114,11 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 		delete(sts.outcomeConsumers, *txnId)
 		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 		if sleeping {
-			txnSenderRemovedChan := make(chan server.EmptyStruct)
-			removeSenderCh <- txnSenderRemovedChan
-			<-txnSenderRemovedChan
+			if !atomic.CompareAndSwapUint32(&removeNeeded, 0, 1) {
+				// for this to fail, we must have added the subscriber, so
+				// we must remove it
+				sts.connPub.RemoveServerConnectionSubscriber(txnSender)
+			}
 		} else {
 			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		}

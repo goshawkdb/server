@@ -175,7 +175,7 @@ func (s *server) start() {
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, time.Hour, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, 1*time.Millisecond, db.DB)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
@@ -317,18 +317,18 @@ func (s *server) signalDumpStacks() {
 }
 
 func (s *server) signalToggleCpuProfile() {
-	if s.profileFile == nil {
-		memFile, err := ioutil.TempFile("", common.ProductName+"_Mem_Profile_")
-		if goshawk.CheckWarn(err) {
-			return
-		}
-		if goshawk.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0)) {
-			return
-		}
-		if !goshawk.CheckWarn(memFile.Close()) {
-			log.Println("Memory profile written to", memFile.Name())
-		}
+	memFile, err := ioutil.TempFile("", common.ProductName+"_Mem_Profile_")
+	if goshawk.CheckWarn(err) {
+		return
+	}
+	if goshawk.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0)) {
+		return
+	}
+	if !goshawk.CheckWarn(memFile.Close()) {
+		log.Println("Memory profile written to", memFile.Name())
+	}
 
+	if s.profileFile == nil {
 		profFile, err := ioutil.TempFile("", common.ProductName+"_CPU_Profile_")
 		if goshawk.CheckWarn(err) {
 			return
@@ -390,8 +390,8 @@ func (s *server) signalHandler() {
 		case syscall.SIGUSR1:
 			s.signalStatus()
 		case syscall.SIGUSR2:
-			s.signalToggleCpuProfile()
-			//s.signalToggleTrace()
+			//s.signalToggleCpuProfile()
+			s.signalToggleTrace()
 		}
 	}
 }

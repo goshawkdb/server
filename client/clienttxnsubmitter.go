@@ -21,8 +21,8 @@ type ClientTxnSubmitter struct {
 	backoff      *server.BinaryBackoffEngine
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ConnectionManager) *ClientTxnSubmitter {
-	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm)
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish) *ClientTxnSubmitter {
+	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots, namespace),
