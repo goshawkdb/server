@@ -141,6 +141,13 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 		return v, false
 	}
 
+	// This is blocking which you might think is a mistake. But LMDB
+	// reads are so very fast that as far as I can tell, right now,
+	// it's not worth the extra pain to go to an async model. Async is
+	// perfectly possible - just change find to take a continuation,
+	// and bounce back into this go-routine when necessary. Only
+	// complication is you need to track in-flight loads. But I can't
+	// measure any advantage yet for doing that.
 	result, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		// rtxn.Get returns a copy of the data, so we don't need to
 		// worry about pointers into the db

@@ -29,6 +29,9 @@ import (
 	"time"
 )
 
+import _ "net/http/pprof"
+import "net/http"
+
 func main() {
 	log.SetPrefix(common.ProductName + " ")
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -40,6 +43,9 @@ func main() {
 		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
 		os.Exit(1)
 	} else if s != nil {
+		go func() {
+			log.Println(http.ListenAndServe("localhost:6060", nil))
+		}()
 		s.start()
 	}
 }
@@ -175,7 +181,7 @@ func (s *server) start() {
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, 1*time.Millisecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, 500*time.Microsecond, db.DB)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)

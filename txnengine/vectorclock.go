@@ -47,16 +47,18 @@ func lessThan(a, b VectorClockInterface) bool {
 
 type VectorClock struct {
 	data    []byte
-	initial map[common.VarUUId]uint64
+	initial map[common.VarUUId]*uint64
 	decoded bool
 }
 
 type VectorClockMutable struct {
 	*VectorClock
-	data    []byte
-	adds    map[common.VarUUId]*uint64
-	changes map[common.VarUUId]*uint64
-	length  int
+	data         []byte
+	adds         map[common.VarUUId]*uint64
+	changes      map[common.VarUUId]*uint64
+	length       int
+	capacity     []uint64
+	capacitySize int
 }
 
 func VectorClockFromData(vcData []byte, forceDecode bool) *VectorClock {
@@ -91,12 +93,12 @@ func (vc *VectorClock) decode() {
 	}
 	vcCap := msgs.ReadRootVectorClock(seg)
 	l := vcCap.VarUuids().Len()
-	vc.initial = make(map[common.VarUUId]uint64, l)
+	vc.initial = make(map[common.VarUUId]*uint64, l)
 	keys := vcCap.VarUuids()
-	values := vcCap.Values()
+	values := vcCap.Values().ToArray()
 	for idx, l := 0, keys.Len(); idx < l; idx++ {
 		k := common.MakeVarUUId(keys.At(idx))
-		vc.initial[*k] = values.At(idx)
+		vc.initial[*k] = &values[idx]
 	}
 }
 
@@ -108,7 +110,7 @@ func (vc *VectorClock) Len() int {
 func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 	vc.decode()
 	if value, found := vc.initial[*vUUId]; found {
-		return value
+		return *value
 	}
 	return deleted
 }
@@ -116,7 +118,7 @@ func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
 	vc.decode()
 	for k, v := range vc.initial {
-		if !it(&k, v) {
+		if !it(&k, *v) {
 			return false
 		}
 	}
@@ -164,6 +166,21 @@ func (vc *VectorClockMutable) ensureAdds() {
 	if vc.adds == nil {
 		vc.adds = make(map[common.VarUUId]*uint64)
 	}
+}
+
+func (vc *VectorClockMutable) store(v uint64) *uint64 {
+	if len(vc.capacity) == 0 {
+		if vc.capacitySize == 0 {
+			vc.capacitySize = 4
+		} else {
+			vc.capacitySize *= 2
+		}
+		vc.capacity = make([]uint64, vc.capacitySize)
+	}
+	ptr := &vc.capacity[0]
+	vc.capacity = vc.capacity[1:]
+	*ptr = v
+	return ptr
 }
 
 func (vc *VectorClockMutable) AsMutable() *VectorClockMutable {
@@ -254,8 +271,7 @@ func (vc *VectorClockMutable) Delete(vUUId *common.VarUUId) *VectorClockMutable 
 		return vc
 	} else if _, found := vc.initial[*vUUId]; found {
 		vc.ensureChanges()
-		v := deleted
-		vc.changes[*vUUId] = &v
+		vc.changes[*vUUId] = vc.store(deleted)
 		vc.length--
 		vc.data = nil
 	}
@@ -278,13 +294,12 @@ func (vc *VectorClockMutable) Bump(vUUId *common.VarUUId, inc uint64) *VectorClo
 		return vc
 	} else if old, found := vc.initial[*vUUId]; found {
 		vc.ensureChanges()
-		inc += old
-		vc.changes[*vUUId] = &inc
+		vc.changes[*vUUId] = vc.store(inc + *old)
 		vc.data = nil
 		return vc
 	} else {
 		vc.ensureAdds()
-		vc.adds[*vUUId] = &inc
+		vc.adds[*vUUId] = vc.store(inc)
 		vc.length++
 		vc.data = nil
 		return vc
@@ -310,16 +325,16 @@ func (vc *VectorClockMutable) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool 
 		}
 		return false
 	} else if old, found := vc.initial[*vUUId]; found {
-		if v > old {
+		if v > *old {
 			vc.ensureChanges()
-			vc.changes[*vUUId] = &v
+			vc.changes[*vUUId] = vc.store(v)
 			vc.data = nil
 			return true
 		}
 		return false
 	} else {
 		vc.ensureAdds()
-		vc.adds[*vUUId] = &v
+		vc.adds[*vUUId] = vc.store(v)
 		vc.length++
 		vc.data = nil
 		return true
@@ -344,10 +359,9 @@ func (vc *VectorClockMutable) DeleteIfMatch(vUUId *common.VarUUId, v uint64) boo
 		}
 		return false
 	} else if old, found := vc.initial[*vUUId]; found {
-		if old <= v {
+		if *old <= v {
 			vc.ensureChanges()
-			v = deleted
-			vc.changes[*vUUId] = &v
+			vc.changes[*vUUId] = vc.store(deleted)
 			vc.length--
 			vc.data = nil
 			return true
@@ -381,7 +395,7 @@ func (vcA *VectorClockMutable) MergeInMissing(vcB VectorClockInterface) bool {
 		} else if ch, found := vcA.changes[*vUUId]; found {
 			if *ch == deleted {
 				vcA.length++
-				vcA.changes[*vUUId] = &v
+				vcA.changes[*vUUId] = vcA.store(v)
 				changed = true
 			}
 			return true
@@ -390,7 +404,7 @@ func (vcA *VectorClockMutable) MergeInMissing(vcB VectorClockInterface) bool {
 		} else {
 			vcA.length++
 			vcA.ensureAdds()
-			vcA.adds[*vUUId] = &v
+			vcA.adds[*vUUId] = vcA.store(v)
 			changed = true
 			return true
 		}
