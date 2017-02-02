@@ -16,6 +16,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -88,6 +89,8 @@ type TLSCapnpHandshaker struct {
 	rng               *rand.Rand
 	topology          *configuration.Topology
 	beater            *beater
+	buf               []byte
+	bufWriteOffset    int64
 }
 
 func NewTLSCapnpHandshaker(dialer Dialer, socket *net.TCPConn, cm *ConnectionManager, count uint32, remoteHost string) *TLSCapnpHandshaker {
@@ -113,7 +116,7 @@ func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology
 		return nil, err
 	}
 
-	if seg, err := tch.readOne(); err == nil {
+	if seg, err := tch.readExactlyOne(); err == nil {
 		hello := cmsgs.ReadRootHello(seg)
 		if tch.verifyHello(&hello) {
 			if hello.IsClient() {
@@ -191,11 +194,62 @@ func (tch *TLSCapnpHandshaker) send(msg []byte) error {
 	return nil
 }
 
-func (tch *TLSCapnpHandshaker) readOne() (*capn.Segment, error) {
+// this exists for handshake so that we don't accidentally read bits of the TLS handshake and break that!
+func (tch *TLSCapnpHandshaker) readExactlyOne() (*capn.Segment, error) {
 	if err := tch.socket.SetReadDeadline(time.Now().Add(common.HeartbeatInterval << 1)); err != nil {
 		return nil, err
 	}
 	return capn.ReadFromStream(tch.socket, nil)
+}
+
+func (tch *TLSCapnpHandshaker) readOne() (*capn.Segment, error) {
+	if tch.bufWriteOffset > 0 {
+		// still have data in the buffer, so first try decoding that
+		if seg, err := tch.attemptCapnpDecode(); seg != nil || err != nil {
+			return seg, err
+		}
+	}
+	for {
+		if int64(len(tch.buf)) == tch.bufWriteOffset { // run out of buf space
+			tch.increaseBuffer()
+		}
+		if err := tch.socket.SetReadDeadline(time.Now().Add(common.HeartbeatInterval << 1)); err != nil {
+			return nil, err
+		}
+		if readCount, err := tch.socket.Read(tch.buf[tch.bufWriteOffset:]); err != nil {
+			return nil, err
+		} else if readCount > 0 { // we read something; try to parse
+			tch.bufWriteOffset += int64(readCount)
+			if seg, err := tch.attemptCapnpDecode(); seg != nil || err != nil {
+				return seg, err
+			}
+		}
+	}
+}
+
+func (tch *TLSCapnpHandshaker) increaseBuffer() {
+	size := int64(common.ConnectionBufferSize)
+	req := tch.bufWriteOffset
+	for size <= req {
+		size *= 2
+	}
+	buf := make([]byte, size)
+	copy(buf[:req], tch.buf[:req])
+	tch.buf = buf
+}
+
+func (tch *TLSCapnpHandshaker) attemptCapnpDecode() (*capn.Segment, error) {
+	seg, used, err := capn.ReadFromMemoryZeroCopy(tch.buf[:tch.bufWriteOffset])
+	if used > 0 {
+		tch.buf = tch.buf[used:]
+		tch.bufWriteOffset -= used
+	}
+	if err == io.EOF {
+		// ignore it - it just means we don't have enough data from the socket yet
+		return nil, nil
+	} else {
+		return seg, err
+	}
 }
 
 func (tch *TLSCapnpHandshaker) verifyHello(hello *cmsgs.Hello) bool {
