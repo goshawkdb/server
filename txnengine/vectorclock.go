@@ -47,7 +47,7 @@ func lessThan(a, b VectorClockInterface) bool {
 
 type VectorClock struct {
 	data    []byte
-	initial map[common.VarUUId]*uint64
+	initial map[common.VarUUId]uint64
 	decoded bool
 }
 
@@ -93,12 +93,12 @@ func (vc *VectorClock) decode() {
 	}
 	vcCap := msgs.ReadRootVectorClock(seg)
 	l := vcCap.VarUuids().Len()
-	vc.initial = make(map[common.VarUUId]*uint64, l)
+	vc.initial = make(map[common.VarUUId]uint64, l)
 	keys := vcCap.VarUuids()
-	values := vcCap.Values().ToArray()
+	values := vcCap.Values()
 	for idx, l := 0, keys.Len(); idx < l; idx++ {
 		k := common.MakeVarUUId(keys.At(idx))
-		vc.initial[*k] = &values[idx]
+		vc.initial[*k] = values.At(idx)
 	}
 }
 
@@ -110,7 +110,7 @@ func (vc *VectorClock) Len() int {
 func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 	vc.decode()
 	if value, found := vc.initial[*vUUId]; found {
-		return *value
+		return value
 	}
 	return deleted
 }
@@ -118,7 +118,7 @@ func (vc *VectorClock) At(vUUId *common.VarUUId) uint64 {
 func (vc *VectorClock) ForEach(it func(*common.VarUUId, uint64) bool) bool {
 	vc.decode()
 	for k, v := range vc.initial {
-		if !it(&k, *v) {
+		if !it(&k, v) {
 			return false
 		}
 	}
@@ -294,7 +294,7 @@ func (vc *VectorClockMutable) Bump(vUUId *common.VarUUId, inc uint64) *VectorClo
 		return vc
 	} else if old, found := vc.initial[*vUUId]; found {
 		vc.ensureChanges()
-		vc.changes[*vUUId] = vc.store(inc + *old)
+		vc.changes[*vUUId] = vc.store(inc + old)
 		vc.data = nil
 		return vc
 	} else {
@@ -325,7 +325,7 @@ func (vc *VectorClockMutable) SetVarIdMax(vUUId *common.VarUUId, v uint64) bool 
 		}
 		return false
 	} else if old, found := vc.initial[*vUUId]; found {
-		if v > *old {
+		if v > old {
 			vc.ensureChanges()
 			vc.changes[*vUUId] = vc.store(v)
 			vc.data = nil
@@ -359,7 +359,7 @@ func (vc *VectorClockMutable) DeleteIfMatch(vUUId *common.VarUUId, v uint64) boo
 		}
 		return false
 	} else if old, found := vc.initial[*vUUId]; found {
-		if *old <= v {
+		if old <= v {
 			vc.ensureChanges()
 			vc.changes[*vUUId] = vc.store(deleted)
 			vc.length--
