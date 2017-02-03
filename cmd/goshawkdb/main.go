@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -17,7 +18,6 @@ import (
 	"goshawkdb.io/server/paxos"
 	"goshawkdb.io/server/stats"
 	"io/ioutil"
-	"log"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -33,24 +33,25 @@ import (
 //import "net/http"
 
 func main() {
-	log.SetPrefix(common.ProductName + " ")
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Printf("GoshawkDB Version %s with %s; %v", goshawk.ServerVersion, mdb.Version(), os.Args)
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	logger = log.NewContext(logger).With("ts", log.DefaultTimestampUTC)
 
-	if s, err := newServer(); err != nil {
+	logger.Log("product", common.ProductName, "version", goshawk.ServerVersion, "mdbVersion", mdb.Version(), "args", fmt.Sprint(os.Args))
+
+	if s, err := newServer(logger); err != nil {
 		fmt.Printf("\n%v\n\n", err)
 		flag.Usage()
 		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
 		os.Exit(1)
 	} else if s != nil {
 		// go func() {
-		// 	log.Println(http.ListenAndServe("localhost:6060", nil))
+		// 	logger.Log("pprofResult",http.ListenAndServe("localhost:6060", nil))
 		// }()
 		s.start()
 	}
 }
 
-func newServer() (*server, error) {
+func newServer(logger log.Logger) (*server, error) {
 	var configFile, dataDir, certFile string
 	var port, wssPort int
 	var wss, version, genClusterCert, genClientCert bool
@@ -67,7 +68,7 @@ func newServer() (*server, error) {
 	flag.Parse()
 
 	if version {
-		log.Printf("%v version %v", common.ProductName, goshawk.ServerVersion)
+		fmt.Println(common.ProductName, "version", goshawk.ServerVersion)
 		return nil, nil
 	}
 
@@ -95,7 +96,7 @@ func newServer() (*server, error) {
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
-		log.Printf("Fingerprint: %v\n", hex.EncodeToString(fingerprint[:]))
+		logger.Log("fingerprint", hex.EncodeToString(fingerprint[:]))
 		return nil, nil
 	}
 
@@ -104,7 +105,7 @@ func newServer() (*server, error) {
 		if err != nil {
 			return nil, err
 		}
-		log.Printf("No data dir supplied (missing -dir parameter). Using %v for data.\n", dataDir)
+		logger.Log("msg", "No data dir supplied (missing -dir parameter).", "dataDir", dataDir)
 	}
 	err = os.MkdirAll(dataDir, 0750)
 	if err != nil {
@@ -131,6 +132,7 @@ func newServer() (*server, error) {
 	}
 
 	s := &server{
+		logger:       logger,
 		configFile:   configFile,
 		certificate:  certificate,
 		dataDir:      dataDir,
@@ -153,6 +155,7 @@ func newServer() (*server, error) {
 }
 
 type server struct {
+	logger            log.Logger
 	configFile        string
 	certificate       []byte
 	dataDir           string
@@ -181,28 +184,28 @@ func (s *server) start() {
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 0, 500*time.Microsecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 0, 500*time.Microsecond, db.DB, s.logger)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig)
+	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
 	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
-	sp := stats.NewStatsPublisher(cm, lc)
+	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
 	go s.signalHandler()
 
-	listener, err := network.NewListener(s.port, cm)
+	listener, err := network.NewListener(s.port, cm, s.logger)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
 
 	if s.wssPort != 0 {
-		wssListener, err := network.NewWebsocketListener(s.wssPort, cm)
+		wssListener, err := network.NewWebsocketListener(s.wssPort, cm, s.logger)
 		s.maybeShutdown(err)
 		s.addOnShutdown(wssListener.Shutdown)
 	}
@@ -219,15 +222,16 @@ func (s *server) addOnShutdown(f func()) {
 
 func (s *server) shutdown(err error) {
 	if err != nil {
-		log.Println("Shutting down due to fatal error:", err)
+		s.logger.Log("msg", "Shutting down due to fatal error.", "error", err)
 	}
 	for idx := len(s.onShutdown) - 1; idx >= 0; idx-- {
 		s.onShutdown[idx]()
 	}
 	if err == nil {
-		log.Println("Shutdown.")
+		s.logger.Log("msg", "Shutdown.")
 	} else {
-		log.Fatal("Shutdown due to fatal error: ", err)
+		s.logger.Log("msg", "Shutdown due to fatal error.", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -279,7 +283,7 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 
 func (s *server) SignalShutdown() {
 	// this may fail if stdout has died
-	log.Println("Shutting down.")
+	s.logger.Log("msg", "Shutdown requested.")
 	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
 		s.shutdownChan <- goshawk.EmptyStructVal
 	}
@@ -288,7 +292,9 @@ func (s *server) SignalShutdown() {
 func (s *server) signalStatus() {
 	sc := goshawk.NewStatusConsumer()
 	go sc.Consume(func(str string) {
-		log.Printf("System Status for %v\n%v\nStatus End\n", s.rmId, str)
+		s.logger.Log("msg", "System Status Start", "RMId", s.rmId)
+		os.Stderr.WriteString(str + "\n")
+		s.logger.Log("msg", "System Status End", "RMId", s.rmId)
 	})
 	sc.Emit(fmt.Sprintf("Configuration File: %v", s.configFile))
 	sc.Emit(fmt.Sprintf("Data Directory: %v", s.dataDir))
@@ -298,12 +304,12 @@ func (s *server) signalStatus() {
 
 func (s *server) signalReloadConfig() {
 	if s.configFile == "" {
-		log.Println("Attempt to reload config failed as no path to configuration provided on command line.")
+		s.logger.Log("msg", "Attempt to reload config failed as no path to configuration provided on command line.")
 		return
 	}
 	config, err := configuration.LoadJSONFromPath(s.configFile)
 	if err != nil {
-		log.Println("Cannot reload config due to error:", err)
+		s.logger.Log("msg", "Cannot reload config due to error.", "error", err)
 		return
 	}
 	s.transmogrifier.RequestConfigurationChange(config.ToConfiguration())
@@ -314,7 +320,7 @@ func (s *server) signalDumpStacks() {
 	for {
 		buf := make([]byte, size)
 		if l := runtime.Stack(buf, true); l < size {
-			log.Printf("Stacks dump\n%s\nStacks dump end", buf[:l])
+			s.logger.Log("msg", "Stacks dump", "stacks", buf[:l])
 			return
 		} else {
 			size += size
@@ -324,31 +330,31 @@ func (s *server) signalDumpStacks() {
 
 func (s *server) signalToggleCpuProfile() {
 	memFile, err := ioutil.TempFile("", common.ProductName+"_Mem_Profile_")
-	if goshawk.CheckWarn(err) {
+	if goshawk.CheckWarn(err, s.logger) {
 		return
 	}
-	if goshawk.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0)) {
+	if goshawk.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0), s.logger) {
 		return
 	}
-	if !goshawk.CheckWarn(memFile.Close()) {
-		log.Println("Memory profile written to", memFile.Name())
+	if !goshawk.CheckWarn(memFile.Close(), s.logger) {
+		s.logger.Log("msg", "Memory profile written.", "file", memFile.Name())
 	}
 
 	if s.profileFile == nil {
 		profFile, err := ioutil.TempFile("", common.ProductName+"_CPU_Profile_")
-		if goshawk.CheckWarn(err) {
+		if goshawk.CheckWarn(err, s.logger) {
 			return
 		}
-		if goshawk.CheckWarn(pprof.StartCPUProfile(profFile)) {
+		if goshawk.CheckWarn(pprof.StartCPUProfile(profFile), s.logger) {
 			return
 		}
 		s.profileFile = profFile
-		log.Println("Profiling started in", profFile.Name())
+		s.logger.Log("msg", "Profiling started.", "file", profFile.Name())
 
 	} else {
 		pprof.StopCPUProfile()
-		if !goshawk.CheckWarn(s.profileFile.Close()) {
-			log.Println("Profiling stopped in", s.profileFile.Name())
+		if !goshawk.CheckWarn(s.profileFile.Close(), s.logger) {
+			s.logger.Log("msg", "Profiling stopped.", "file", s.profileFile.Name())
 		}
 		s.profileFile = nil
 	}
@@ -357,19 +363,19 @@ func (s *server) signalToggleCpuProfile() {
 func (s *server) signalToggleTrace() {
 	if s.traceFile == nil {
 		traceFile, err := ioutil.TempFile("", common.ProductName+"_Trace_")
-		if goshawk.CheckWarn(err) {
+		if goshawk.CheckWarn(err, s.logger) {
 			return
 		}
-		if goshawk.CheckWarn(trace.Start(traceFile)) {
+		if goshawk.CheckWarn(trace.Start(traceFile), s.logger) {
 			return
 		}
 		s.traceFile = traceFile
-		log.Println("Tracing started in", traceFile.Name())
+		s.logger.Log("msg", "Tracing started.", "file", traceFile.Name())
 
 	} else {
 		trace.Stop()
-		if !goshawk.CheckWarn(s.traceFile.Close()) {
-			log.Println("Tracing stopped in", s.traceFile.Name())
+		if !goshawk.CheckWarn(s.traceFile.Close(), s.logger) {
+			s.logger.Log("msg", "Tracing stopped.", "file", s.traceFile.Name())
 		}
 		s.traceFile = nil
 	}

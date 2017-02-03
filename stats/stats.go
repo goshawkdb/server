@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
@@ -15,12 +16,12 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/network"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 	"math/rand"
 	"time"
 )
 
 type StatsPublisher struct {
+	logger            log.Logger
 	localConnection   *client.LocalConnection
 	connectionManager *network.ConnectionManager
 	cellTail          *cc.ChanCellTail
@@ -68,8 +69,9 @@ func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
 	return sp.cellTail.WithCell(spqc.ccc)
 }
 
-func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection) *StatsPublisher {
+func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection, logger log.Logger) *StatsPublisher {
 	sp := &StatsPublisher{
+		logger:            log.NewContext(logger).With("subsystem", "statsPublisher"),
 		localConnection:   lc,
 		connectionManager: cm,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -125,7 +127,7 @@ func (sp *StatsPublisher) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		log.Println(err)
+		sp.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	sp.cellTail.Terminate()
 }

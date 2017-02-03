@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -22,6 +23,7 @@ func init() {
 
 type AcceptorManager struct {
 	ServerConnectionPublisher
+	logger    log.Logger
 	RMId      common.RMId
 	DB        *db.Databases
 	Exe       *dispatcher.Executor
@@ -30,9 +32,10 @@ type AcceptorManager struct {
 	Topology  *configuration.Topology
 }
 
-func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases) *AcceptorManager {
+func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {
 	am := &AcceptorManager{
 		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		logger:    logger, // acceptorDispatcher creates the context for us
 		RMId:      rmId,
 		DB:        db,
 		Exe:       exe,

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	"github.com/gorilla/websocket"
 	cc "github.com/msackman/chancell"
 	"github.com/tinylib/msgp/msgp"
@@ -20,7 +21,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -29,6 +29,8 @@ import (
 )
 
 type WebsocketListener struct {
+	logger            log.Logger
+	parentLogger      log.Logger
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(websocketListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan websocketListenerMsg
@@ -108,7 +110,7 @@ func (l *WebsocketListener) enqueueQuery(msg websocketListenerMsg) bool {
 	return l.cellTail.WithCell(wlqc.ccc)
 }
 
-func NewWebsocketListener(listenPort uint16, cm *ConnectionManager) (*WebsocketListener, error) {
+func NewWebsocketListener(listenPort uint16, cm *ConnectionManager, logger log.Logger) (*WebsocketListener, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", listenPort))
 	if err != nil {
 		return nil, err
@@ -118,6 +120,8 @@ func NewWebsocketListener(listenPort uint16, cm *ConnectionManager) (*WebsocketL
 		return nil, err
 	}
 	l := &WebsocketListener{
+		logger:            log.NewContext(logger).With("subsystem", "websocketListener"),
+		parentLogger:      logger,
 		connectionManager: cm,
 		listener:          ln,
 		topologyLock:      new(sync.RWMutex),
@@ -179,7 +183,7 @@ func (l *WebsocketListener) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		log.Println("WSS Listen error:", err)
+		l.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	l.cellTail.Terminate()
 	l.listener.Close()
@@ -227,18 +231,18 @@ func (l *WebsocketListener) acceptLoop() {
 			w.Header().Set("Content-Type", "text/plain")
 			w.Write([]byte(fmt.Sprintf("GoshawkDB Server version %v. Websocket available at /ws", server.ServerVersion)))
 		} else {
-			log.Println("WSS Not authenticated!")
+			l.logger.Log("type", "client", "authentication", "failure")
 			w.WriteHeader(http.StatusForbidden)
 		}
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, req *http.Request) {
 		peerCerts := req.TLS.PeerCertificates
 		if authenticated, hashsum, roots := l.getTopology().VerifyPeerCerts(peerCerts); authenticated {
-			log.Printf("WSS User '%s' authenticated", hex.EncodeToString(hashsum[:]))
 			connNumber := 2*atomic.AddUint32(&connCount, 1) + 1
-			wsHandler(l.connectionManager, connNumber, w, req, peerCerts, roots)
+			l.logger.Log("type", "client", "authentication", "success", "fingerprint", hex.EncodeToString(hashsum[:]), "connNumber", connNumber)
+			wsHandler(l.connectionManager, connNumber, w, req, peerCerts, roots, l.parentLogger)
 		} else {
-			log.Println("WSS Not authenticated!")
+			l.logger.Log("type", "client", "authentication", "failure")
 			w.WriteHeader(http.StatusForbidden)
 		}
 	})
@@ -278,11 +282,13 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-func wsHandler(cm *ConnectionManager, connNumber uint32, w http.ResponseWriter, r *http.Request, peerCerts []*x509.Certificate, roots map[string]*common.Capability) {
+func wsHandler(cm *ConnectionManager, connNumber uint32, w http.ResponseWriter, r *http.Request, peerCerts []*x509.Certificate, roots map[string]*common.Capability, logger log.Logger) {
+	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "incoming", "protocol", "websocket", "type", "client", "connNumber", connNumber)
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err == nil {
-		log.Printf("WSS upgrade success for connection to %v", c.RemoteAddr())
+		logger.Log("msg", "WSS upgrade success.", "remoteHost", c.RemoteAddr())
 		yesman := &wssMsgPackClient{
+			logger:            logger,
 			remoteHost:        fmt.Sprintf("%v", c.RemoteAddr()),
 			connectionNumber:  connNumber,
 			socket:            c,
@@ -290,15 +296,16 @@ func wsHandler(cm *ConnectionManager, connNumber uint32, w http.ResponseWriter, 
 			roots:             roots,
 			connectionManager: cm,
 		}
-		NewConnectionWithHandshaker(yesman, cm)
+		NewConnectionWithHandshaker(yesman, cm, logger)
 
 	} else {
-		log.Printf("WSS upgrade failure for connection to %v: %v", r.RemoteAddr, err)
+		logger.Log("msg", "WSS upgrade failure.", "remoteHost", r.RemoteAddr, "error", err)
 	}
 }
 
 type wssMsgPackClient struct {
 	*Connection
+	logger            log.Logger
 	remoteHost        string
 	connectionNumber  uint32
 	socket            *websocket.Conn
@@ -422,7 +429,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 		return errors.New("Not ready for client connections")
 
 	} else {
-		log.Printf("WSS Client connection established from %v\n", wmpc.remoteHost)
+		wmpc.logger.Log("msg", "Connection established.", "remoteHost", wmpc.remoteHost)
 
 		wmpc.createBeater()
 		wmpc.createReader()

@@ -2,6 +2,7 @@ package paxos
 
 import (
 	"fmt"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -10,22 +11,25 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 )
 
 type AcceptorDispatcher struct {
 	dispatcher.Dispatcher
+	logger            log.Logger
 	connectionManager ConnectionManager
 	acceptormanagers  []*AcceptorManager
 }
 
-func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases) *AcceptorDispatcher {
+func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
+		logger:           log.NewContext(logger).With("subsystem", "acceptorDispatcher"),
 		acceptormanagers: make([]*AcceptorManager, count),
 	}
-	ad.Dispatcher.Init(count)
+	logger = log.NewContext(logger).With("subsystem", "acceptorManager")
+	ad.Dispatcher.Init(count, logger)
 	for idx, exe := range ad.Executors {
-		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db)
+		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db,
+			log.NewContext(logger).With("instance", idx))
 	}
 	ad.loadFromDisk(db)
 	return ad
@@ -94,11 +98,11 @@ func (ad *AcceptorDispatcher) loadFromDisk(db *db.Databases) {
 			txnIdCopy := txnId
 			ad.withAcceptorManager(txnIdCopy, func(am *AcceptorManager) {
 				if err := am.loadFromData(txnIdCopy, acceptorStateCopy); err != nil {
-					log.Printf("AcceptorDispatcher error loading %v from disk: %v\n", txnIdCopy, err)
+					panic(fmt.Sprintf("AcceptorDispatcher error loading %v from disk: %v\n", txnIdCopy, err))
 				}
 			})
 		}
-		log.Printf("Loaded %v acceptors from disk\n", len(acceptorStates))
+		ad.logger.Log("msg", "Loaded acceptors from disk.", "count", len(acceptorStates))
 	}
 }
 

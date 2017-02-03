@@ -1,8 +1,9 @@
 package dispatcher
 
 import (
+	"fmt"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
-	"log"
 )
 
 type Dispatcher struct {
@@ -10,10 +11,10 @@ type Dispatcher struct {
 	Executors     []*Executor
 }
 
-func (dis *Dispatcher) Init(count uint8) {
+func (dis *Dispatcher) Init(count uint8, logger log.Logger) {
 	executors := make([]*Executor, count)
 	for idx := range executors {
-		executors[idx] = newExecutor()
+		executors[idx] = newExecutor(log.NewContext(logger).With("instance", idx))
 	}
 	dis.Executors = executors
 	dis.ExecutorCount = count
@@ -40,13 +41,14 @@ type applyQuery func()
 func (aq applyQuery) witness() executorQuery { return aq }
 
 type Executor struct {
+	logger    log.Logger
 	cellTail  *cc.ChanCellTail
 	enqueue   func(executorQuery, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan <-chan executorQuery
 }
 
-func newExecutor() *Executor {
-	exe := &Executor{}
+func newExecutor(logger log.Logger) *Executor {
+	exe := &Executor{logger: logger}
 	var head *cc.ChanCellHead
 	head, exe.cellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
@@ -86,7 +88,7 @@ func (exe *Executor) loop(head *cc.ChanCellHead) {
 			case applyQuery:
 				query()
 			default:
-				log.Printf("Fatal to Executor: Received unexpected message: %#v", query)
+				exe.logger.Log("msg", "Fatal error.", "error", fmt.Sprintf("Received unexpected message: %#v", query))
 				terminate = true
 			}
 		} else {

@@ -2,6 +2,7 @@ package txnengine
 
 import (
 	"fmt"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	tw "github.com/msackman/gotimerwheel"
@@ -15,6 +16,7 @@ import (
 
 type VarManager struct {
 	LocalConnection
+	logger           log.Logger
 	Topology         *configuration.Topology
 	RMId             common.RMId
 	db               *db.Databases
@@ -30,9 +32,10 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublisher, db *db.Databases, lc LocalConnection) *VarManager {
+func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublisher, db *db.Databases, lc LocalConnection, logger log.Logger) *VarManager {
 	vm := &VarManager{
 		LocalConnection: lc,
+		logger:          logger, // varDispatcher creates the context for us
 		RMId:            rmId,
 		db:              db,
 		active:          make(map[common.VarUUId]*Var),

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
@@ -17,7 +18,6 @@ import (
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"io"
-	"log"
 	"math/rand"
 	"net"
 	"time"
@@ -43,23 +43,27 @@ type Protocol interface {
 // TCP TLS Capnp dialer
 
 type TCPDialer struct {
+	logger           log.Logger
 	remoteHost       string
 	handshakeBuilder func(*net.TCPConn) *TLSCapnpHandshaker
 }
 
-func NewTCPDialerForTLSCapnp(remoteHost string, cm *ConnectionManager) *TCPDialer {
+func NewTCPDialerForTLSCapnp(remoteHost string, cm *ConnectionManager, logger log.Logger) *TCPDialer {
 	if remoteHost == "" {
 		panic("Empty host")
 	}
-	dialer := &TCPDialer{remoteHost: remoteHost}
+	dialer := &TCPDialer{
+		logger:     logger,
+		remoteHost: remoteHost,
+	}
 	dialer.handshakeBuilder = func(socket *net.TCPConn) *TLSCapnpHandshaker {
-		return NewTLSCapnpHandshaker(dialer, socket, cm, 0, remoteHost)
+		return NewTLSCapnpHandshaker(dialer, socket, cm, 0, remoteHost, dialer.logger)
 	}
 	return dialer
 }
 
 func (td *TCPDialer) Dial() (Handshaker, error) {
-	log.Printf("Attempting connection to %s", td.remoteHost)
+	td.logger.Log("msg", "Attempting connection.", "remoteHost", td.remoteHost)
 	tcpAddr, err := net.ResolveTCPAddr("tcp", td.remoteHost)
 	if err != nil {
 		return nil, err
@@ -82,6 +86,7 @@ func (td *TCPDialer) String() string {
 
 type TLSCapnpHandshaker struct {
 	dialer            Dialer
+	logger            log.Logger
 	remoteHost        string
 	connectionNumber  uint32
 	socket            net.Conn
@@ -93,13 +98,14 @@ type TLSCapnpHandshaker struct {
 	bufWriteOffset    int64
 }
 
-func NewTLSCapnpHandshaker(dialer Dialer, socket *net.TCPConn, cm *ConnectionManager, count uint32, remoteHost string) *TLSCapnpHandshaker {
+func NewTLSCapnpHandshaker(dialer Dialer, socket *net.TCPConn, cm *ConnectionManager, count uint32, remoteHost string, logger log.Logger) *TLSCapnpHandshaker {
 	if err := common.ConfigureSocket(socket); err != nil {
-		log.Println("Error when configuring socket:", err)
+		logger.Log("msg", "Error when configuring socket", "error", err)
 		return nil
 	}
 	return &TLSCapnpHandshaker{
 		dialer:            dialer,
+		logger:            logger,
 		remoteHost:        remoteHost,
 		connectionNumber:  count,
 		socket:            socket,
@@ -260,6 +266,7 @@ func (tch *TLSCapnpHandshaker) verifyHello(hello *cmsgs.Hello) bool {
 func (tch *TLSCapnpHandshaker) newTLSCapnpClient() *TLSCapnpClient {
 	return &TLSCapnpClient{
 		TLSCapnpHandshaker: tch,
+		logger:             log.NewContext(tch.logger).With("type", "client", "connNumber", tch.connectionNumber),
 	}
 }
 
@@ -270,6 +277,7 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 	// (i.e. dialer == nil) then we never restart it anyway.
 	return &TLSCapnpServer{
 		TLSCapnpHandshaker: tch,
+		logger:             log.NewContext(tch.logger).With("type", "server"),
 	}
 }
 
@@ -323,6 +331,7 @@ func (tch *TLSCapnpHandshaker) createBeater(conn *Connection, beatBytes []byte) 
 
 type TLSCapnpServer struct {
 	*TLSCapnpHandshaker
+	logger            log.Logger
 	Connection        *Connection
 	remoteRMId        common.RMId
 	remoteClusterUUId uint64
@@ -344,6 +353,11 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 		}
 		tcs.socket = socket
 
+		if err := socket.Handshake(); err != nil {
+			tcs.logger.Log("authentication", "failure", "error", err)
+			return err
+		}
+
 	} else {
 		// We dialed, so we're going to act as the client
 		config.InsecureSkipVerify = true
@@ -359,6 +373,7 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 		// the verification ourself. Why is TLS asymmetric?!
 
 		if err := socket.Handshake(); err != nil {
+			tcs.logger.Log("authentication", "failure", "error", err)
 			return err
 		}
 
@@ -375,9 +390,11 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 			opts.Intermediates.AddCert(cert)
 		}
 		if _, err := certs[0].Verify(opts); err != nil {
+			tcs.logger.Log("authentication", "failure", "error", err)
 			return err
 		}
 	}
+	tcs.logger.Log("authentication", "success")
 
 	hello := tcs.makeHelloServer()
 	if err := tcs.send(server.SegToBytes(hello)); err != nil {
@@ -428,7 +445,7 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 
 func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	tcs.Connection = conn
-	log.Printf("Server connection established to %v (%v)\n", tcs.remoteHost, tcs.remoteRMId)
+	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remoteHost, "remoteRMId", tcs.remoteRMId)
 
 	seg := capn.NewBuffer(nil)
 	message := msgs.NewRootMessage(seg)
@@ -534,6 +551,7 @@ func (tcs *TLSCapnpServer) createReader() {
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
 	*Connection
+	logger        log.Logger
 	peerCerts     []*x509.Certificate
 	roots         map[string]*common.Capability
 	rootsVar      map[common.VarUUId]*common.Capability
@@ -562,7 +580,7 @@ func (tcc *TLSCapnpClient) finishHandshake() error {
 	if authenticated, hashsum, roots := tcc.topology.VerifyPeerCerts(peerCerts); authenticated {
 		tcc.peerCerts = peerCerts
 		tcc.roots = roots
-		log.Printf("User '%s' authenticated", hex.EncodeToString(hashsum[:]))
+		tcc.logger.Log("authentication", "success", "fingerprint", hex.EncodeToString(hashsum[:]))
 		helloFromServer := tcc.makeHelloClient()
 		if err := tcc.send(server.SegToBytes(helloFromServer)); err != nil {
 			return err
@@ -570,6 +588,7 @@ func (tcc *TLSCapnpClient) finishHandshake() error {
 		tcc.remoteHost = tcc.socket.RemoteAddr().String()
 		return nil
 	} else {
+		tcc.logger.Log("authentication", "failure")
 		return errors.New("Client connection rejected: No client certificate known")
 	}
 }
@@ -609,7 +628,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		return errors.New("Not ready for client connections")
 
 	} else {
-		log.Printf("Client connection established from %v\n", tcc.remoteHost)
+		tcc.logger.Log("msg", "Connection established.", "remoteHost", tcc.remoteHost)
 
 		seg := capn.NewBuffer(nil)
 		message := cmsgs.NewRootClientMessage(seg)

@@ -3,13 +3,13 @@ package paxos
 import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 )
 
 type ProposerMode uint8
@@ -23,6 +23,7 @@ const (
 
 type Proposer struct {
 	proposerManager *ProposerManager
+	logger          log.Logger
 	mode            ProposerMode
 	txn             *eng.Txn
 	txnId           *common.TxnId
@@ -85,6 +86,13 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 	p.init()
 	p.allAcceptorsAgreed = true
 	return p, nil
+}
+
+func (p *Proposer) Log(keyvals ...interface{}) {
+	if p.logger == nil {
+		p.logger = log.NewContext(p.proposerManager.logger).With("TxnId", p.txnId)
+	}
+	p.logger.Log(keyvals...)
 }
 
 func (p *Proposer) init() {
@@ -236,8 +244,8 @@ func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 		}
 
 	} else if !pab.txn.Retry {
-		log.Printf("Error: %v TxnBallotsComplete callback invoked in wrong state (%v)\n",
-			pab.txnId, pab.currentState)
+		pab.Log("error", "TxnBallotsComplete callback invoked in wrong state.",
+			"currentState", pab.currentState)
 	}
 }
 
@@ -475,8 +483,8 @@ func (prgc *proposerReceiveGloballyComplete) TxnGloballyCompleteReceived(sender 
 	// could just be a duplicate from some acceptor that's got bounced.
 	// But we should not receive any TGC until we've issued TLCs.
 	if !prgc.locallyCompleted {
-		log.Printf("Error: %v globally complete received from %v without us issuing locally complete. (%v)\n",
-			prgc.txnId, sender, prgc.currentState)
+		prgc.Log("error", "Globally complete received without us issuing locally complete.",
+			"sender", sender, "currentState", prgc.currentState)
 	}
 }
 
@@ -523,7 +531,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 			}
 		}()
 	} else {
-		log.Printf("Error: %v TxnFinished callback invoked with proposer in wrong state: %v",
-			paf.txnId, paf.currentState)
+		paf.Log("error", "TxnFinished callback invoked with proposer in wrong state.",
+			"currentState", paf.currentState)
 	}
 }

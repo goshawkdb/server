@@ -3,18 +3,19 @@ package network
 import (
 	"errors"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 	"math/rand"
 	"net"
 	"time"
 )
 
 type Connection struct {
+	logger            log.Logger
 	connectionManager *ConnectionManager
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(connectionMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
@@ -114,18 +115,21 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 	return conn.cellTail.WithCell(cqc.ccc)
 }
 
-func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager) *Connection {
-	dialer := NewTCPDialerForTLSCapnp(remoteHost, cm)
-	return NewConnectionWithDialer(dialer, cm)
+func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
+	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
+	dialer := NewTCPDialerForTLSCapnp(remoteHost, cm, logger)
+	return NewConnectionWithDialer(dialer, cm, logger)
 }
 
-func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32) *Connection {
-	yesman := NewTLSCapnpHandshaker(nil, socket, cm, count, "")
-	return NewConnectionWithHandshaker(yesman, cm)
+func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) *Connection {
+	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "incoming", "protocol", "capnp")
+	yesman := NewTLSCapnpHandshaker(nil, socket, cm, count, "", logger)
+	return NewConnectionWithHandshaker(yesman, cm, logger)
 }
 
-func NewConnectionWithHandshaker(yesman Handshaker, cm *ConnectionManager) *Connection {
+func NewConnectionWithHandshaker(yesman Handshaker, cm *ConnectionManager, logger log.Logger) *Connection {
 	conn := &Connection{
+		logger:            logger,
 		connectionManager: cm,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -134,8 +138,9 @@ func NewConnectionWithHandshaker(yesman Handshaker, cm *ConnectionManager) *Conn
 	return conn
 }
 
-func NewConnectionWithDialer(phone Dialer, cm *ConnectionManager) *Connection {
+func NewConnectionWithDialer(phone Dialer, cm *ConnectionManager, logger log.Logger) *Connection {
 	conn := &Connection{
+		logger:            logger,
 		connectionManager: cm,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -211,7 +216,7 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	}
 	conn.cellTail.Terminate()
 	conn.handleShutdown(err)
-	log.Println("Connection terminated")
+	conn.logger.Log("msg", "Terminated.")
 }
 
 func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error) {
@@ -250,7 +255,7 @@ func (conn *Connection) maybeRestartConnection(err error) error {
 	if conn.Dialer == nil {
 		return err // it's fatal; actor loop will shutdown Protocol or Handshaker
 	} else {
-		log.Printf("Restarting connection due to error: %v", err)
+		conn.logger.Log("msg", "Restarting.", "error", err)
 		conn.nextState(&conn.connectionDelay)
 		return nil
 	}
@@ -258,7 +263,7 @@ func (conn *Connection) maybeRestartConnection(err error) error {
 
 func (conn *Connection) handleShutdown(err error) {
 	if err != nil {
-		log.Println(err)
+		conn.logger.Log("error", err)
 	}
 	if conn.Protocol != nil {
 		conn.Protocol.InternalShutdown()
@@ -361,7 +366,7 @@ func (cc *connectionDial) start() (bool, error) {
 		cc.Handshaker = yesman
 		cc.nextState(nil)
 	} else {
-		log.Println(err)
+		cc.logger.Log("msg", "Error when dialing.", "error", err)
 		cc.nextState(&cc.connectionDelay)
 	}
 	return false, nil

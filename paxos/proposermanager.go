@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -13,7 +14,6 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 )
 
 func init() {
@@ -28,6 +28,7 @@ type instanceIdPrefix [instanceIdPrefixLen]byte
 
 type ProposerManager struct {
 	ServerConnectionPublisher
+	logger        log.Logger
 	RMId          common.RMId
 	BootCount     uint32
 	VarDispatcher *eng.VarDispatcher
@@ -38,9 +39,10 @@ type ProposerManager struct {
 	topology      *configuration.Topology
 }
 
-func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerManager {
+func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {
 	pm := &ProposerManager{
 		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		logger:        logger, // proposerDispatcher creates the context
 		RMId:          rmId,
 		BootCount:     bootCount,
 		proposals:     make(map[instanceIdPrefix]*proposal),
@@ -181,7 +183,7 @@ func (pm *ProposerManager) AddToPaxosProposals(txnId *common.TxnId, ballots []*e
 	if prop, found := pm.proposals[instId]; found {
 		prop.AddBallots(ballots)
 	} else {
-		log.Printf("Error: Adding ballot to Paxos, unable to find proposals. %v %v\n", txnId, rmId)
+		pm.logger.Log("error", "Adding ballot to Paxos, unable to find proposals.", "TxnId", txnId, "RMId", rmId)
 	}
 }
 

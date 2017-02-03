@@ -3,16 +3,17 @@ package paxos
 import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 )
 
 type Acceptor struct {
+	logger          log.Logger
 	txnId           *common.TxnId
 	acceptorManager *AcceptorManager
 	currentState    acceptorStateMachineComponent
@@ -41,6 +42,13 @@ func AcceptorFromData(txnId *common.TxnId, outcome *msgs.Outcome, sendToAll bool
 	a.sendToAllOnDisk = sendToAll
 	a.outcomeOnDisk = outcomeEqualId
 	return a
+}
+
+func (a *Acceptor) Log(keyvals ...interface{}) {
+	if a.logger == nil {
+		a.logger = log.NewContext(a.acceptorManager.logger).With("TxnId", a.txnId)
+	}
+	a.logger.Log(keyvals...)
 }
 
 func (a *Acceptor) init(txn *eng.TxnReader) {
@@ -159,7 +167,7 @@ func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst
 	// we've received a TLC from instanceRMId (see notes in ALC re
 	// retry). Note an acceptor can change it's mind!
 	if arb.currentState == &arb.acceptorDeleteFromDisk {
-		log.Printf("Error: %v received ballot for instance %v after all TLCs received.", arb.txnId, instanceRMId)
+		arb.Log("error", "Received ballot after all TLCs have been received.", "instanceRMId", instanceRMId)
 	}
 	outcome := arb.ballotAccumulator.BallotReceived(instanceRMId, inst, vUUId, txn)
 	if outcome != nil && !outcome.Equal(arb.outcome) {

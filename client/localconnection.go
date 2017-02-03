@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
@@ -11,12 +12,13 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
+
 	"sync"
 )
 
 type LocalConnection struct {
 	sync.Mutex
+	logger            log.Logger
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(localConnectionMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan localConnectionMsg
@@ -269,11 +271,12 @@ func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Co
 	}
 }
 
-func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *LocalConnection {
+func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager, logger log.Logger) *LocalConnection {
 	namespace := make([]byte, common.KeyLen)
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
 	lc := &LocalConnection{
+		logger:            log.NewContext(logger).With("subsystem", "localConnection"),
 		rmId:              rmId,
 		connectionManager: cm,
 		namespace:         namespace,
@@ -353,7 +356,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		log.Println("LocalConnection error:", err)
+		lc.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	lc.submitter.Shutdown()
 	lc.cellTail.Terminate()
