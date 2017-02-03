@@ -100,12 +100,18 @@ func (conn *Connection) WithTerminatedChan(fun func(chan struct{})) {
 	fun(conn.cellTail.Terminated)
 }
 
+type connectionQueryCapture struct {
+	conn *Connection
+	msg  connectionMsg
+}
+
+func (cqc *connectionQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return cqc.conn.enqueueQueryInner(cqc.msg, cell, cqc.ccc)
+}
+
 func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return conn.enqueueQueryInner(msg, cell, f)
-	}
-	return conn.cellTail.WithCell(f)
+	cqc := &connectionQueryCapture{conn: conn, msg: msg}
+	return conn.cellTail.WithCell(cqc.ccc)
 }
 
 func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager) *Connection {

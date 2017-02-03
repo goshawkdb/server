@@ -94,12 +94,18 @@ func (l *WebsocketListener) TopologyChanged(topology *configuration.Topology, do
 	}
 }
 
+type websocketListenerQueryCapture struct {
+	wl  *WebsocketListener
+	msg websocketListenerMsg
+}
+
+func (wlqc *websocketListenerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return wlqc.wl.enqueueQueryInner(wlqc.msg, cell, wlqc.ccc)
+}
+
 func (l *WebsocketListener) enqueueQuery(msg websocketListenerMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return l.enqueueQueryInner(msg, cell, f)
-	}
-	return l.cellTail.WithCell(f)
+	wlqc := &websocketListenerQueryCapture{wl: l, msg: msg}
+	return l.cellTail.WithCell(wlqc.ccc)
 }
 
 func NewWebsocketListener(listenPort uint16, cm *ConnectionManager) (*WebsocketListener, error) {

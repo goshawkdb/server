@@ -54,12 +54,18 @@ func (sp *StatsPublisher) exec(fun func() error) bool {
 	return sp.enqueueQuery(statsPublisherExe(fun))
 }
 
+type statsPublisherQueryCapture struct {
+	sp  *StatsPublisher
+	msg statsPublisherMsg
+}
+
+func (spqc *statsPublisherQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return spqc.sp.enqueueQueryInner(spqc.msg, cell, spqc.ccc)
+}
+
 func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return sp.enqueueQueryInner(msg, cell, f)
-	}
-	return sp.cellTail.WithCell(f)
+	spqc := &statsPublisherQueryCapture{sp: sp, msg: msg}
+	return sp.cellTail.WithCell(spqc.ccc)
 }
 
 func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection) *StatsPublisher {

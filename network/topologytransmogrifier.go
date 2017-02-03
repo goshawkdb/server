@@ -111,12 +111,18 @@ func (tt *TopologyTransmogrifier) MigrationCompleteReceived(sender common.RMId, 
 	})
 }
 
+type topologyTransmogrifierQueryCapture struct {
+	tt  *TopologyTransmogrifier
+	msg topologyTransmogrifierMsg
+}
+
+func (ttqc *topologyTransmogrifierQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return ttqc.tt.enqueueQueryInner(ttqc.msg, cell, ttqc.ccc)
+}
+
 func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return tt.enqueueQueryInner(msg, cell, f)
-	}
-	return tt.cellTail.WithCell(f)
+	ttqc := &topologyTransmogrifierQueryCapture{tt: tt, msg: msg}
+	return tt.cellTail.WithCell(ttqc.ccc)
 }
 
 func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {

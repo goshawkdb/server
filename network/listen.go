@@ -39,12 +39,18 @@ func (l *Listener) Shutdown() {
 	}
 }
 
+type listenerQueryCapture struct {
+	l   *Listener
+	msg listenerMsg
+}
+
+func (lqc *listenerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return lqc.l.enqueueQueryInner(lqc.msg, cell, lqc.ccc)
+}
+
 func (l *Listener) enqueueQuery(msg listenerMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return l.enqueueQueryInner(msg, cell, f)
-	}
-	return l.cellTail.WithCell(f)
+	lqc := &listenerQueryCapture{l: l, msg: msg}
+	return l.cellTail.WithCell(lqc.ccc)
 }
 
 func NewListener(listenPort uint16, cm *ConnectionManager) (*Listener, error) {

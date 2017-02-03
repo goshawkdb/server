@@ -144,12 +144,18 @@ func (lc *LocalConnection) WithTerminatedChan(fun func(chan struct{})) {
 	fun(lc.cellTail.Terminated)
 }
 
+type localConnectionQueryCapture struct {
+	lc  *LocalConnection
+	msg localConnectionMsg
+}
+
+func (lcqc *localConnectionQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return lcqc.lc.enqueueQueryInner(lcqc.msg, cell, lcqc.ccc)
+}
+
 func (lc *LocalConnection) enqueueQuery(msg localConnectionMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return lc.enqueueQueryInner(msg, cell, f)
-	}
-	return lc.cellTail.WithCell(f)
+	lcqc := &localConnectionQueryCapture{lc: lc, msg: msg}
+	return lc.cellTail.WithCell(lcqc.ccc)
 }
 
 func (lc *LocalConnection) enqueueQuerySync(msg localConnectionMsg, resultChan chan struct{}) bool {

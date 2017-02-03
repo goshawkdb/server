@@ -96,12 +96,18 @@ func (exe *Executor) loop(head *cc.ChanCellHead) {
 	exe.cellTail.Terminate()
 }
 
+type executionDispatcherQueryCapture struct {
+	exe *Executor
+	msg executorQuery
+}
+
+func (edqc *executionDispatcherQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return edqc.exe.enqueue(edqc.msg, cell, edqc.ccc)
+}
+
 func (exe *Executor) send(msg executorQuery) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return exe.enqueue(msg, cell, f)
-	}
-	return exe.cellTail.WithCell(f)
+	edqc := &executionDispatcherQueryCapture{exe: exe, msg: msg}
+	return exe.cellTail.WithCell(edqc.ccc)
 }
 
 func (exe *Executor) Enqueue(fun func()) bool {

@@ -29,8 +29,8 @@ import (
 	"time"
 )
 
-import _ "net/http/pprof"
-import "net/http"
+//import _ "net/http/pprof"
+//import "net/http"
 
 func main() {
 	log.SetPrefix(common.ProductName + " ")
@@ -43,9 +43,9 @@ func main() {
 		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
 		os.Exit(1)
 	} else if s != nil {
-		go func() {
-			log.Println(http.ListenAndServe("localhost:6060", nil))
-		}()
+		// go func() {
+		// 	log.Println(http.ListenAndServe("localhost:6060", nil))
+		// }()
 		s.start()
 	}
 }
@@ -181,7 +181,7 @@ func (s *server) start() {
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, procs/2, 500*time.Microsecond, db.DB)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 0, 500*time.Microsecond, db.DB)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
@@ -396,8 +396,8 @@ func (s *server) signalHandler() {
 		case syscall.SIGUSR1:
 			s.signalStatus()
 		case syscall.SIGUSR2:
-			//s.signalToggleCpuProfile()
-			s.signalToggleTrace()
+			s.signalToggleCpuProfile()
+			//s.signalToggleTrace()
 		}
 	}
 }

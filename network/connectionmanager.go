@@ -323,12 +323,18 @@ func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
 	cm.enqueueQuery(connectionManagerMsgStatus{StatusConsumer: sc})
 }
 
+type connectionManagerQueryCapture struct {
+	cm  *ConnectionManager
+	msg connectionManagerMsg
+}
+
+func (cmqc *connectionManagerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
+	return cmqc.cm.enqueueQueryInner(cmqc.msg, cell, cmqc.ccc)
+}
+
 func (cm *ConnectionManager) enqueueQuery(msg connectionManagerMsg) bool {
-	var f cc.CurCellConsumer
-	f = func(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-		return cm.enqueueQueryInner(msg, cell, f)
-	}
-	return cm.cellTail.WithCell(f)
+	cmqc := &connectionManagerQueryCapture{cm: cm, msg: msg}
+	return cm.cellTail.WithCell(cmqc.ccc)
 }
 
 func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultChan chan struct{}) bool {
