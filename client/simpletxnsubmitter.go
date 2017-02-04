@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
@@ -18,6 +19,7 @@ import (
 )
 
 type SimpleTxnSubmitter struct {
+	logger              log.Logger
 	rmId                common.RMId
 	bootCount           uint32
 	disabledHashCodes   map[common.RMId]server.EmptyStruct
@@ -36,11 +38,12 @@ type SimpleTxnSubmitter struct {
 type txnOutcomeConsumer func(common.RMId, *eng.TxnReader, *msgs.Outcome) error
 type TxnCompletionConsumer func(*eng.TxnReader, *msgs.Outcome, error) error
 
-func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher, actor paxos.Actorish) *SimpleTxnSubmitter {
+func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	cache := ch.NewCache(nil, rng)
 
 	sts := &SimpleTxnSubmitter{
+		logger:           logger,
 		rmId:             rmId,
 		bootCount:        bootCount,
 		connections:      nil,
@@ -80,7 +83,7 @@ func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn
 		return consumer(sender, txn, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
-		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
+		paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
 		return nil
 	}
 }
@@ -91,7 +94,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTxnSubmission(server.SegToBytes(txnCap.Segment))
 
-	server.Log(txnId, "Submitting txn with actives:", activeRMs)
+	server.DebugLog(sts.logger, "debug", "Submitting txn.", "TxnId", txnId, "active", activeRMs)
 	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
 	removeNeeded := uint32(0)
 	sleeping := delay != nil && delay.Cur > 0
@@ -123,14 +126,14 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		}
 		// OSS is safe here - see above.
-		paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
+		paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
 		if shutdown {
 			if txnCap.Retry() {
 				// If this msg doesn't make it then proposers should
 				// observe our death and tidy up anyway. If it's just this
 				// connection shutting down then there should be no
 				// problem with these msgs getting to the propposers.
-				paxos.NewOneShotSender(paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
+				paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 			}
 			return continuation(nil, nil, nil)
 		} else {
@@ -140,7 +143,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	shutdownFunPtr := &shutdownFun
 	sts.onShutdown[shutdownFunPtr] = server.EmptyStructVal
 
-	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.TwoFInc()), acceptors)
+	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.TwoFInc()), acceptors, sts.logger)
 	consumer := func(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
@@ -182,7 +185,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.T
 }
 
 func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) error {
-	server.Log("STS Topology Changed", topology)
+	server.DebugLog(sts.logger, "debug", "STS Topology Changed.", "topology", topology)
 	if topology.IsBlank() {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.
@@ -199,7 +202,7 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 }
 
 func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
-	server.Log("STS ServerConnectionsChanged", servers)
+	server.DebugLog(sts.logger, "debug", "STS ServerConnectionsChanged.", "servers", servers)
 	sts.connections = servers
 	sts.connectionsBool = make(map[common.RMId]bool, len(servers))
 	for k := range servers {
@@ -220,7 +223,7 @@ func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() error {
 			sts.disabledHashCodes[rmId] = server.EmptyStructVal
 		}
 	}
-	server.Log("STS disabled hash codes", sts.disabledHashCodes)
+	server.DebugLog(sts.logger, "debug", "STS disabled hash codes.", "disabledHashCodes", sts.disabledHashCodes)
 	// need to wait until we've updated disabledHashCodes before
 	// starting up any buffered txns.
 	if !sts.topology.IsBlank() && sts.bufferedSubmissions != nil {

@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
@@ -13,7 +14,6 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 	"net"
 	"sync"
 )
@@ -24,6 +24,8 @@ type ShutdownSignaller interface {
 
 type ConnectionManager struct {
 	sync.RWMutex
+	logger                        log.Logger
+	parentLogger                  log.Logger
 	localHost                     string
 	RMId                          common.RMId
 	BootCount                     uint32
@@ -69,7 +71,7 @@ func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Me
 		bootNumber := txnId.BootCount()
 		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
+			paxos.NewOneShotSender(cm.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
 		} else {
 			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
 			return
@@ -350,8 +352,10 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 	}
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
 	cm := &ConnectionManager{
+		logger:            log.NewContext(logger).With("subsystem", "connectionManager"),
+		parentLogger:      logger,
 		localHost:         "",
 		RMId:              rmId,
 		BootCount:         bootCount,
@@ -401,10 +405,10 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.
 	}
 	cm.rmToServer[cd.rmId] = cd
 	cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
-	lc := client.NewLocalConnection(rmId, bootCount, cm)
+	lc := client.NewLocalConnection(rmId, bootCount, cm, logger)
 	cm.localConnection = lc
-	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, bootCount, uint8(procs), db, lc)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, ss, config)
+	cm.Dispatchers = paxos.NewDispatchers(cm, rmId, bootCount, uint8(procs), db, lc, logger)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, lc, port, ss, config, logger)
 	cm.Transmogrifier = transmogrifier
 	go cm.actorLoop(head)
 	<-localEstablished
@@ -461,7 +465,7 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		log.Fatalf("ConnectionManager encountered an error: %v", err)
+		cm.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	cm.cellTail.Terminate()
 	for _, cds := range cm.servers {
@@ -484,13 +488,12 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 
 func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServerEstablished) {
 	if connEst.rmId == cm.RMId {
-		log.Printf("%v is claiming to have the same RMId as ourself! (%v)", connEst.host, cm.RMId)
+		cm.logger.Log("msg", "RMId collision with ourself detected.", "RMId", cm.RMId, "remoteHost", connEst.host)
 		connEst.Shutdown(paxos.Async)
 		return
 
 	} else if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.host != cd.host {
-		log.Printf("%v claimed by multiple servers: %v and %v. Recreating both connections.",
-			connEst.rmId, cd.host, connEst.host)
+		cm.logger.Log("msg", "RMId collision with remote hosts detected. Restarting both connections.", "RMId", connEst.rmId, "remoteHost1", cd.host, "remoteHost2", connEst.host)
 		cd.Shutdown(paxos.Async)
 		connEst.Shutdown(paxos.Async)
 		delete(cm.rmToServer, cd.rmId)
@@ -541,7 +544,8 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost) {
 	rmId := connLost.rmId
 	host := connLost.host
-	server.Log("Server Connection reported down:", rmId, host, connLost.restarting, cm.desired)
+	server.DebugLog(cm.logger, "debug", "Server Connection reported down.",
+		"RMId", rmId, "remoteHost", host, "restarting", connLost.restarting, "desired", cm.desired)
 	if cds, found := cm.servers[host]; found {
 		restarting := connLost.restarting
 		if restarting {
@@ -568,7 +572,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 				if cd != nil && cd.Connection == connLost.Connection {
 					cds[idx] = nil
 					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
-						server.Log("Shutting down connection to", rmId)
+						server.DebugLog(cm.logger, "debug", "Shutting down connection.", "RMId", rmId)
 						cd.Shutdown(paxos.Async)
 					}
 				} else if cd != nil {
@@ -581,14 +585,14 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 		}
 	}
 	if cd, found := cm.rmToServer[rmId]; found && cd.Connection == connLost.Connection {
-		log.Printf("Connection to %v lost\n", rmId)
+		cm.logger.Log("msg", "Connection lost.", "RMId", rmId)
 		cd.established = false
 		delete(cm.rmToServer, rmId)
 		cm.serverConnSubscribers.ServerConnLost(rmId)
 		if cds, found := cm.servers[host]; found {
 			for _, cd := range cds {
 				if cd != nil && cd.established { // backup connection found
-					log.Printf("Alternative connection to %v found\n", rmId)
+					cm.logger.Log("msg", "Alternative connection found.", "RMId", rmId)
 					cm.rmToServer[rmId] = cd
 					cm.serverConnSubscribers.ServerConnEstablished(cd, cd.flushCallback)
 					break
@@ -619,7 +623,7 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 }
 
 func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
-	server.Log("Topology change:", topology)
+	server.DebugLog(cm.logger, "debug", "Topology change.", "topology", topology)
 	cm.topology = topology
 	cm.topologySubscribers.TopologyChanged(topology, callbacks)
 	cd := cm.rmToServer[cm.RMId]
@@ -671,7 +675,7 @@ func (cm *ConnectionManager) setDesiredServers(localHost string, remote []string
 		if cds, found := cm.servers[host]; !found || len(cds) == 0 || cds[0] == nil {
 			// In all cases, we need to start a dialer
 			cd := &connectionManagerMsgServerEstablished{
-				Connection: NewConnectionTCPTLSCapnpDialer(host, cm),
+				Connection: NewConnectionTCPTLSCapnpDialer(host, cm, cm.parentLogger),
 				host:       host,
 			}
 			if !found || len(cds) == 0 {
@@ -725,7 +729,7 @@ func (cm *ConnectionManager) checkFlushed(topology *configuration.Topology) {
 			}
 		}
 		if requiredFlushed <= 0 {
-			log.Printf("%v Ready for client connections.", cm.RMId)
+			cm.logger.Log("msg", "Ready for client connections.", "RMId", cm.RMId)
 			cm.flushedServers = nil
 		}
 	}
@@ -785,7 +789,9 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 // paxos.Connection interface to allow sending to ourself.
 func (cm *ConnectionManager) Send(b []byte) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
-	server.CheckFatal(err)
+	if err != nil {
+		panic(fmt.Sprintf("Error in capnproto decode when sending to self! %v", err))
+	}
 	msg := msgs.ReadRootMessage(seg)
 	cm.DispatchMessage(cm.RMId, msg.Which(), msg)
 }
@@ -809,7 +815,7 @@ func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsg
 		ob.ConnectionEstablished(cd.rmId, cd, rmToServerCopy, done)
 	}
 	go func() {
-		server.Log("ServerConnEstablished expecting results:", expected)
+		server.DebugLog(subs.logger, "debug", "ServerConnEstablished. Expecting callbacks.", "count", expected)
 		for expected > 0 {
 			<-resultChan
 			expected--
@@ -829,7 +835,7 @@ func (subs serverConnSubscribers) ServerConnLost(rmId common.RMId) {
 
 func (subs serverConnSubscribers) AddSubscriber(ob paxos.ServerConnectionSubscriber) {
 	if _, found := subs.subscribers[ob]; found {
-		server.Log(ob, "CM found duplicate add serverConn subscriber")
+		server.DebugLog(subs.logger, "debug", "Found duplicate add serverConn subscriber.", "subscriber", ob)
 	} else {
 		subs.subscribers[ob] = server.EmptyStructVal
 		ob.ConnectedRMs(subs.cloneRMToServer())
@@ -856,17 +862,18 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 		}
 		cb := callbacks[eng.TopologyChangeSubscriberType(subTypeCopy)]
 		go func() {
-			server.Log("CM TopologyChanged", subTypeCopy, "expects", expected, "Dones")
+			server.DebugLog(subs.logger, "debug", "TopologyChanged. Expecting callbacks.",
+				"type", subTypeCopy, "count", expected)
 			for expected > 0 {
 				success := <-resultChan
 				expected--
 				if !success {
-					server.Log("CM TopologyChanged", subTypeCopy, "failed")
+					server.DebugLog(subs.logger, "debug", "TopologyChanged. Callback failure.", "type", subTypeCopy)
 					cb = nil
 				}
 			}
 			if cb != nil {
-				server.Log("CM TopologyChanged", subTypeCopy, "all done")
+				server.DebugLog(subs.logger, "debug", "TopologyChanged. Callback success.", "type", subTypeCopy)
 				cb()
 			}
 		}()
@@ -875,7 +882,7 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 
 func (subs topologySubscribers) AddSubscriber(subType eng.TopologyChangeSubscriberType, ob eng.TopologySubscriber) {
 	if _, found := subs.subscribers[subType][ob]; found {
-		server.Log(ob, "CM found duplicate add topology subscriber")
+		server.DebugLog(subs.logger, "debug", "Found duplicate add topology subscriber.", "subscriber", ob)
 	} else {
 		subs.subscribers[subType][ob] = server.EmptyStructVal
 	}

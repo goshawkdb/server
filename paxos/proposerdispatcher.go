@@ -2,6 +2,7 @@ package paxos
 
 import (
 	"fmt"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -10,21 +11,24 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 )
 
 type ProposerDispatcher struct {
 	dispatcher.Dispatcher
+	logger           log.Logger
 	proposermanagers []*ProposerManager
 }
 
-func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher) *ProposerDispatcher {
+func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
+		logger:           log.NewContext(logger).With("subsystem", "proposerDispatcher"),
 		proposermanagers: make([]*ProposerManager, count),
 	}
-	pd.Dispatcher.Init(count)
+	logger = log.NewContext(logger).With("subsystem", "proposerManager")
+	pd.Dispatcher.Init(count, logger)
 	for idx, exe := range pd.Executors {
-		pd.proposermanagers[idx] = NewProposerManager(exe, rmId, bootCount, cm, db, varDispatcher)
+		pd.proposermanagers[idx] = NewProposerManager(exe, rmId, bootCount, cm, db, varDispatcher,
+			log.NewContext(logger).With("instance", idx))
 	}
 	pd.loadFromDisk(db)
 	return pd
@@ -119,11 +123,11 @@ func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
 			txnIdCopy := txnId
 			pd.withProposerManager(txnIdCopy, func(pm *ProposerManager) {
 				if err := pm.loadFromData(txnIdCopy, proposerStateCopy); err != nil {
-					log.Printf("ProposerDispatcher error loading %v from disk: %v\n", txnIdCopy, err)
+					panic(fmt.Sprintf("ProposerDispatcher error loading %v from disk: %v\n", txnIdCopy, err))
 				}
 			})
 		}
-		log.Printf("Loaded %v proposers from disk\n", len(proposerStates))
+		pd.logger.Log("msg", "Loaded proposers from disk.", "count", len(proposerStates))
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
@@ -17,13 +18,13 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
 	"math/rand"
 	"sync/atomic"
 	"time"
 )
 
 type TopologyTransmogrifier struct {
+	logger               log.Logger
 	db                   *db.Databases
 	connectionManager    *ConnectionManager
 	localConnection      *client.LocalConnection
@@ -125,8 +126,9 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 	return tt.cellTail.WithCell(ttqc.ccc)
 }
 
-func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
+		logger:            log.NewContext(logger).With("subsystem", "topologyTransmogrifier"),
 		db:                db,
 		connectionManager: cm,
 		localConnection:   lc,
@@ -244,14 +246,14 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 					msgT.done()
 				}
 			case topologyTransmogrifierMsgTopologyObserved:
-				server.Log("Topology: New topology observed:", msgT.topology)
+				server.DebugLog(tt.logger, "debug", "New topology observed.", "topology", msgT.topology)
 				err = tt.setActive(msgT.topology)
 			case topologyTransmogrifierMsgRequestConfigChange:
-				server.Log("Topology: Topology change request:", msgT.config)
+				server.DebugLog(tt.logger, "debug", "Topology change request.", "config", msgT.config)
 				nonFatalErr := tt.selectGoal(&configuration.NextConfiguration{Configuration: msgT.config})
 				// because this is definitely not the cmd-line config, an error here is non-fatal
 				if nonFatalErr != nil {
-					log.Println("Topology: Ignoring requested configuration change:", nonFatalErr)
+					tt.logger.Log("msg", "Ignoring requested configuration change.", "error", err)
 				}
 			case topologyTransmogrifierMsgMigration:
 				err = tt.migrationReceived(msgT)
@@ -272,7 +274,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 			close(tt.localEstablished)
 			tt.localEstablished = nil
 		}
-		log.Println(err)
+		tt.logger.Log("msg", "Fatal error.", "error", err)
 		tt.shutdownSignaller.SignalShutdown()
 	}
 	tt.connectionManager.RemoveServerConnectionSubscriber(tt)
@@ -294,7 +296,7 @@ func (tt *TopologyTransmogrifier) activeConnectionsChange(conns map[common.RMId]
 }
 
 func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) error {
-	server.Log("Topology: setActive:", topology)
+	server.DebugLog(tt.logger, "debug", "SetActive.", "topology", topology)
 	if tt.active != nil {
 		switch {
 		case tt.active.ClusterId != topology.ClusterId && tt.active.ClusterId != "":
@@ -302,8 +304,8 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 				tt.active.ClusterId, topology.ClusterId)
 
 		case topology.Version < tt.active.Version:
-			log.Printf("Topology: Ignoring config with version %v as newer version already active (%v).",
-				topology.Version, tt.active.Version)
+			tt.logger.Log("msg", "Ignoring config with version less than active version.",
+				"goalVersion", topology.Version, "activeVersion", tt.active.Version)
 			return nil
 
 		case tt.active.Configuration.Equal(topology.Configuration):
@@ -330,7 +332,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 				return err
 			}
 			tt.installTopology(topology, nil, localHost, remoteHosts)
-			log.Printf(">==> We are %v (%v) <==<\n", localHost, tt.connectionManager.RMId)
+			tt.logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.connectionManager.RMId)
 
 			future := tt.db.WithEnv(func(env *mdb.Env) (interface{}, error) {
 				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
@@ -354,7 +356,7 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 }
 
 func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func() error, localHost string, remoteHosts []string) {
-	server.Log("Topology: Installing topology to connection manager, et al:", topology)
+	server.DebugLog(tt.logger, "debug", "Installing topology to connection manager, et al.", "topology", topology)
 	if tt.localEstablished != nil {
 		if callbacks == nil {
 			callbacks = make(map[eng.TopologyChangeSubscriberType]func() error)
@@ -403,7 +405,7 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 				goal.Version, tt.active.Version)
 
 		case goal.Configuration.EqualExternally(tt.active.Configuration):
-			log.Printf("Topology: Config transition to version %v completed.", goal.Version)
+			tt.logger.Log("msg", "Config transition completed.", "activeVersion", goal.Version)
 			return nil
 
 		case goal.Version == tt.active.Version:
@@ -427,21 +429,21 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 				goal.Version, existingGoal.Version)
 
 		case goal.Configuration.EqualExternally(existingGoal.Configuration):
-			log.Printf("Topology: Config transition to version %v already in progress.", goal.Version)
+			tt.logger.Log("msg", "Config transition already in progress.", "goalVersion", goal.Version)
 			return nil
 
 		case goal.Version == existingGoal.Version:
 			return fmt.Errorf("Illegal config change: Config has changed but Version has not been increased (%v). Ignoring.", goal.Version)
 
 		default:
-			server.Log("Topology: Abandoning old task")
+			server.DebugLog(tt.logger, "debug", "Abandoning old task.")
 			tt.task.abandon()
 			tt.task = nil
 		}
 	}
 
 	if tt.task == nil {
-		server.Log("Topology: Creating new task")
+		server.DebugLog(tt.logger, "debug", "Creating new task.")
 		tt.task = &targetConfig{
 			TopologyTransmogrifier: tt,
 			config:                 goal,
@@ -505,7 +507,7 @@ func (tt *TopologyTransmogrifier) migrationReceived(migration topologyTransmogri
 func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete topologyTransmogrifierMsgMigrationComplete) error {
 	version := migrationComplete.complete.Version()
 	sender := migrationComplete.sender
-	server.Log("Topology: MCR from", sender, "v", version)
+	server.DebugLog(tt.logger, "debug", "MCR received.", "sender", sender, "version", version)
 	senders, found := tt.migrations[version]
 	if !found {
 		if version > tt.active.Version {
@@ -588,36 +590,36 @@ func (task *targetConfig) tick() error {
 
 	switch {
 	case task.active == nil:
-		log.Println("Topology: Ensuring local topology.")
+		task.logger.Log("msg", "Ensuring local topology.")
 		task.task = &ensureLocalTopology{task}
 
 	case task.active.ClusterId == "":
-		log.Printf("Topology: Attempting to join cluster with configuration: %v", task.config)
+		task.logger.Log("msg", "Attempting to join cluster.", "configuration", task.config)
 		task.task = &joinCluster{targetConfig: task}
 
 	case task.active.NextConfiguration == nil || task.active.NextConfiguration.Version < task.config.Version:
-		log.Printf("Topology: Attempting to install topology change target: %v", task.config)
+		task.logger.Log("msg", "Attempting to install topology change target.", "configuration", task.config)
 		task.task = &installTargetOld{targetConfig: task}
 
 	case task.active.NextConfiguration != nil && task.active.NextConfiguration.Version == task.config.Version:
 		if !task.active.NextConfiguration.InstalledOnNew {
-			log.Printf("Topology: Attempting to install topology change to new cluster: %v", task.config)
+			task.logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", task.config)
 			task.task = &installTargetNew{targetConfig: task}
 
 		} else if !task.active.NextConfiguration.BarrierReached1For(task.connectionManager.RMId) {
-			log.Printf("Topology: Requesting vars go quiet (barrier 1): %v", task.config)
+			task.logger.Log("msg", "Requesting vars go quiet (barrier 1).", "configuration", task.config)
 			task.task = &awaitBarrier1{targetConfig: task}
 
 		} else if !task.active.NextConfiguration.BarrierReached2For(task.connectionManager.RMId) {
-			log.Printf("Topology: Awaiting quiet vars (barrier 2): %v", task.config)
+			task.logger.Log("msg", "Requesting vars go quiet (barrier 2).", "configuration", task.config)
 			task.task = &awaitBarrier2{targetConfig: task}
 
 		} else if len(task.active.NextConfiguration.Pending) > 0 {
-			log.Printf("Topology: Attempting to perform object migration for topology target: %v", task.config)
+			task.logger.Log("msg", "Attempting to perform object migration for topology target.", "configuration", task.config)
 			task.task = &migrate{targetConfig: task}
 
 		} else {
-			log.Printf("Topology: Object migration completed, switching to new topology: %v", task.config)
+			task.logger.Log("msg", "Object migration completed, switching to new topology.", "configuration", task.config)
 			task.task = &installCompletion{targetConfig: task}
 		}
 
@@ -653,20 +655,20 @@ func (task *targetConfig) witness() topologyTask                  { return task 
 func (task *targetConfig) fatal(err error) error {
 	task.ensureRemoveTaskSender()
 	task.task = nil
-	log.Printf("Topology: fatal error: %v", err)
+	task.logger.Log("msg", "Fatal error.", "error", err)
 	return err
 }
 
 func (task *targetConfig) error(err error) error {
 	task.ensureRemoveTaskSender()
 	task.task = nil
-	log.Printf("Topology: error: %v", err)
+	task.logger.Log("msg", "Non-fatal error.", "error", err)
 	return nil
 }
 
 func (task *targetConfig) completed() error {
 	task.ensureRemoveTaskSender()
-	log.Printf("Topology: task completed.")
+	task.logger.Log("msg", "Task completed.")
 	task.task = nil
 	return nil
 }
@@ -869,7 +871,7 @@ func (task *joinCluster) tick() error {
 		// learns of the change. The shareGoalWithAll() call above will
 		// ensure this happens.
 
-		log.Println("Topology: Requesting help from existing cluster members for topology change.")
+		task.logger.Log("msg", "Requesting help from existing cluster members for topology change.")
 		return nil
 	}
 }
@@ -906,7 +908,7 @@ func (task *installTargetOld) tick() error {
 
 	if !task.isInRMs(task.active.RMs) {
 		task.shareGoalWithAll()
-		log.Printf("Topology: Awaiting existing cluster members.")
+		task.logger.Log("msg", "Awaiting existing cluster members.")
 		// this step must be performed by the existing RMs
 		return nil
 	}
@@ -923,8 +925,8 @@ func (task *installTargetOld) tick() error {
 	// Here, we just want to use the RMs in the old topology only.
 	active, passive := task.partitionByActiveConnection(task.active.RMs)
 	if len(active) <= len(passive) {
-		log.Printf("Topology: Can not make progress at this time due to too many failures (failures: %v)",
-			passive)
+		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
 		return nil
 	}
 	// Be careful with this maths. The topology object is on every
@@ -936,7 +938,8 @@ func (task *installTargetOld) tick() error {
 	// add on all new (if there are any) as passives
 	passive = append(passive, targetTopology.NextConfiguration.NewRMIds...)
 
-	log.Printf("Topology: Calculated target topology: %v (new rootsRequired: %v, active: %v, passive: %v)", targetTopology.NextConfiguration, rootsRequired, active, passive)
+	task.logger.Log("msg", "Calculated target topology.", "configuration", targetTopology.NextConfiguration,
+		"newRoots", rootsRequired, "active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	if rootsRequired != 0 {
 		resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
@@ -952,7 +955,7 @@ func (task *installTargetOld) tick() error {
 	}
 
 	targetTopology.EnsureClusterUUId(task.active.ClusterUUId)
-	server.Log("Set cluster uuid", targetTopology.ClusterUUId)
+	server.DebugLog(task.logger, "debug", "Set cluster uuid.", "uuid", targetTopology.ClusterUUId)
 
 	// We use all the nodes in the old cluster as potential
 	// acceptors. We will require a majority of them are alive, which
@@ -962,7 +965,7 @@ func (task *installTargetOld) tick() error {
 	if err != nil {
 		return task.fatal(err)
 	} else if resubmit {
-		server.Log("Topology: Installing to old requires resubmit.")
+		server.DebugLog(task.logger, "debug", "Installing to old requires resubmit.")
 		task.createOrAdvanceBackoff()
 		task.enqueueTick(task, task.targetConfig)
 		return nil
@@ -1221,7 +1224,7 @@ func (task *installTargetNew) tick() error {
 	task.shareGoalWithAll()
 
 	if !task.isInRMs(next.NewRMIds) {
-		log.Printf("Topology: Awaiting new cluster members.")
+		task.logger.Log("msg", "Awaiting new cluster members.")
 		// this step must be performed by the new RMs
 		return nil
 	}
@@ -1233,8 +1236,8 @@ func (task *installTargetNew) tick() error {
 	// them to be alive.
 	active, passive := task.partitionByActiveConnection(next.RMs)
 	if len(active) <= len(passive) {
-		log.Printf("Topology: Can not make progress at this time due to too many failures (next failures: %v)",
-			passive)
+		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
 		return nil
 	}
 
@@ -1245,7 +1248,8 @@ func (task *installTargetNew) tick() error {
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
-	log.Printf("Topology: Installing on new cluster members. Active: %v, Passive: %v", active, passive)
+	task.logger.Log("msg", "Installing on new cluster members.",
+		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	topology := task.active.Clone()
 	topology.NextConfiguration.InstalledOnNew = true
@@ -1254,7 +1258,7 @@ func (task *installTargetNew) tick() error {
 	if err != nil {
 		return task.fatal(err)
 	} else if resubmit {
-		server.Log("Topology: Installing to new requires resubmit.")
+		server.DebugLog(task.logger, "debug", "Installing to new requires resubmit.")
 		task.createOrAdvanceBackoff()
 		task.enqueueTick(task, task.targetConfig)
 		return nil
@@ -1296,8 +1300,8 @@ func (task *awaitBarrier1) tick() error {
 		// again, we use next.RMs
 		active, passive := task.partitionByActiveConnection(next.RMs)
 		if len(active) <= len(passive) {
-			log.Printf("Topology: Can not make progress at this time due to too many failures (next failures: %v)",
-				passive)
+			task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+				"failures", fmt.Sprint(passive))
 			return nil
 		}
 
@@ -1308,7 +1312,8 @@ func (task *awaitBarrier1) tick() error {
 
 		twoFInc := uint16(next.RMs.NonEmptyLen())
 
-		log.Printf("Topology: Barrier1 reached. Active: %v, Passive: %v", active, passive)
+		task.logger.Log("msg", "Barrier1 reached.",
+			"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 		topology := task.active.Clone()
 		next = topology.NextConfiguration
@@ -1318,7 +1323,7 @@ func (task *awaitBarrier1) tick() error {
 		if err != nil {
 			return task.fatal(err)
 		} else if resubmit {
-			server.Log("Topology: Barrier1 reached. Requires resubmit.")
+			server.DebugLog(task.logger, "debug", "Barrier1 reached. Requires resubmit.")
 			task.createOrAdvanceBackoff()
 			task.enqueueTick(task, task.targetConfig)
 		}
@@ -1400,8 +1405,8 @@ func (task *awaitBarrier2) tick() error {
 		// again, we use all new RMs as actives, and F+1 surviving as actives
 		active, passive := task.partitionByActiveConnection(next.RMs)
 		if len(active) <= len(passive) {
-			log.Printf("Topology: Can not make progress at this time due to too many failures (next failures: %v)",
-				passive)
+			task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+				"failures", fmt.Sprint(passive))
 			return nil
 		}
 
@@ -1412,7 +1417,8 @@ func (task *awaitBarrier2) tick() error {
 
 		twoFInc := uint16(next.RMs.NonEmptyLen())
 
-		log.Printf("Topology: Barrier2 reached. Active: %v, Passive: %v", active, passive)
+		task.logger.Log("msg", "Barrier2 reached.",
+			"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 		topology := task.active.Clone()
 		next = topology.NextConfiguration
@@ -1422,7 +1428,7 @@ func (task *awaitBarrier2) tick() error {
 		if err != nil {
 			return task.fatal(err)
 		} else if resubmit {
-			server.Log("Topology: Barrier2 reached. Requires resubmit.")
+			server.DebugLog(task.logger, "debug", "Barrier2 reached. Requires resubmit.")
 			task.createOrAdvanceBackoff()
 			task.enqueueTick(task, task.targetConfig)
 		}
@@ -1479,7 +1485,7 @@ func (task *migrate) tick() error {
 	}
 
 	if _, found := next.Pending[task.connectionManager.RMId]; !found {
-		log.Println("Topology: All migration into all this RM completed. Awaiting others.")
+		task.logger.Log("msg", "All migration into all this RM completed. Awaiting others.")
 		return nil
 	}
 
@@ -1507,8 +1513,8 @@ func (task *migrate) tick() error {
 
 	active, passive := task.partitionByActiveConnection(next.RMs)
 	if len(active) <= len(passive) {
-		log.Printf("Topology: Can not make progress at this time due to too many failures (next failures: %v)",
-			passive)
+		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
 		return nil
 	}
 
@@ -1519,7 +1525,8 @@ func (task *migrate) tick() error {
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
-	log.Printf("Topology: Recording local immigration progress (%v). Active: %v, Passive: %v", next.Pending, active, passive)
+	task.logger.Log("msg", "Recording local immigration progress.", "pending", next.Pending,
+		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	_, _, resubmit, err := task.rewriteTopology(task.active, topology, twoFInc, active, passive)
 	if err != nil {
@@ -1567,12 +1574,12 @@ type installCompletion struct {
 func (task *installCompletion) tick() error {
 	next := task.active.NextConfiguration
 	if next == nil {
-		log.Println("Topology: completion installed")
+		task.logger.Log("msg", "Completion installed.")
 		return task.completed()
 	}
 
 	if _, found := next.RMsRemoved[task.connectionManager.RMId]; found {
-		log.Println("Topology: we've been removed from cluster. Taking no further part.")
+		task.logger.Log("msg", "We've been removed from cluster. Taking no further part.")
 		return nil
 	}
 
@@ -1587,8 +1594,8 @@ func (task *installCompletion) tick() error {
 
 	active, passive := task.partitionByActiveConnection(next.RMs)
 	if len(active) <= len(passive) {
-		log.Printf("Topology: Can not make progress at this time due to too many failures (next failures: %v)",
-			passive)
+		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
 	}
 
 	fInc := ((len(active) + len(passive) - 1) >> 1) + 1
@@ -1784,7 +1791,7 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, t
 	txn := task.createTopologyTransaction(read, write, twoFInc, active, passive)
 
 	// in general, we do backoff locally, so don't pass backoff through here
-	server.Log("Topology: running transaction with active and passive:", active, passive)
+	server.DebugLog(task.logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := task.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
 		return nil, false, false, err
@@ -1793,11 +1800,11 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, t
 	if result.Which() == msgs.OUTCOME_COMMIT {
 		topology := write.Clone()
 		topology.DBVersion = txnId
-		server.Log("Topology Txn Committed ok with txnId", topology.DBVersion)
+		server.DebugLog(task.logger, "debug", "Txn Committed.", "TxnId", topology.DBVersion)
 		return topology, true, false, nil
 	}
 	abort := result.Abort()
-	server.Log("Topology Txn Aborted", txnId)
+	server.DebugLog(task.logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
 		return nil, false, true, nil
 	}
@@ -1836,7 +1843,7 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, t
 }
 
 func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {
-	server.Log("Topology: Creating Roots.")
+	server.DebugLog(task.logger, "debug", "Creating Roots.", "count", rootCount)
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
@@ -1856,7 +1863,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 	}
 	ctxn.SetActions(actions)
 	txnReader, result, err := task.localConnection.RunClientTransaction(&ctxn, nil, nil)
-	server.Log("Create root result", result, err)
+	server.DebugLog(task.logger, "debug", "Created root.", "result", result, "error", err)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1878,7 +1885,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 			positions := action.Create().Positions()
 			root.Positions = (*common.Positions)(&positions)
 		}
-		server.Log("Topology: Roots created in", roots)
+		server.DebugLog(task.logger, "debug", "Roots created.", "roots", roots)
 		return false, roots, nil
 	}
 	if result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT {
@@ -1890,6 +1897,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 // emigrator
 
 type emigrator struct {
+	logger            log.Logger
 	stop              int32
 	db                *db.Databases
 	connectionManager *ConnectionManager
@@ -1900,6 +1908,7 @@ type emigrator struct {
 
 func newEmigrator(task *migrate) *emigrator {
 	e := &emigrator{
+		logger:            task.logger,
 		db:                task.db,
 		connectionManager: task.connectionManager,
 		activeBatches:     make(map[common.RMId]*sendBatch),
@@ -1950,7 +1959,7 @@ func (e *emigrator) startBatches() {
 			continue
 		}
 		if conn, found := e.conns[rmId]; found && e.topology.NextConfiguration.BarrierReached2For(rmId) {
-			log.Println("starting emigration batch for", rmId)
+			e.logger.Log("msg", "Starting emigration batch.", "RMId", rmId)
 			batch := e.newBatch(conn, cond.Cond)
 			e.activeBatches[rmId] = batch
 			batchConds = append(batchConds, batch)
@@ -2084,8 +2093,10 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 	result := make([]*msgs.Var, 0, len(varCaps)>>1)
 	for _, varCap := range varCaps {
 		pos := varCap.Positions()
-		server.Log("Topology: Testing", common.MakeVarUUId(varCap.Id()), (*common.Positions)(&pos), "against condition", cond)
-		if b, err := cond.SatisfiedBy(it.configuration, (*common.Positions)(&pos)); err == nil && b {
+		server.DebugLog(it.logger, "debug", "Testing for condition.",
+			"VarUUId", common.MakeVarUUId(varCap.Id()), "positions", (*common.Positions)(&pos),
+			"condition", cond)
+		if b, err := cond.SatisfiedBy(it.configuration, (*common.Positions)(&pos), it.logger); err == nil && b {
 			result = append(result, varCap)
 		} else if err != nil {
 			return nil, err
@@ -2116,7 +2127,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 			// the completion msg. If it has changed, we rely on the
 			// ConnectionLost being called in the emigrator to do any
 			// necessary tidying up.
-			server.Log("Topology: Sending migration completion to", conn.RMId())
+			server.DebugLog(it.logger, "debug", "Sending migration completion.", "recipient", conn.RMId())
 			conn.Send(bites)
 		}
 	}
@@ -2127,6 +2138,7 @@ func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn paxos.Connect
 }
 
 type sendBatch struct {
+	logger  log.Logger
 	version uint32
 	conn    paxos.Connection
 	cond    configuration.Cond
@@ -2140,6 +2152,7 @@ type migrationElem struct {
 
 func (e *emigrator) newBatch(conn paxos.Connection, cond configuration.Cond) *sendBatch {
 	return &sendBatch{
+		logger:  e.logger,
 		version: e.topology.NextConfiguration.Version,
 		conn:    conn,
 		cond:    cond,
@@ -2170,7 +2183,7 @@ func (sb *sendBatch) flush() {
 	migration.SetElems(elems)
 	msg.SetMigration(migration)
 	bites := server.SegToBytes(seg)
-	server.Log("Topology: Migrating", len(sb.elems), "txns to", sb.conn.RMId())
+	server.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId())
 	sb.conn.Send(bites)
 	sb.elems = sb.elems[:0]
 }

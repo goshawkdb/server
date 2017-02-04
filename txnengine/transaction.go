@@ -3,6 +3,7 @@ package txnengine
 import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
@@ -18,6 +19,7 @@ type TxnLocalStateChange interface {
 }
 
 type Txn struct {
+	logger       log.Logger
 	Id           *common.TxnId
 	Retry        bool
 	writes       []*common.VarUUId
@@ -141,8 +143,8 @@ func (action localAction) String() string {
 	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
 }
 
-func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, varCaps *msgs.Var_List) {
-	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader)
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, varCaps *msgs.Var_List, logger log.Logger) {
+	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
 	txnActions := reader.Actions(true)
 	txn.localActions = make([]localAction, varCaps.Len())
 	actionsMap := make(map[common.VarUUId]*localAction)
@@ -184,12 +186,13 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 	}
 }
 
-func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader) *Txn {
+func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, logger log.Logger) *Txn {
 	txnId := reader.Id
 	actions := reader.Actions(true)
 	actionsList := actions.Actions()
 	txnCap := reader.Txn
 	txn := &Txn{
+		logger:      logger,
 		Id:          txnId,
 		Retry:       txnCap.Retry(),
 		writes:      make([]*common.VarUUId, 0, actionsList.Len()),
@@ -569,7 +572,7 @@ func (talc *txnAwaitLocallyComplete) start() {
 // Callback (from var-dispatcher (frames) back into txn)
 func (talc *txnAwaitLocallyComplete) LocallyComplete() {
 	result := atomic.AddInt32(&talc.activeFramesCount, -1)
-	server.Log(talc.Id, "LocallyComplete called, pending frame count:", result)
+	server.DebugLog(talc.logger, "debug", "LocallyComplete", "TxnId", talc.Id, "pendingFrameCount", result)
 	if result == 0 {
 		talc.exe.Enqueue(talc.locallyComplete)
 	} else if result < 0 {
@@ -601,7 +604,7 @@ func (trc *txnReceiveCompletion) start() {}
 
 // Callback (from network/paxos)
 func (trc *txnReceiveCompletion) CompletionReceived() {
-	server.Log(trc.Id, "CompletionReceived; already completed?", trc.completed, "state:", trc.currentState, "aborted?", trc.aborted)
+	server.DebugLog(trc.logger, "debug", "CompletionReceived", "TxnId", trc.Id, "alreadyCompleted", trc.completed, "currentState", trc.currentState, "aborted", trc.aborted)
 	if trc.completed {
 		// Be silent in this case.
 		return

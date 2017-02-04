@@ -2,6 +2,7 @@ package txnengine
 
 import (
 	"fmt"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
@@ -38,13 +39,15 @@ type VarDispatcher struct {
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection) *VarDispatcher {
+func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection, logger log.Logger) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
-	vd.Dispatcher.Init(count)
+	logger = log.NewContext(logger).With("subsystem", "varManager")
+	vd.Dispatcher.Init(count, logger)
 	for idx, exe := range vd.Executors {
-		vd.varmanagers[idx] = NewVarManager(exe, rmId, cm, db, lc)
+		vd.varmanagers[idx] = NewVarManager(exe, rmId, cm, db, lc,
+			log.NewContext(logger).With("instance", idx))
 	}
 	return vd
 }

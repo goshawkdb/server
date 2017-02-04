@@ -2,37 +2,32 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	capn "github.com/glycerine/go-capnproto"
-	"log"
+	"github.com/go-kit/kit/log"
 	"math/rand"
 	"time"
 )
 
-func CheckFatal(e error) {
+func CheckWarn(e error, logger log.Logger) bool {
 	if e != nil {
-		log.Fatal(e)
-	}
-}
-
-func CheckWarn(e error) bool {
-	if e != nil {
-		log.Println("Warning:", e)
+		logger.Log("msg", "Warning", "error", e)
 		return true
 	}
 	return false
 }
 
-type LogFunc func(...interface{})
+type DebugLogFunc func(log.Logger, ...interface{})
 
-var Log LogFunc = LogFunc(func(elems ...interface{}) {})
+var DebugLog = DebugLogFunc(func(log.Logger, ...interface{}) {})
 
 func SegToBytes(seg *capn.Segment) []byte {
 	if seg == nil {
-		log.Fatal("SegToBytes called with nil segment!")
+		panic("SegToBytes called with nil segment!")
 	}
 	buf := new(bytes.Buffer)
 	if _, err := seg.WriteTo(buf); err != nil {
-		log.Fatal("Error when writing segment to bytes:", err)
+		panic(fmt.Sprintf("Error when writing segment to bytes: %v", err))
 	}
 	return buf.Bytes()
 }

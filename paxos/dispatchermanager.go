@@ -1,6 +1,7 @@
 package paxos
 
 import (
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -16,7 +17,7 @@ type Dispatchers struct {
 	connectionManager  ConnectionManager
 }
 
-func NewDispatchers(cm ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc eng.LocalConnection) *Dispatchers {
+func NewDispatchers(cm ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc eng.LocalConnection, logger log.Logger) *Dispatchers {
 	// It actually doesn't matter at this point what order we start up
 	// the acceptors. This is because we are called from the
 	// ConnectionManager constructor, and its actor loop hasn't been
@@ -27,11 +28,11 @@ func NewDispatchers(cm ConnectionManager, rmId common.RMId, bootCount uint32, co
 
 	d := &Dispatchers{
 		db:                 db,
-		AcceptorDispatcher: NewAcceptorDispatcher(count, rmId, cm, db),
-		VarDispatcher:      eng.NewVarDispatcher(count, rmId, cm, db, lc),
+		AcceptorDispatcher: NewAcceptorDispatcher(count, rmId, cm, db, logger),
+		VarDispatcher:      eng.NewVarDispatcher(count, rmId, cm, db, lc, logger),
 		connectionManager:  cm,
 	}
-	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, bootCount, cm, db, d.VarDispatcher)
+	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, bootCount, cm, db, d.VarDispatcher, logger)
 
 	return d
 }

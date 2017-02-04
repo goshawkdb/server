@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
@@ -926,7 +927,7 @@ func (cs *CondSuppliers) String() string {
 type Cond interface {
 	Equal(Cond) bool
 	AddToSeg(seg *capn.Segment) msgs.Condition
-	SatisfiedBy(config *Configuration, positions *common.Positions) (bool, error)
+	SatisfiedBy(config *Configuration, positions *common.Positions, logger log.Logger) (bool, error)
 }
 
 func conditionFromCap(condCap *msgs.Condition) Cond {
@@ -966,11 +967,11 @@ type Conjunction struct {
 
 func (c *Conjunction) String() string { return fmt.Sprintf("(%v ∧ %v)", c.Left, c.Right) }
 
-func (c *Conjunction) SatisfiedBy(config *Configuration, positions *common.Positions) (bool, error) {
-	if b, err := c.Left.SatisfiedBy(config, positions); err != nil || !b {
+func (c *Conjunction) SatisfiedBy(config *Configuration, positions *common.Positions, logger log.Logger) (bool, error) {
+	if b, err := c.Left.SatisfiedBy(config, positions, logger); err != nil || !b {
 		return b, err
 	}
-	return c.Right.SatisfiedBy(config, positions)
+	return c.Right.SatisfiedBy(config, positions, logger)
 }
 
 func (a *Conjunction) Equal(b Cond) bool {
@@ -1000,11 +1001,11 @@ type Disjunction struct {
 
 func (d *Disjunction) String() string { return fmt.Sprintf("(%v ∨ %v)", d.Left, d.Right) }
 
-func (d *Disjunction) SatisfiedBy(config *Configuration, positions *common.Positions) (bool, error) {
-	if b, err := d.Left.SatisfiedBy(config, positions); err != nil || b {
+func (d *Disjunction) SatisfiedBy(config *Configuration, positions *common.Positions, logger log.Logger) (bool, error) {
+	if b, err := d.Left.SatisfiedBy(config, positions, logger); err != nil || b {
 		return b, err
 	}
-	return d.Right.SatisfiedBy(config, positions)
+	return d.Right.SatisfiedBy(config, positions, logger)
 }
 
 func (a *Disjunction) Equal(b Cond) bool {
@@ -1045,7 +1046,7 @@ func (g *Generator) String() string {
 	return fmt.Sprintf("%v %v (p,RMs%s)[:2F%s+1]", g.RMId, op, which, which)
 }
 
-func (g *Generator) SatisfiedBy(config *Configuration, positions *common.Positions) (bool, error) {
+func (g *Generator) SatisfiedBy(config *Configuration, positions *common.Positions, logger log.Logger) (bool, error) {
 	rms := config.RMs
 	f := config.F
 	if g.UseNext {
@@ -1054,7 +1055,7 @@ func (g *Generator) SatisfiedBy(config *Configuration, positions *common.Positio
 		f = next.F
 	}
 	twoFInc := (uint16(f) * 2) + 1
-	server.Log("Generator:SatisfiedBy:NewResolver:", rms, twoFInc)
+	server.DebugLog(logger, "debug", "Generator. SatisfiedBy. NewResolver.", "RMIds", rms, "2F+1", twoFInc)
 	resolver := ch.NewResolver(rms, twoFInc)
 	perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
 	if err != nil {

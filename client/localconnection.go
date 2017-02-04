@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
@@ -11,12 +12,13 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"log"
+
 	"sync"
 )
 
 type LocalConnection struct {
 	sync.Mutex
+	logger            log.Logger
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(localConnectionMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan localConnectionMsg
@@ -182,7 +184,7 @@ func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
 }
 
 func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	server.Log("LC Received submission outcome for", txn.Id)
+	server.DebugLog(lc.logger, "debug", "Received submission outcome.", "TxnId", txn.Id)
 	lc.enqueueQuery(localConnectionMsgOutcomeReceived{
 		sender:  sender,
 		txn:     txn,
@@ -269,18 +271,19 @@ func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, conn paxos.Co
 	}
 }
 
-func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager) *LocalConnection {
+func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager, logger log.Logger) *LocalConnection {
 	namespace := make([]byte, common.KeyLen)
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
 	lc := &LocalConnection{
+		logger:            log.NewContext(logger).With("subsystem", "localConnection"),
 		rmId:              rmId,
 		connectionManager: cm,
 		namespace:         namespace,
 		nextTxnNumber:     0,
 		nextVarNumber:     0,
 	}
-	lc.submitter = NewSimpleTxnSubmitter(rmId, bootCount, paxos.NewServerConnectionPublisherProxy(lc, cm), lc)
+	lc.submitter = NewSimpleTxnSubmitter(rmId, bootCount, paxos.NewServerConnectionPublisherProxy(lc, cm, lc.logger), lc, lc.logger)
 	var head *cc.ChanCellHead
 	head, lc.cellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
@@ -353,7 +356,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		log.Println("LocalConnection error:", err)
+		lc.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	lc.submitter.Shutdown()
 	lc.cellTail.Terminate()
@@ -363,7 +366,7 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	txn := txnQuery.txn
 	txnId := lc.getNextTxnId()
 	txn.SetId(txnId[:])
-	server.Log("LC starting client txn", txnId)
+	server.DebugLog(lc.logger, "debug", "Starting client txn.", "TxnId", txnId)
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
@@ -376,7 +379,7 @@ func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {
 	if txnId == nil {
 		txnId = lc.getNextTxnId()
 		txn.SetId(txnId[:])
-		server.Log("LC starting txn", txnId)
+		server.DebugLog(lc.logger, "debug", "Starting txn.", "TxnId", txnId)
 	}
 	lc.submitter.SubmitTransaction(txn, txnId, txnQuery.activeRMs, txnQuery.consumer, txnQuery.backoff)
 }

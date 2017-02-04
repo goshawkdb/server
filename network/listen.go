@@ -2,12 +2,14 @@ package network
 
 import (
 	"fmt"
+	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
-	"log"
 	"net"
 )
 
 type Listener struct {
+	logger            log.Logger
+	parentLogger      log.Logger
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(listenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan listenerMsg
@@ -53,7 +55,7 @@ func (l *Listener) enqueueQuery(msg listenerMsg) bool {
 	return l.cellTail.WithCell(lqc.ccc)
 }
 
-func NewListener(listenPort uint16, cm *ConnectionManager) (*Listener, error) {
+func NewListener(listenPort uint16, cm *ConnectionManager, logger log.Logger) (*Listener, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", listenPort))
 	if err != nil {
 		return nil, err
@@ -63,6 +65,8 @@ func NewListener(listenPort uint16, cm *ConnectionManager) (*Listener, error) {
 		return nil, err
 	}
 	l := &Listener{
+		logger:            log.NewContext(logger).With("subsystem", "tcpListener"),
+		parentLogger:      logger,
 		connectionManager: cm,
 		listener:          ln,
 	}
@@ -121,7 +125,7 @@ func (l *Listener) actorLoop(head *cc.ChanCellHead) {
 				err = msgT
 			case *listenerConnMsg:
 				connectionCount++
-				NewConnectionTCPTLSCapnpHandshaker((*net.TCPConn)(msgT), l.connectionManager, connectionCount*2)
+				NewConnectionTCPTLSCapnpHandshaker((*net.TCPConn)(msgT), l.connectionManager, connectionCount*2, l.parentLogger)
 			}
 			terminate = terminate || err != nil
 		} else {
@@ -129,7 +133,7 @@ func (l *Listener) actorLoop(head *cc.ChanCellHead) {
 		}
 	}
 	if err != nil {
-		log.Println("Listen error:", err)
+		l.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	l.cellTail.Terminate()
 	l.listener.Close()

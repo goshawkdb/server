@@ -111,7 +111,7 @@ func (p *proposal) maybeSendOneA() {
 		pi.addOneAToProposal(&proposal, sender)
 	}
 	sender.msg = server.SegToBytes(seg)
-	server.Log(txnId, "Adding sender for 1A")
+	server.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 1A.", "TxnId", txnId)
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -151,7 +151,7 @@ func (p *proposal) maybeSendTwoA() {
 	}
 	twoACap.SetTxn(p.txn.Data)
 	sender.msg = server.SegToBytes(seg)
-	server.Log(p.txn.Id, "Adding sender for 2A")
+	server.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 2A.", "TxnId", p.txn.Id)
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -175,12 +175,13 @@ func (p *proposal) FinishProposing() []common.RMId {
 	for _, pi := range p.instances {
 		if sender := pi.oneASender; sender != nil {
 			pi.oneASender = nil
-			server.Log(p.txn.Id, "finishing sender for 1A")
+			server.DebugLog(p.proposerManager.logger, "debug", "Finishing sender for 1A.", "TxnId", p.txn.Id)
 			sender.finished()
 		}
 		if sender := pi.twoASender; sender != nil {
 			pi.twoASender = nil
-			server.Log(p.txn.Id, pi.ballot.VarUUId, "finishing sender for 2A")
+			server.DebugLog(p.proposerManager.logger, "debug", "Finishing sender for 2A.", "TxnId", p.txn.Id,
+				"VarUUId", pi.ballot.VarUUId)
 			sender.finished()
 		}
 	}
@@ -455,7 +456,7 @@ func (s *proposalSender) instanceComplete(pi *proposalInstance) {
 func (s *proposalSender) finished() {
 	if !s.done {
 		s.done = true
-		server.Log("Removing proposal sender")
+		server.DebugLog(s.proposerManager.logger, "debug", "Removing proposal sender.")
 		s.proposerManager.RemoveServerConnectionSubscriber(s)
 	}
 }
@@ -532,7 +533,8 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 						break
 					}
 					ballots := MakeAbortBallots(s.proposal.txn, &alloc)
-					server.Log(s.proposal.txn.Id, "Trying to abort", rmId, "due to lost submitter", lost, "Found actions:", len(ballots))
+					server.DebugLog(s.proposerManager.logger, "debug", "Trying to abort due to lost submitter.",
+						"TxnId", s.proposal.txn.Id, "RMId", rmId, "lost", lost, "actionCount", len(ballots))
 					s.proposal.abortInstances = append(s.proposal.abortInstances, rmId)
 					s.proposal.proposerManager.NewPaxosProposals(
 						s.txn, s.twoFInc, ballots, s.proposal.acceptors, rmId, false)
@@ -556,7 +558,8 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			}
 		}
 		ballots := MakeAbortBallots(s.proposal.txn, alloc)
-		server.Log(s.proposal.txn.Id, "Trying to abort for", lost, "Found actions:", len(ballots))
+		server.DebugLog(s.proposerManager.logger, "debug", "Trying to abort.", "TxnId", s.proposal.txn.Id,
+			"lost", lost, "actionCount", len(ballots))
 		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
 		s.proposal.proposerManager.NewPaxosProposals(
 			s.txn, s.twoFInc, ballots, s.proposal.acceptors, lost, false)
