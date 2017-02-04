@@ -1,6 +1,7 @@
 package paxos
 
 import (
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -58,14 +59,16 @@ type Actorish interface {
 }
 
 type serverConnectionPublisherProxy struct {
+	logger   log.Logger
 	exe      Actorish
 	upstream ServerConnectionPublisher
 	servers  map[common.RMId]Connection
 	subs     map[ServerConnectionSubscriber]server.EmptyStruct
 }
 
-func NewServerConnectionPublisherProxy(exe Actorish, upstream ServerConnectionPublisher) ServerConnectionPublisher {
+func NewServerConnectionPublisherProxy(exe Actorish, upstream ServerConnectionPublisher, logger log.Logger) ServerConnectionPublisher {
 	pub := &serverConnectionPublisherProxy{
+		logger:   logger,
 		exe:      exe,
 		upstream: upstream,
 		subs:     make(map[ServerConnectionSubscriber]server.EmptyStruct),
@@ -115,7 +118,7 @@ func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.R
 			sub.ConnectionEstablished(gained, conn, servers, done)
 		}
 		go func() {
-			server.Log("ServerConnEstablished Proxy expecting results:", expected)
+			server.DebugLog(pub.logger, "debug", "ServerConnEstablished Proxy expecting callbacks.", "count", expected)
 			for expected > 0 {
 				<-resultChan
 				expected--
@@ -138,22 +141,24 @@ func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.R
 }
 
 type OneShotSender struct {
+	logger    log.Logger
 	remaining map[common.RMId]server.EmptyStruct
 	msg       []byte
 	connPub   ServerConnectionPublisher
 }
 
-func NewOneShotSender(msg []byte, connPub ServerConnectionPublisher, recipients ...common.RMId) *OneShotSender {
+func NewOneShotSender(logger log.Logger, msg []byte, connPub ServerConnectionPublisher, recipients ...common.RMId) *OneShotSender {
 	remaining := make(map[common.RMId]server.EmptyStruct, len(recipients))
 	for _, rmId := range recipients {
 		remaining[rmId] = server.EmptyStructVal
 	}
 	oss := &OneShotSender{
+		logger:    logger,
 		remaining: remaining,
 		msg:       msg,
 		connPub:   connPub,
 	}
-	server.Log(oss, "Adding one shot sender with recipients", recipients)
+	server.DebugLog(oss.logger, "debug", "Adding one shot sender.", "recipients", recipients)
 	connPub.AddServerConnectionSubscriber(oss)
 	return oss
 }
@@ -166,7 +171,7 @@ func (s *OneShotSender) ConnectedRMs(conns map[common.RMId]Connection) {
 		}
 	}
 	if len(s.remaining) == 0 {
-		server.Log(s, "Removing one shot sender")
+		server.DebugLog(s.logger, "debug", "Removing one shot sender.")
 		s.connPub.RemoveServerConnectionSubscriber(s)
 	}
 }
@@ -178,7 +183,7 @@ func (s *OneShotSender) ConnectionEstablished(rmId common.RMId, conn Connection,
 		delete(s.remaining, rmId)
 		conn.Send(s.msg)
 		if len(s.remaining) == 0 {
-			server.Log(s, "Removing one shot sender")
+			server.DebugLog(s.logger, "debug", "Removing one shot sender.")
 			s.connPub.RemoveServerConnectionSubscriber(s) // this is async
 		}
 	}

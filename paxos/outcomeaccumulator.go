@@ -3,6 +3,7 @@ package paxos
 import (
 	"bytes"
 	"fmt"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -14,6 +15,7 @@ import (
 // distinct acceptors which all have equal Clocks, we know we have a
 // consensus on the result.
 type OutcomeAccumulator struct {
+	logger           log.Logger
 	acceptors        common.RMIds
 	acceptorOutcomes map[common.RMId]*acceptorIndexWithTxnOutcome
 	winningOutcome   *txnOutcome
@@ -34,7 +36,7 @@ type txnOutcome struct {
 	outcomeReceivedCount int
 }
 
-func NewOutcomeAccumulator(twoFInc int, acceptors common.RMIds) *OutcomeAccumulator {
+func NewOutcomeAccumulator(twoFInc int, acceptors common.RMIds, logger log.Logger) *OutcomeAccumulator {
 	acceptorOutcomes := make(map[common.RMId]*acceptorIndexWithTxnOutcome, len(acceptors))
 	ids := make([]acceptorIndexWithTxnOutcome, len(acceptors))
 	for idx, rmId := range acceptors {
@@ -43,6 +45,7 @@ func NewOutcomeAccumulator(twoFInc int, acceptors common.RMIds) *OutcomeAccumula
 		acceptorOutcomes[rmId] = ptr
 	}
 	return &OutcomeAccumulator{
+		logger:           logger,
 		acceptors:        acceptors,
 		acceptorOutcomes: acceptorOutcomes,
 		winningOutcome:   nil,
@@ -70,7 +73,7 @@ func (oa *OutcomeAccumulator) TopologyChange(topology *configuration.Topology) b
 	for rmId := range topology.RMsRemoved {
 		if acceptorOutcome, found := oa.acceptorOutcomes[rmId]; found {
 			delete(oa.acceptorOutcomes, rmId)
-			server.Log("OutcomeAccumulator deleting acceptor", rmId)
+			server.DebugLog(oa.logger, "debug", "TopologyChange. OutcomeAccumulator deleting acceptor.", "acceptor", rmId)
 			oa.acceptors[acceptorOutcome.idx] = common.RMIdEmpty
 			if l := oa.acceptors.NonEmptyLen(); l < oa.fInc {
 				oa.fInc = l
@@ -138,7 +141,7 @@ func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outc
 }
 
 func (oa *OutcomeAccumulator) TxnGloballyCompleteReceived(acceptorId common.RMId) bool {
-	server.Log("TGC received from", acceptorId, "; pending:", oa.pendingTGC)
+	server.DebugLog(oa.logger, "debug", "TGC received.", "sender", acceptorId, "pending", oa.pendingTGC)
 	acceptorOutcome, found := oa.acceptorOutcomes[acceptorId]
 	if !found {
 		// It must have been removed due to a topology change. See notes

@@ -53,7 +53,7 @@ func NewProposer(pm *ProposerManager, txn *eng.TxnReader, mode ProposerMode, top
 		twoFInc:         int(txnCap.TwoFInc()),
 	}
 	if mode == ProposerActiveVoter {
-		p.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, p, pm.RMId, txn)
+		p.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, p, pm.RMId, txn, p)
 	}
 	p.init()
 	return p
@@ -88,11 +88,11 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 	return p, nil
 }
 
-func (p *Proposer) Log(keyvals ...interface{}) {
+func (p *Proposer) Log(keyvals ...interface{}) error {
 	if p.logger == nil {
 		p.logger = log.NewContext(p.proposerManager.logger).With("TxnId", p.txnId)
 	}
-	p.logger.Log(keyvals...)
+	return p.logger.Log(keyvals...)
 }
 
 func (p *Proposer) init() {
@@ -148,7 +148,8 @@ func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 	}
 	p.topology = topology
 	rmsRemoved := topology.RMsRemoved
-	server.Log("proposer", p.txnId, "in", p.currentState, "sees loss of", rmsRemoved)
+	server.DebugLog(p, "debug", "TopologyChange.",
+		"currentState", p.currentState, "RMsRemoved", rmsRemoved)
 	if _, found := rmsRemoved[p.proposerManager.RMId]; found {
 		return
 	}
@@ -231,14 +232,14 @@ func (pab *proposerAwaitBallots) String() string {
 
 func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 	if pab.currentState == pab {
-		server.Log(pab.txnId, "TxnBallotsComplete callback. Acceptors:", pab.acceptors)
+		server.DebugLog(pab, "debug", "TxnBallotsComplete callback.", "acceptors", pab.acceptors)
 		if !pab.allAcceptorsAgreed {
 			pab.proposerManager.NewPaxosProposals(pab.txn.TxnReader, pab.twoFInc, ballots, pab.acceptors, pab.proposerManager.RMId, true)
 		}
 		pab.nextState()
 
 	} else if pab.txn.Retry && pab.currentState == &pab.proposerReceiveOutcomes {
-		server.Log(pab.txnId, "TxnBallotsComplete (retry) callback with existing proposals")
+		server.DebugLog(pab, "debug", "TxnBallotsComplete (retry) callback with existing proposals.")
 		if !pab.allAcceptorsAgreed {
 			pab.proposerManager.AddToPaxosProposals(pab.txnId, ballots, pab.proposerManager.RMId)
 		}
@@ -251,7 +252,7 @@ func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 
 func (pab *proposerAwaitBallots) Abort() {
 	if pab.currentState == pab && !pab.allAcceptorsAgreed {
-		server.Log(pab.txnId, "Proposer Aborting")
+		server.DebugLog(pab, "debug", "Proposer Aborting.")
 		txn := pab.txn.TxnReader
 		alloc := AllocForRMId(txn.Txn, pab.proposerManager.RMId)
 		ballots := MakeAbortBallots(txn, alloc)
@@ -290,7 +291,7 @@ type proposerReceiveOutcomes struct {
 
 func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 	pro.Proposer = proposer
-	pro.outcomeAccumulator = NewOutcomeAccumulator(pro.twoFInc, pro.acceptors)
+	pro.outcomeAccumulator = NewOutcomeAccumulator(pro.twoFInc, pro.acceptors, pro.Proposer)
 }
 
 func (pro *proposerReceiveOutcomes) start() {
@@ -309,7 +310,7 @@ func (pro *proposerReceiveOutcomes) String() string {
 }
 
 func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, outcome *msgs.Outcome) {
-	server.Log(pro.txnId, "Ballot outcome received from", sender)
+	server.DebugLog(pro, "debug", "Ballot outcome received.", "sender", sender)
 	if pro.mode == proposerTLCSender {
 		// Consensus already reached and we've been to disk. So this
 		// *must* be a duplicate: safe to ignore.
@@ -332,7 +333,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// abort. Therefore we're abandoning this learner, and
 			// sending TLCs immediately to everyone we've received the
 			// abort outcome from.
-			server.Log(pro.txnId, "abandoning learner with all aborts", knownAcceptors)
+			server.DebugLog(pro, "debug", "Abandoning learner with all aborts.", "knownAcceptors", knownAcceptors)
 			pro.proposerManager.FinishProposers(pro.txnId)
 			pro.proposerManager.TxnFinished(pro.txnId)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
@@ -340,7 +341,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// goes missing, if the acceptor sends us further 2Bs then
 			// we'll send back further TLCs from proposer manager. So the
 			// use of OSS here is correct.
-			NewOneShotSender(tlcMsg, pro.proposerManager, knownAcceptors...)
+			NewOneShotSender(pro.Proposer, tlcMsg, pro.proposerManager, knownAcceptors...)
 			return
 		}
 	}
@@ -374,13 +375,13 @@ func (palc *proposerAwaitLocallyComplete) init(proposer *Proposer) {
 }
 
 func (palc *proposerAwaitLocallyComplete) start() {
-	server.Log(palc.txnId, "Outcome for txn determined")
+	server.DebugLog(palc, "debug", "Outcome for txn determined.")
 	if palc.txn == nil && palc.outcome.Which() == msgs.OUTCOME_COMMIT {
 		// We are a learner (either active or passive), and the result
 		// has turned out to be a commit.
 		txn := eng.TxnReaderFromData(palc.outcome.Txn())
 		pm := palc.proposerManager
-		palc.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, txn)
+		palc.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, txn, palc.Proposer)
 		palc.txn.Start(false)
 	}
 	if palc.txn == nil {
@@ -397,7 +398,7 @@ func (palc *proposerAwaitLocallyComplete) String() string {
 
 func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete(*eng.Txn) {
 	if palc.currentState == palc && !palc.callbackInvoked {
-		server.Log(palc.txnId, "Txn locally completed")
+		server.DebugLog(palc, "debug", "Txn locally completed.")
 		palc.callbackInvoked = true
 		palc.maybeWriteToDisk()
 	}
@@ -463,7 +464,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		prgc.mode = proposerTLCSender
 		tlcMsg := MakeTxnLocallyCompleteMsg(prgc.txnId)
 		prgc.tlcSender = NewRepeatingSender(tlcMsg, prgc.acceptors...)
-		server.Log(prgc.txnId, "Adding TLC Sender to", prgc.acceptors)
+		server.DebugLog(prgc, "debug", "Adding TLC Sender.", "acceptors", prgc.acceptors)
 		prgc.proposerManager.AddServerConnectionSubscriber(prgc.tlcSender)
 	}
 }
@@ -512,7 +513,7 @@ func (paf *proposerAwaitFinished) String() string {
 }
 
 func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
-	server.Log(paf.txnId, "Txn Finished Callback")
+	server.DebugLog(paf, "debug", "Txn Finished Callback.")
 	if paf.currentState == paf {
 		paf.nextState()
 		future := paf.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {

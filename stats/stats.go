@@ -225,17 +225,17 @@ func (cp *configPublisher) publishConfig() error {
 		varPosMap := make(map[common.VarUUId]*common.Positions)
 		varPosMap[*cp.root.VarUUId] = cp.root.Positions
 
-		server.Log("StatsPublisher: Publishing Config:", string(cp.json))
+		server.DebugLog(cp.logger, "debug", "Publishing Config.", "config", string(cp.json))
 		_, result, err := cp.localConnection.RunClientTransaction(&ctxn, varPosMap, nil)
 		if err != nil {
 			return err
 		} else if result == nil { // shutdown
 			return nil
 		} else if result.Which() == msgs.OUTCOME_COMMIT {
-			server.Log("StatsPublisher: Publishing Config committed")
+			server.DebugLog(cp.logger, "debug", "Publishing Config committed.")
 			return nil
 		} else if abort := result.Abort(); abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-			server.Log("StatsPublisher: Publishing Config requires resubmit")
+			server.DebugLog(cp.logger, "debug", "Publishing Config requires resubmit.")
 			backoff := cp.backoff
 			cp.backoff.Advance()
 			cp.backoff.After(func() {
@@ -249,7 +249,7 @@ func (cp *configPublisher) publishConfig() error {
 			})
 			return nil
 		} else {
-			server.Log("StatsPublisher: Publishing Config requires rerun")
+			server.DebugLog(cp.logger, "debug", "Publishing Config requires rerun.")
 			updates := abort.Rerun()
 			found := false
 			var value []byte
@@ -279,10 +279,10 @@ func (cp *configPublisher) publishConfig() error {
 					return err
 				}
 				if inDB.Version > cp.topology.Version {
-					server.Log("StatsPublisher: Existing copy in database is ahead of us. Nothing more to do.")
+					server.DebugLog(cp.logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
 					return nil
 				} else if inDB.Version == cp.topology.Version {
-					server.Log("StatsPublisher: Existing copy in database is at least as up to date as us. Nothing more to do.")
+					server.DebugLog(cp.logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
 					return nil
 				}
 			}

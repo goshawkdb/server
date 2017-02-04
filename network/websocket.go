@@ -436,7 +436,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 
 		cm := wmpc.connectionManager
 		wmpc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, wmpc.rootsVar, wmpc.namespace,
-			paxos.NewServerConnectionPublisherProxy(wmpc.Connection, cm), wmpc.Connection)
+			paxos.NewServerConnectionPublisherProxy(wmpc.Connection, cm, wmpc.logger), wmpc.Connection, wmpc.logger)
 		wmpc.submitter.TopologyChanged(wmpc.topology)
 		wmpc.submitter.ServerConnectionsChanged(servers)
 		return nil
@@ -446,7 +446,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
 	if si := wmpc.submitterIdle; si != nil {
 		wmpc.submitterIdle = nil
-		server.Log("WSS Connection", wmpc, "topologyChanged:", tc, "clearing old:", si)
+		server.DebugLog(wmpc.logger, "debug", "TopologyChanged.", "topology", tc, "clearingSI", si)
 		si.maybeClose()
 	}
 
@@ -455,19 +455,19 @@ func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) 
 
 	if topology != nil {
 		if authenticated, _, roots := wmpc.topology.VerifyPeerCerts(wmpc.peerCerts); !authenticated {
-			server.Log("WSS Connection", wmpc, "topologyChanged", tc, "(client unauthed)")
+			server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", tc)
 			tc.maybeClose()
 			return errors.New("WSS Client connection closed: No client certificate known")
 		} else if len(roots) == len(wmpc.roots) {
 			for name, capsOld := range wmpc.roots {
 				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
-					server.Log("WSS Connection", wmpc, "topologyChanged", tc, "(roots changed)")
+					server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", tc)
 					tc.maybeClose()
 					return errors.New("WSS Client connection closed: roots have changed")
 				}
 			}
 		} else {
-			server.Log("WSS Connection", wmpc, "topologyChanged", tc, "(roots changed)")
+			server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", tc)
 			tc.maybeClose()
 			return errors.New("WSS Client connection closed: roots have changed")
 		}
@@ -477,10 +477,10 @@ func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) 
 		return err
 	}
 	if wmpc.submitter.IsIdle() {
-		server.Log("WSS Connection", wmpc, "topologyChanged", tc, "(client, submitter is idle)")
+		server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Submitter is idle.", "topology", tc)
 		tc.maybeClose()
 	} else {
-		server.Log("WSS Connection", wmpc, "topologyChanged", tc, "(client, submitter not idle)")
+		server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Submitter not idle.", "topology", tc)
 		wmpc.submitterIdle = tc
 	}
 
@@ -518,7 +518,7 @@ func (wmpc *wssMsgPackClient) outcomeReceived(sender common.RMId, txn *eng.TxnRe
 	if wmpc.submitterIdle != nil && wmpc.submitter.IsIdle() {
 		si := wmpc.submitterIdle
 		wmpc.submitterIdle = nil
-		server.Log("Connection", wmpc, "outcomeReceived", si, "(submitterIdle)")
+		server.DebugLog(wmpc.logger, "debug", "OutcomeReceived.", "submitterIdle", si)
 		si.maybeClose()
 	}
 	return err

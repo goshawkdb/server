@@ -184,7 +184,7 @@ func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
 }
 
 func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	server.Log("LC Received submission outcome for", txn.Id)
+	server.DebugLog(lc.logger, "debug", "Received submission outcome.", "TxnId", txn.Id)
 	lc.enqueueQuery(localConnectionMsgOutcomeReceived{
 		sender:  sender,
 		txn:     txn,
@@ -283,7 +283,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 		nextTxnNumber:     0,
 		nextVarNumber:     0,
 	}
-	lc.submitter = NewSimpleTxnSubmitter(rmId, bootCount, paxos.NewServerConnectionPublisherProxy(lc, cm), lc)
+	lc.submitter = NewSimpleTxnSubmitter(rmId, bootCount, paxos.NewServerConnectionPublisherProxy(lc, cm, lc.logger), lc, lc.logger)
 	var head *cc.ChanCellHead
 	head, lc.cellTail = cc.NewChanCellTail(
 		func(n int, cell *cc.ChanCell) {
@@ -366,7 +366,7 @@ func (lc *LocalConnection) runClientTransaction(txnQuery *localConnectionMsgRunC
 	txn := txnQuery.txn
 	txnId := lc.getNextTxnId()
 	txn.SetId(txnId[:])
-	server.Log("LC starting client txn", txnId)
+	server.DebugLog(lc.logger, "debug", "Starting client txn.", "TxnId", txnId)
 	if varPosMap := txnQuery.varPosMap; varPosMap != nil {
 		lc.submitter.EnsurePositions(varPosMap)
 	}
@@ -379,7 +379,7 @@ func (lc *LocalConnection) runTransaction(txnQuery *localConnectionMsgRunTxn) {
 	if txnId == nil {
 		txnId = lc.getNextTxnId()
 		txn.SetId(txnId[:])
-		server.Log("LC starting txn", txnId)
+		server.DebugLog(lc.logger, "debug", "Starting txn.", "TxnId", txnId)
 	}
 	lc.submitter.SubmitTransaction(txn, txnId, txnQuery.activeRMs, txnQuery.consumer, txnQuery.backoff)
 }

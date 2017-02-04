@@ -49,7 +49,7 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
 	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
 	writesClock := VectorClockFromData(varCap.WritesClock(), true).AsMutable()
-	server.Log(v.UUId, "Restored", writeTxnId)
+	server.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
@@ -106,7 +106,7 @@ func (v *Var) RemoveWriteSubscriber(txnId *common.TxnId) {
 }
 
 func (v *Var) ReceiveTxn(action *localAction) {
-	server.Log(v.UUId, "ReceiveTxn", action)
+	server.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
 	if isRead && action.Retry {
@@ -138,7 +138,7 @@ func (v *Var) ReceiveTxn(action *localAction) {
 }
 
 func (v *Var) ReceiveTxnOutcome(action *localAction) {
-	server.Log(v.UUId, "ReceiveTxnOutcome", action)
+	server.DebugLog(v.vm.logger, "debug", "ReceiveTxnOutcome.", "VarUUId", v.UUId, "action", action)
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
 	switch {
@@ -178,7 +178,7 @@ func (v *Var) ReceiveTxnOutcome(action *localAction) {
 }
 
 func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Positions) {
-	server.Log(v.UUId, "SetCurFrame", action)
+	server.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "action", action)
 	v.curFrame = f
 
 	if positions != nil {
@@ -271,7 +271,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 		} else if ran != nil {
 			// Switch back to the right go-routine
 			v.applyToVar(func() {
-				server.Log(v.UUId, "Wrote", f.frameTxnId)
+				server.DebugLog(v.vm.logger, "debug", "Written to disk.", "VarUUId", v.UUId, "TxnId", f.frameTxnId)
 				v.curFrameOnDisk = f
 				for ancestor := f.parent; ancestor != nil && ancestor.DescendentOnDisk(); ancestor = ancestor.parent {
 				}
@@ -282,7 +282,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 }
 
 func (v *Var) TxnGloballyComplete(action *localAction) {
-	server.Log(v.UUId, "Txn globally complete", action)
+	server.DebugLog(v.vm.logger, "debug", "Txn globally complete.", "VarUUId", v.UUId, "action", action)
 	if action.frame.v != v {
 		panic(fmt.Sprintf("%v frame var has changed %p -> %p (%v)", v.UUId, action.frame.v, v, action))
 	}
@@ -322,7 +322,7 @@ func (v *Var) applyToVar(fun func()) {
 			case v1 == nil:
 				panic(fmt.Sprintf("%v not found!", v.UUId))
 			case v1 != v:
-				server.Log(v.UUId, "ignoring callback as var object has changed")
+				server.DebugLog(v.vm.logger, "debug", "Ignoring callback as var object has changed.", "VarUUId", v.UUId)
 				v1.maybeMakeInactive()
 			default:
 				fun()

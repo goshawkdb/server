@@ -17,9 +17,9 @@ func CheckWarn(e error, logger log.Logger) bool {
 	return false
 }
 
-type LogFunc func(...interface{})
+type DebugLogFunc func(log.Logger, ...interface{})
 
-var Log LogFunc = LogFunc(func(elems ...interface{}) {})
+var DebugLog = DebugLogFunc(func(log.Logger, ...interface{}) {})
 
 func SegToBytes(seg *capn.Segment) []byte {
 	if seg == nil {

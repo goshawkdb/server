@@ -34,7 +34,7 @@ type AcceptorManager struct {
 
 func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {
 	am := &AcceptorManager{
-		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm),
+		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm, logger),
 		logger:    logger, // acceptorDispatcher creates the context for us
 		RMId:      rmId,
 		DB:        db,
@@ -167,7 +167,7 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, don
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {
 	instanceRMId := common.RMId(oneATxnVotes.RmId())
-	server.Log(txnId, "1A received from", sender, "; instance:", instanceRMId)
+	server.DebugLog(am.logger, "debug", "1A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -193,13 +193,13 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 	}
 
 	// The proposal senders are repeating, so this use of OSS is fine.
-	NewOneShotSender(server.SegToBytes(replySeg), am, sender)
+	NewOneShotSender(am.logger, server.SegToBytes(replySeg), am, sender)
 }
 
 func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.TxnReader, twoATxnVotes *msgs.TwoATxnVotes) {
 	instanceRMId := common.RMId(twoATxnVotes.RmId())
 	txnId := txn.Id
-	server.Log(txnId, "2A received from", sender, "; instance:", instanceRMId)
+	server.DebugLog(am.logger, "debug", "2A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -242,15 +242,15 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.Txn
 			failure.SetRoundNumber(failureRequests[idx].RoundNumber())
 			failure.SetRoundNumberTooLow(uint32(inst.promiseNum >> 32))
 		}
-		server.Log(txnId, "Sending 2B failures to", sender, "; instance:", instanceRMId)
+		server.DebugLog(am.logger, "debug", "Sending 2B failures.", "TxnId", txnId, "recipient", sender, "instance", instanceRMId)
 		// The proposal senders are repeating, so this use of OSS is fine.
-		NewOneShotSender(server.SegToBytes(replySeg), am, sender)
+		NewOneShotSender(am.logger, server.SegToBytes(replySeg), am, sender)
 	}
 }
 
 func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId *common.TxnId, tlc *msgs.TxnLocallyComplete) {
 	if aInst, found := am.acceptors[*txnId]; found && aInst.acceptor != nil {
-		server.Log(txnId, "TLC received from", sender, "(acceptor found)")
+		server.DebugLog(am.logger, "debug", "TLC received. Acceptor found.", "TxnId", txnId, "sender", sender)
 		aInst.acceptor.TxnLocallyCompleteReceived(sender)
 
 	} else {
@@ -258,28 +258,28 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		// immediately prior to sending TGC, and then died. Now we're
 		// back up, the proposers have sent us more TLCs, and we should
 		// just reply with TGCs.
-		server.Log(txnId, "TLC received from", sender, "(acceptor not found)")
+		server.DebugLog(am.logger, "debug", "TLC received. Acceptor not found.", "TxnId", txnId, "sender", sender)
 		seg := capn.NewBuffer(nil)
 		msg := msgs.NewRootMessage(seg)
 		tgc := msgs.NewTxnGloballyComplete(seg)
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(txnId[:])
-		server.Log(txnId, "Sending single TGC to", sender)
+		server.DebugLog(am.logger, "debug", "Sending single TGC.", "TxnId", txnId, "recipient", sender)
 		// Use of OSS here is ok because this is the default action on
 		// not finding state.
-		NewOneShotSender(server.SegToBytes(seg), am, sender)
+		NewOneShotSender(am.logger, server.SegToBytes(seg), am, sender)
 	}
 }
 
 func (am *AcceptorManager) TxnSubmissionCompleteReceived(sender common.RMId, txnId *common.TxnId, tsc *msgs.TxnSubmissionComplete) {
 	if aInst, found := am.acceptors[*txnId]; found && aInst.acceptor != nil {
-		server.Log(txnId, "TSC received from", sender, "(acceptor found)")
+		server.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "sender", sender)
 		aInst.acceptor.TxnSubmissionCompleteReceived(sender)
 	}
 }
 
 func (am *AcceptorManager) AcceptorFinished(txnId *common.TxnId) {
-	server.Log(txnId, "Acceptor finished")
+	server.DebugLog(am.logger, "debug", "Acceptor finished.", "TxnId", txnId)
 	if aInst, found := am.acceptors[*txnId]; found {
 		delete(am.acceptors, *txnId)
 		for _, instId := range aInst.instances {

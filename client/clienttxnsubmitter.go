@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
@@ -21,8 +22,8 @@ type ClientTxnSubmitter struct {
 	backoff      *server.BinaryBackoffEngine
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish) *ClientTxnSubmitter {
-	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor)
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger) *ClientTxnSubmitter {
+	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, logger)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots, namespace),
@@ -75,7 +76,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			if !resubmit {
 				updates := abort.Rerun()
 				validUpdates := cts.versionCache.UpdateFromAbort(&updates)
-				server.Log("Updates:", updates.Len(), "; valid: ", len(validUpdates))
+				server.DebugLog(cts.logger, "debug", "Txn Outcome.", "TxnId", txnId,
+					"updatesLen", updates.Len(), "validLen", len(validUpdates))
 				resubmit = len(validUpdates) == 0
 				if !resubmit {
 					clientOutcome.SetFinalId(txnId[:])
@@ -84,7 +86,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					return continuation(&clientOutcome, nil)
 				}
 			}
-			server.Log("Resubmitting", txnId, "; orig resubmit?", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
+			server.DebugLog(cts.logger, "debug", "Resubmitting Txn.", "TxnId", txnId,
+				"origResubmit", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
 
 			cts.backoff.Advance()
 			//fmt.Printf("%v ", cts.backoff.Cur)

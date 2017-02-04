@@ -71,7 +71,7 @@ func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Me
 		bootNumber := txnId.BootCount()
 		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			paxos.NewOneShotSender(paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
+			paxos.NewOneShotSender(cm.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
 		} else {
 			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
 			return
@@ -544,7 +544,8 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost) {
 	rmId := connLost.rmId
 	host := connLost.host
-	server.Log("Server Connection reported down:", rmId, host, connLost.restarting, cm.desired)
+	server.DebugLog(cm.logger, "debug", "Server Connection reported down.",
+		"RMId", rmId, "remoteHost", host, "restarting", connLost.restarting, "desired", cm.desired)
 	if cds, found := cm.servers[host]; found {
 		restarting := connLost.restarting
 		if restarting {
@@ -571,7 +572,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 				if cd != nil && cd.Connection == connLost.Connection {
 					cds[idx] = nil
 					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
-						server.Log("Shutting down connection to", rmId)
+						server.DebugLog(cm.logger, "debug", "Shutting down connection.", "RMId", rmId)
 						cd.Shutdown(paxos.Async)
 					}
 				} else if cd != nil {
@@ -622,7 +623,7 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 }
 
 func (cm *ConnectionManager) setTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func()) {
-	server.Log("Topology change:", topology)
+	server.DebugLog(cm.logger, "debug", "Topology change.", "topology", topology)
 	cm.topology = topology
 	cm.topologySubscribers.TopologyChanged(topology, callbacks)
 	cd := cm.rmToServer[cm.RMId]
@@ -814,7 +815,7 @@ func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsg
 		ob.ConnectionEstablished(cd.rmId, cd, rmToServerCopy, done)
 	}
 	go func() {
-		server.Log("ServerConnEstablished expecting results:", expected)
+		server.DebugLog(subs.logger, "debug", "ServerConnEstablished. Expecting callbacks.", "count", expected)
 		for expected > 0 {
 			<-resultChan
 			expected--
@@ -834,7 +835,7 @@ func (subs serverConnSubscribers) ServerConnLost(rmId common.RMId) {
 
 func (subs serverConnSubscribers) AddSubscriber(ob paxos.ServerConnectionSubscriber) {
 	if _, found := subs.subscribers[ob]; found {
-		server.Log(ob, "CM found duplicate add serverConn subscriber")
+		server.DebugLog(subs.logger, "debug", "Found duplicate add serverConn subscriber.", "subscriber", ob)
 	} else {
 		subs.subscribers[ob] = server.EmptyStructVal
 		ob.ConnectedRMs(subs.cloneRMToServer())
@@ -861,17 +862,18 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 		}
 		cb := callbacks[eng.TopologyChangeSubscriberType(subTypeCopy)]
 		go func() {
-			server.Log("CM TopologyChanged", subTypeCopy, "expects", expected, "Dones")
+			server.DebugLog(subs.logger, "debug", "TopologyChanged. Expecting callbacks.",
+				"type", subTypeCopy, "count", expected)
 			for expected > 0 {
 				success := <-resultChan
 				expected--
 				if !success {
-					server.Log("CM TopologyChanged", subTypeCopy, "failed")
+					server.DebugLog(subs.logger, "debug", "TopologyChanged. Callback failure.", "type", subTypeCopy)
 					cb = nil
 				}
 			}
 			if cb != nil {
-				server.Log("CM TopologyChanged", subTypeCopy, "all done")
+				server.DebugLog(subs.logger, "debug", "TopologyChanged. Callback success.", "type", subTypeCopy)
 				cb()
 			}
 		}()
@@ -880,7 +882,7 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 
 func (subs topologySubscribers) AddSubscriber(subType eng.TopologyChangeSubscriberType, ob eng.TopologySubscriber) {
 	if _, found := subs.subscribers[subType][ob]; found {
-		server.Log(ob, "CM found duplicate add topology subscriber")
+		server.DebugLog(subs.logger, "debug", "Found duplicate add topology subscriber.", "subscriber", ob)
 	} else {
 		subs.subscribers[subType][ob] = server.EmptyStructVal
 	}

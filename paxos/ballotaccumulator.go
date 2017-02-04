@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -12,6 +13,7 @@ import (
 )
 
 type BallotAccumulator struct {
+	logger         log.Logger
 	txn            *eng.TxnReader
 	vUUIdToBallots map[common.VarUUId]*varBallot
 	outcome        *outcomeEqualId
@@ -23,9 +25,10 @@ type BallotAccumulator struct {
 // paxos instance namespace is {rmId,varId}. So for each var, we
 // expect to see ballots from fInc distinct rms.
 
-func NewBallotAccumulator(txn *eng.TxnReader) *BallotAccumulator {
+func NewBallotAccumulator(txn *eng.TxnReader, logger log.Logger) *BallotAccumulator {
 	actions := txn.Actions(true).Actions()
 	ba := &BallotAccumulator{
+		logger:         logger,
 		txn:            txn,
 		vUUIdToBallots: make(map[common.VarUUId]*varBallot),
 		outcome:        nil,
@@ -82,8 +85,8 @@ type rmBallot struct {
 	roundNumber  paxosNumber
 }
 
-func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List) *BallotAccumulator {
-	ba := NewBallotAccumulator(txn)
+func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
+	ba := NewBallotAccumulator(txn, logger)
 	ba.outcome = outcome
 
 	for idx, l := 0, instances.Len(); idx < l; idx++ {
@@ -166,7 +169,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 
 	vUUIds := common.VarUUIds(make([]*common.VarUUId, 0, len(ba.vUUIdToBallots)))
 	br := NewBadReads()
-	server.Log(ba.txn.Id, "Calculating result")
+	server.DebugLog(ba.logger, "debug", "determineOutcome")
 	for _, vBallot := range ba.vUUIdToBallots {
 		if len(vBallot.rmToBallot) < vBallot.voters {
 			continue

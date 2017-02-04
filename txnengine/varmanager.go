@@ -62,7 +62,8 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 		if !oldRollAllowed {
 			vm.RollAllowed = topology == nil || !topology.NextConfiguration.BarrierReached1For(vm.RMId)
 		}
-		server.Log("VarManager", fmt.Sprintf("%p", vm), "rollAllowed:", oldRollAllowed, "->", vm.RollAllowed, fmt.Sprintf("%p", topology))
+		server.DebugLog(vm.logger, "debug", "TopologyChanged.",
+			"rollAllowedOld", oldRollAllowed, "rollAllowedNew", vm.RollAllowed, "topology", topology)
 
 		goingToDisk := topology != nil && topology.NextConfiguration.BarrierReached1For(vm.RMId) && !topology.NextConfiguration.BarrierReached2For(vm.RMId)
 
@@ -71,7 +72,7 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 			vm.onDisk = doneWrapped
 			vm.checkAllDisk()
 		} else {
-			server.Log("VarManager", fmt.Sprintf("%p", vm), "calling done", fmt.Sprintf("%p", topology))
+			server.DebugLog(vm.logger, "debug", "TopologyChanged. Calling done.", "topology", topology)
 			doneWrapped(true)
 		}
 	})
@@ -97,7 +98,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var), createIfMissing bool, uuid *com
 	if v == nil && createIfMissing {
 		v = NewVar(uuid, vm.exe, vm.db, vm)
 		vm.active[*v.UUId] = v
-		server.Log(uuid, "New var")
+		server.DebugLog(vm.logger, "debug", "New var.", "VarUUId", uuid)
 	}
 	fun(v)
 	if _, found := vm.active[*uuid]; v != nil && !found && !v.isIdle() {
@@ -112,21 +113,21 @@ func (vm *VarManager) checkAllDisk() {
 		for _, v := range vm.active {
 			if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ && !v.isOnDisk(true) {
 				if !vm.RollAllowed {
-					server.Log("VarManager", fmt.Sprintf("%p", vm), "WTF?! rolls are banned, but have var", v.UUId, "not on disk!")
+					panic(fmt.Sprintf("Rolls are banned, but have var %v not on disk!", v.UUId))
 				}
 				return
 			}
 		}
 		vm.onDisk = nil
 		vm.RollAllowed = false
-		server.Log("VarManager", fmt.Sprintf("%p", vm), "Rolls banned; calling done", fmt.Sprintf("%p", od))
+		server.DebugLog(vm.logger, "debug", "Rolls banned. Calling done.")
 		od(true)
 	}
 }
 
 // var.VarLifecycle interface
 func (vm *VarManager) SetInactive(v *Var) {
-	server.Log(v.UUId, "is now inactive")
+	server.DebugLog(vm.logger, "debug", "Var now inactive.", "VarUUId", v.UUId)
 	v1, found := vm.active[*v.UUId]
 	switch {
 	case !found:
