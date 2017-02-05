@@ -422,7 +422,7 @@ func (wmpc *wssMsgPackClient) RestartDialer() Dialer {
 
 func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 	wmpc.Connection = conn
-	servers := wmpc.connectionManager.ClientEstablished(wmpc.connectionNumber, wmpc)
+	servers, txnLatency, txnResubmit, txnRerun, txnSubmit := wmpc.connectionManager.ClientEstablished(wmpc.connectionNumber, wmpc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
 
@@ -434,7 +434,8 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 
 		cm := wmpc.connectionManager
 		wmpc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, wmpc.rootsVar, wmpc.namespace,
-			paxos.NewServerConnectionPublisherProxy(wmpc.Connection, cm, wmpc.logger), wmpc.Connection, wmpc.logger)
+			paxos.NewServerConnectionPublisherProxy(wmpc.Connection, cm, wmpc.logger), wmpc.Connection,
+			wmpc.logger, txnLatency, txnResubmit, txnRerun, txnSubmit)
 		wmpc.submitter.TopologyChanged(wmpc.topology)
 		wmpc.submitter.ServerConnectionsChanged(servers)
 		return nil

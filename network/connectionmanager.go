@@ -48,6 +48,10 @@ type ConnectionManager struct {
 	localConnection               *client.LocalConnection
 	clientConnsGauge              prometheus.Gauge
 	serverConnsGauge              prometheus.Gauge
+	txnLatency                    prometheus.Histogram
+	txnResubmit                   prometheus.Histogram
+	txnRerun                      prometheus.Counter
+	txnSubmit                     prometheus.Counter
 }
 
 type serverConnSubscribers struct {
@@ -157,10 +161,14 @@ type connectionManagerMsgServerFlushed struct {
 
 type connectionManagerMsgClientEstablished struct {
 	connectionManagerMsgBasic
-	connNumber uint32
-	conn       paxos.ClientConnection
-	servers    map[common.RMId]paxos.Connection
-	resultChan chan struct{}
+	connNumber  uint32
+	conn        paxos.ClientConnection
+	servers     map[common.RMId]paxos.Connection
+	txnLatency  prometheus.Histogram
+	txnResubmit prometheus.Histogram
+	txnRerun    prometheus.Counter
+	txnSubmit   prometheus.Counter
+	resultChan  chan struct{}
 }
 
 type connectionManagerMsgServerConnAddSubscriber struct {
@@ -207,8 +215,12 @@ type connectionManagerMsgStatus struct {
 
 type connectionManagerMsgGauges struct {
 	connectionManagerMsgBasic
-	client prometheus.Gauge
-	server prometheus.Gauge
+	client      prometheus.Gauge
+	server      prometheus.Gauge
+	txnLatency  prometheus.Histogram
+	txnResubmit prometheus.Histogram
+	txnRerun    prometheus.Counter
+	txnSubmit   prometheus.Counter
 }
 
 func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
@@ -249,16 +261,16 @@ func (cm *ConnectionManager) ServerConnectionFlushed(rmId common.RMId) {
 
 // NB client established gets you server connection subscriber too. It
 // does not get you a topology subscriber.
-func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) map[common.RMId]paxos.Connection {
+func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) (map[common.RMId]paxos.Connection, prometheus.Histogram, prometheus.Histogram, prometheus.Counter, prometheus.Counter) {
 	query := &connectionManagerMsgClientEstablished{
 		connNumber: connNumber,
 		conn:       conn,
 		resultChan: make(chan struct{}),
 	}
 	if cm.enqueueSyncQuery(query, query.resultChan) {
-		return query.servers
+		return query.servers, query.txnLatency, query.txnResubmit, query.txnRerun, query.txnSubmit
 	} else {
-		return nil
+		return nil, nil, nil, nil, nil
 	}
 }
 
@@ -337,10 +349,14 @@ func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
 	cm.enqueueQuery(connectionManagerMsgStatus{StatusConsumer: sc})
 }
 
-func (cm *ConnectionManager) SetGauges(client, server prometheus.Gauge) {
+func (cm *ConnectionManager) SetGauges(client, server prometheus.Gauge, txnLatency, txnResubmit prometheus.Histogram, txnRerun, txnSubmit prometheus.Counter) {
 	cm.enqueueQuery(connectionManagerMsgGauges{
-		client: client,
-		server: server,
+		client:      client,
+		server:      server,
+		txnLatency:  txnLatency,
+		txnResubmit: txnResubmit,
+		txnRerun:    txnRerun,
+		txnSubmit:   txnSubmit,
 	})
 }
 
@@ -645,6 +661,10 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 		}
 		cm.Unlock()
 		msg.servers = cm.cloneRMToServer()
+		msg.txnLatency = cm.txnLatency
+		msg.txnResubmit = cm.txnResubmit
+		msg.txnRerun = cm.txnRerun
+		msg.txnSubmit = cm.txnSubmit
 		close(msg.resultChan)
 		cm.serverConnSubscribers.AddSubscriber(msg.conn)
 	} else {
@@ -837,6 +857,11 @@ func (cm *ConnectionManager) setGauges(msg connectionManagerMsgGauges) {
 		}
 	}
 	cm.serverConnsGauge.Set(float64(count))
+
+	cm.txnLatency = msg.txnLatency
+	cm.txnResubmit = msg.txnResubmit
+	cm.txnRerun = msg.txnRerun
+	cm.txnSubmit = msg.txnSubmit
 }
 
 // paxos.Connection interface to allow sending to ourself.

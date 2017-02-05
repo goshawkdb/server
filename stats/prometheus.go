@@ -18,16 +18,20 @@ import (
 )
 
 type PrometheusListener struct {
-	logger              log.Logger
-	cellTail            *cc.ChanCellTail
-	enqueueQueryInner   func(prometheusListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan           <-chan prometheusListenerMsg
-	connectionManager   *network.ConnectionManager
-	listener            *net.TCPListener
-	topology            *configuration.Topology
-	topologyLock        *sync.RWMutex
-	clientConnsGaugeVec *prometheus.GaugeVec
-	serverConnsGaugeVec *prometheus.GaugeVec
+	logger                  log.Logger
+	cellTail                *cc.ChanCellTail
+	enqueueQueryInner       func(prometheusListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan               <-chan prometheusListenerMsg
+	connectionManager       *network.ConnectionManager
+	listener                *net.TCPListener
+	topology                *configuration.Topology
+	topologyLock            *sync.RWMutex
+	clientConnsGaugeVec     *prometheus.GaugeVec
+	serverConnsGaugeVec     *prometheus.GaugeVec
+	txnLatencyHistogramVec  *prometheus.HistogramVec
+	txnResubmitHistogramVec *prometheus.HistogramVec
+	txnRerunCounterVec      *prometheus.CounterVec
+	txnSubmitCounterVec     *prometheus.CounterVec
 }
 
 type prometheusListenerMsg interface {
@@ -185,11 +189,19 @@ func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
 	l.topology = topology
 	l.topologyLock.Unlock()
 
-	clientConnsGauge := l.clientConnsGaugeVec.With(prometheus.Labels{"ClusterId": topology.ClusterId, "RMId": fmt.Sprint(l.connectionManager.RMId)})
+	labels := prometheus.Labels{
+		"ClusterId": topology.ClusterId,
+		"RMId":      fmt.Sprint(l.connectionManager.RMId),
+	}
+	clientConnsGauge := l.clientConnsGaugeVec.With(labels)
+	serverConnsGauge := l.serverConnsGaugeVec.With(labels)
+	txnLatencyHistogram := l.txnLatencyHistogramVec.With(labels)
+	txnResubmitHistogram := l.txnResubmitHistogramVec.With(labels)
+	txnRerunCounter := l.txnRerunCounterVec.With(labels)
+	txnSubmitCounter := l.txnSubmitCounterVec.With(labels)
 
-	serverConnsGauge := l.serverConnsGaugeVec.With(prometheus.Labels{"ClusterId": topology.ClusterId, "RMId": fmt.Sprint(l.connectionManager.RMId)})
-
-	l.connectionManager.SetGauges(clientConnsGauge, serverConnsGauge)
+	l.connectionManager.SetGauges(clientConnsGauge, serverConnsGauge,
+		txnLatencyHistogram, txnResubmitHistogram, txnRerunCounter, txnSubmitCounter)
 }
 
 func (l *PrometheusListener) getTopology() *configuration.Topology {
@@ -265,13 +277,44 @@ func (l *PrometheusListener) initMetrics() {
 	l.clientConnsGaugeVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
 		Name:      "client_connections",
-		Help:      "Current count of live client connections",
+		Help:      "Current count of live client connections.",
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.clientConnsGaugeVec)
+
 	l.serverConnsGaugeVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
 		Name:      "server_connections",
-		Help:      "Current count of live server connections",
+		Help:      "Current count of live server connections.",
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.serverConnsGaugeVec)
+
+	l.txnLatencyHistogramVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: common.ProductName,
+		Name:      "transaction_submit_duration_seconds",
+		Help:      "Time taken to determine transaction outcome.",
+		Buckets:   prometheus.ExponentialBuckets(0.0005, 1.2, 50),
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.txnLatencyHistogramVec)
+
+	l.txnResubmitHistogramVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: common.ProductName,
+		Name:      "submissions_per_transaction",
+		Help:      "Number of times each transaction is internally submitted.",
+		Buckets:   prometheus.ExponentialBuckets(1, 2, 10),
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.txnResubmitHistogramVec)
+
+	l.txnRerunCounterVec = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: common.ProductName,
+		Name:      "transaction_rerun_count",
+		Help:      "Number of times each transaction is returned to the client to be rerun.",
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.txnRerunCounterVec)
+
+	l.txnSubmitCounterVec = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: common.ProductName,
+		Name:      "transaction_submit_count",
+		Help:      "Number of transactions submitted",
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.txnSubmitCounterVec)
 }

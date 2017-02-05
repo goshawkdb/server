@@ -2,6 +2,7 @@ package paxos
 
 import (
 	"github.com/go-kit/kit/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -18,7 +19,8 @@ const (
 type ConnectionManager interface {
 	ServerConnectionPublisher
 	eng.TopologyPublisher
-	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
+	ClientEstablished(connNumber uint32, conn ClientConnection) (map[common.RMId]Connection,
+		prometheus.Histogram, prometheus.Histogram, prometheus.Counter, prometheus.Counter)
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
 }
