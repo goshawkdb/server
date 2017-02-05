@@ -483,21 +483,26 @@ func (tcs *TLSCapnpServer) Send(msg []byte) {
 }
 
 func (tcs *TLSCapnpServer) RestartDialer() Dialer {
-	tcs.internalShutdown(tcs.dialer != nil)
+	tcs.internalShutdown()
+	if restarting := tcs.dialer != nil; restarting {
+		tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, restarting)
+		tcs.TLSCapnpHandshaker.InternalShutdown()
+	}
+
 	return tcs.dialer
 }
 
 func (tcs *TLSCapnpServer) InternalShutdown() {
-	tcs.internalShutdown(false)
+	tcs.internalShutdown()
+	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, false)
+	tcs.TLSCapnpHandshaker.InternalShutdown()
 }
 
-func (tcs *TLSCapnpServer) internalShutdown(restarting bool) {
+func (tcs *TLSCapnpServer) internalShutdown() {
 	if tcs.reader != nil {
 		tcs.reader.stop()
 		tcs.reader = nil
 	}
-	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, restarting)
-	tcs.TLSCapnpHandshaker.InternalShutdown()
 }
 
 func (tcs *TLSCapnpServer) readAndHandleOneMsg() error {
@@ -690,7 +695,6 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) err
 }
 
 func (tcc *TLSCapnpClient) RestartDialer() Dialer {
-	tcc.InternalShutdown()
 	return nil // client connections are never restarted
 }
 

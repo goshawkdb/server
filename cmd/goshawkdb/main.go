@@ -53,8 +53,8 @@ func main() {
 
 func newServer(logger log.Logger) (*server, error) {
 	var configFile, dataDir, certFile string
-	var port, wssPort int
-	var wss, version, genClusterCert, genClientCert bool
+	var port, wssPort, promPort int
+	var wss, prom, version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
@@ -65,6 +65,8 @@ func newServer(logger log.Logger) (*server, error) {
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
 	flag.BoolVar(&wss, "wss", false, "Enable the HTTP and WebSocket service.")
 	flag.IntVar(&wssPort, "wssport", 0, fmt.Sprintf("Port to provide HTTP and WebSocket service on. Implies -wss. (default %d)", common.DefaultWSSPort))
+	flag.BoolVar(&prom, "prometheus", false, "Enable the HTTP Prometheus metrics service.")
+	flag.IntVar(&promPort, "prometheusPort", 0, fmt.Sprintf("Port to provide HTTP for Prometheus metrics service on. Implies -prometheus. (default %d)", common.DefaultPrometheusPort))
 	flag.Parse()
 
 	if version {
@@ -131,6 +133,14 @@ func newServer(logger log.Logger) (*server, error) {
 		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
 	}
 
+	if prom && promPort == 0 {
+		promPort = common.DefaultPrometheusPort
+	}
+	prom = prom || promPort != 0
+	if prom && !(0 < promPort && promPort < 65536 && promPort != port && promPort != wssPort) {
+		return nil, fmt.Errorf("Supplied Prometheus port is illegal (%d). Prometheus Port must be > 0 and < 65536 and not equal to the main communication port (%d) or the WSS Port", promPort, port)
+	}
+
 	s := &server{
 		logger:       logger,
 		configFile:   configFile,
@@ -142,6 +152,9 @@ func newServer(logger log.Logger) (*server, error) {
 	}
 	if wss {
 		s.wssPort = uint16(wssPort)
+	}
+	if prom {
+		s.promPort = uint16(promPort)
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -161,6 +174,7 @@ type server struct {
 	dataDir           string
 	port              uint16
 	wssPort           uint16
+	promPort          uint16
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
@@ -208,6 +222,12 @@ func (s *server) start() {
 		wssListener, err := network.NewWebsocketListener(s.wssPort, cm, s.logger)
 		s.maybeShutdown(err)
 		s.addOnShutdown(wssListener.Shutdown)
+	}
+
+	if s.promPort != 0 {
+		promListener, err := stats.NewPrometheusListener(s.promPort, cm, s.logger)
+		s.maybeShutdown(err)
+		s.addOnShutdown(promListener.Shutdown)
 	}
 
 	defer s.shutdown(nil)

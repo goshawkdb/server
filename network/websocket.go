@@ -274,7 +274,6 @@ func (wl *wrappedWebsocketListener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	return socket, nil
-
 }
 
 var upgrader = websocket.Upgrader{
@@ -418,7 +417,6 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 }
 
 func (wmpc *wssMsgPackClient) RestartDialer() Dialer {
-	wmpc.InternalShutdown()
 	return nil // client connections are never restarted
 }
 
