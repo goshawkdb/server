@@ -649,7 +649,12 @@ func (cm *ConnectionManager) setDesiredServers(localHost string, remote []string
 		if err != nil {
 			return err
 		}
-		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, host, cm.topology.ClusterId)
+		ip := net.ParseIP(host)
+		if ip != nil {
+			host = ""
+		}
+
+		nodeCertPrivKeyPair, err := certs.GenerateNodeCertificatePrivateKeyPair(cm.certificate, host, ip, cm.topology.ClusterId)
 		if err != nil {
 			return err
 		}
