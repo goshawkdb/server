@@ -628,7 +628,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 
 func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 	tcc.Connection = conn
-	servers, txnLatency, txnResubmit, txnRerun, txnSubmit := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
+	servers, metrics := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
 
@@ -644,7 +644,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		cm := tcc.TLSCapnpHandshaker.connectionManager
 		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace,
 			paxos.NewServerConnectionPublisherProxy(tcc.Connection, cm, tcc.logger), tcc.Connection,
-			tcc.logger, txnLatency, txnResubmit, txnRerun, txnSubmit)
+			tcc.logger, metrics)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil

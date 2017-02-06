@@ -311,7 +311,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	topology := lc.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, lc)
 	defer lc.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, lc)
-	servers, _, _, _, _ := lc.connectionManager.ClientEstablished(0, lc)
+	servers, _ := lc.connectionManager.ClientEstablished(0, lc)
 	if servers == nil {
 		panic("LocalConnection failed to register with ConnectionManager!")
 	}

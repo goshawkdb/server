@@ -5,7 +5,6 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
-	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
@@ -22,23 +21,17 @@ type ClientTxnSubmitter struct {
 	versionCache *versionCache
 	txnLive      bool
 	backoff      *server.BinaryBackoffEngine
-	txnLatency   prometheus.Histogram
-	txnResubmit  prometheus.Histogram
-	txnRerun     prometheus.Counter
-	txnSubmit    prometheus.Counter
+	metrics      *paxos.ClientTxnMetrics
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger, txnLatency, txnResubmit prometheus.Histogram, txnRerun, txnSubmit prometheus.Counter) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger, metrics *paxos.ClientTxnMetrics) *ClientTxnSubmitter {
 	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, logger)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots, namespace),
 		txnLive:            false,
 		backoff:            server.NewBinaryBackoffEngine(sts.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
-		txnLatency:         txnLatency,
-		txnResubmit:        txnResubmit,
-		txnRerun:           txnRerun,
-		txnSubmit:          txnSubmit,
+		metrics:            metrics,
 	}
 }
 
@@ -58,8 +51,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		return continuation(nil, err)
 	}
 
-	if cts.txnSubmit != nil {
-		cts.txnSubmit.Inc()
+	if cts.metrics != nil {
+		cts.metrics.TxnSubmit.Inc()
 	}
 	start := time.Now()
 	resubmitCount := 1
@@ -76,8 +69,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			cts.txnLive = false
 			return continuation(nil, err)
 		}
-		if cts.txnLatency != nil {
-			cts.txnLatency.Observe(float64(int64(time.Now().Sub(start))) / float64(time.Second))
+		if cts.metrics != nil {
+			cts.metrics.TxnLatency.Observe(float64(int64(time.Now().Sub(start))) / float64(time.Second))
 		}
 		txnId := txn.Id
 		switch outcome.Which() {
@@ -87,8 +80,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			clientOutcome.SetCommit()
 			cts.addCreatesToCache(txn)
 			cts.txnLive = false
-			if cts.txnResubmit != nil {
-				cts.txnResubmit.Observe(float64(resubmitCount))
+			if cts.metrics != nil {
+				cts.metrics.TxnResubmit.Add(float64(resubmitCount))
 			}
 			return continuation(&clientOutcome, nil)
 
@@ -105,11 +98,9 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetFinalId(txnId[:])
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
-					if cts.txnRerun != nil {
-						cts.txnRerun.Inc()
-					}
-					if cts.txnResubmit != nil {
-						cts.txnResubmit.Observe(float64(resubmitCount))
+					if cts.metrics != nil {
+						cts.metrics.TxnRerun.Inc()
+						cts.metrics.TxnResubmit.Add(float64(resubmitCount))
 					}
 					return continuation(&clientOutcome, nil)
 				}

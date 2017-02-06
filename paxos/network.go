@@ -19,10 +19,16 @@ const (
 type ConnectionManager interface {
 	ServerConnectionPublisher
 	eng.TopologyPublisher
-	ClientEstablished(connNumber uint32, conn ClientConnection) (map[common.RMId]Connection,
-		prometheus.Histogram, prometheus.Histogram, prometheus.Counter, prometheus.Counter)
+	ClientEstablished(connNumber uint32, conn ClientConnection) (map[common.RMId]Connection, *ClientTxnMetrics)
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
+}
+
+type ClientTxnMetrics struct {
+	TxnSubmit   prometheus.Counter
+	TxnLatency  prometheus.Histogram
+	TxnResubmit prometheus.Counter
+	TxnRerun    prometheus.Counter
 }
 
 type ServerConnectionPublisher interface {
