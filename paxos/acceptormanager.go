@@ -8,6 +8,7 @@ import (
 	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
+	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -15,6 +16,7 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
+	"time"
 )
 
 func init() {
@@ -30,6 +32,12 @@ type AcceptorManager struct {
 	instances map[instanceId]*instance
 	acceptors map[common.TxnId]*acceptorInstances
 	Topology  *configuration.Topology
+	metrics   *AcceptorMetrics
+}
+
+type AcceptorMetrics struct {
+	Gauge    prometheus.Gauge
+	Lifespan prometheus.Histogram
 }
 
 func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {
@@ -72,11 +80,17 @@ func (am *AcceptorManager) ensureAcceptor(txn *eng.TxnReader) *Acceptor {
 	case found && aInst.acceptor != nil:
 		return aInst.acceptor
 	case found:
+		if am.metrics != nil {
+			am.metrics.Gauge.Inc()
+		}
 		a := NewAcceptor(txn, am)
 		aInst.acceptor = a
 		a.Start()
 		return a
 	default:
+		if am.metrics != nil {
+			am.metrics.Gauge.Inc()
+		}
 		a := NewAcceptor(txn, am)
 		aInst = &acceptorInstances{acceptor: a}
 		am.acceptors[*txnId] = aInst
@@ -162,6 +176,13 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, don
 		})
 	} else {
 		done(false)
+	}
+}
+
+func (am *AcceptorManager) SetMetrics(metrics *AcceptorMetrics) {
+	am.metrics = metrics
+	if am.metrics != nil {
+		am.metrics.Gauge.Set(float64(len(am.acceptors)))
 	}
 }
 
@@ -282,6 +303,11 @@ func (am *AcceptorManager) AcceptorFinished(txnId *common.TxnId) {
 	server.DebugLog(am.logger, "debug", "Acceptor finished.", "TxnId", txnId)
 	if aInst, found := am.acceptors[*txnId]; found {
 		delete(am.acceptors, *txnId)
+		if am.metrics != nil {
+			am.metrics.Gauge.Dec()
+			elapsed := time.Now().Sub(aInst.acceptor.birthday)
+			am.metrics.Lifespan.Observe(float64(elapsed) / float64(time.Second))
+		}
 		for _, instId := range aInst.instances {
 			delete(am.instances, *instId)
 		}

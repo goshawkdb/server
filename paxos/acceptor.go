@@ -10,12 +10,14 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
+	"time"
 )
 
 type Acceptor struct {
 	logger          log.Logger
 	txnId           *common.TxnId
 	acceptorManager *AcceptorManager
+	birthday        time.Time
 	currentState    acceptorStateMachineComponent
 	acceptorReceiveBallots
 	acceptorWriteToDisk
@@ -27,6 +29,7 @@ func NewAcceptor(txn *eng.TxnReader, am *AcceptorManager) *Acceptor {
 	a := &Acceptor{
 		txnId:           txn.Id,
 		acceptorManager: am,
+		birthday:        time.Now(),
 	}
 	a.init(txn)
 	return a

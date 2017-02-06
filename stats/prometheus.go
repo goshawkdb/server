@@ -19,20 +19,22 @@ import (
 )
 
 type PrometheusListener struct {
-	logger            log.Logger
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(prometheusListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan prometheusListenerMsg
-	connectionManager *network.ConnectionManager
-	listener          *net.TCPListener
-	topology          *configuration.Topology
-	topologyLock      *sync.RWMutex
-	clientConnsVec    *prometheus.GaugeVec
-	serverConnsVec    *prometheus.GaugeVec
-	txnSubmitVec      *prometheus.CounterVec
-	txnLatencyVec     *prometheus.HistogramVec
-	txnResubmitVec    *prometheus.CounterVec
-	txnRerunVec       *prometheus.CounterVec
+	logger              log.Logger
+	cellTail            *cc.ChanCellTail
+	enqueueQueryInner   func(prometheusListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan           <-chan prometheusListenerMsg
+	connectionManager   *network.ConnectionManager
+	listener            *net.TCPListener
+	topology            *configuration.Topology
+	topologyLock        *sync.RWMutex
+	clientConnsVec      *prometheus.GaugeVec
+	serverConnsVec      *prometheus.GaugeVec
+	txnSubmitVec        *prometheus.CounterVec
+	txnLatencyVec       *prometheus.HistogramVec
+	txnResubmitVec      *prometheus.CounterVec
+	txnRerunVec         *prometheus.CounterVec
+	acceptorLifespanVec *prometheus.HistogramVec
+	acceptorsVec        *prometheus.GaugeVec
 }
 
 type prometheusListenerMsg interface {
@@ -210,6 +212,14 @@ func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
 			TxnResubmit: txnResubmit,
 			TxnRerun:    txnRerun,
 		})
+
+	acceptorsGauge := l.acceptorsVec.With(labels)
+	acceptorLifespan := l.acceptorLifespanVec.With(labels)
+	l.connectionManager.Dispatchers.AcceptorDispatcher.SetMetrics(
+		&paxos.AcceptorMetrics{
+			Gauge:    acceptorsGauge,
+			Lifespan: acceptorLifespan,
+		})
 }
 
 func (l *PrometheusListener) getTopology() *configuration.Topology {
@@ -282,20 +292,22 @@ func (pl *wrappedPrometheusListener) Accept() (net.Conn, error) {
 }
 
 func (l *PrometheusListener) initMetrics() {
+	// cm
 	l.clientConnsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
-		Name:      "client_connections",
+		Name:      "client_connections_count",
 		Help:      "Current count of live client connections.",
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.clientConnsVec)
 
 	l.serverConnsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
-		Name:      "server_connections",
+		Name:      "server_connections_count",
 		Help:      "Current count of live server connections.",
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.serverConnsVec)
 
+	// txns
 	l.txnSubmitVec = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: common.ProductName,
 		Name:      "transaction_client_submit_count",
@@ -325,4 +337,19 @@ func (l *PrometheusListener) initMetrics() {
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.txnRerunVec)
 
+	// acceptors
+	l.acceptorsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: common.ProductName,
+		Name:      "acceptors_count",
+		Help:      "Current count of acceptors.",
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.acceptorsVec)
+
+	l.acceptorLifespanVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: common.ProductName,
+		Name:      "acceptor_life_duration_seconds",
+		Help:      "Duration for which each acceptor is alive.",
+		Buckets:   prometheus.ExponentialBuckets(0.001, 1.2, 50),
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.acceptorLifespanVec)
 }

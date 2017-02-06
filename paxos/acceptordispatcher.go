@@ -56,6 +56,13 @@ func (ad *AcceptorDispatcher) TxnSubmissionCompleteReceived(sender common.RMId, 
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TxnSubmissionCompleteReceived(sender, txnId, tsc) })
 }
 
+func (ad *AcceptorDispatcher) SetMetrics(metrics *AcceptorMetrics) {
+	for idx, executor := range ad.Executors {
+		manager := ad.acceptormanagers[idx]
+		executor.Enqueue(func() { manager.SetMetrics(metrics) })
+	}
+}
+
 func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Acceptors")
 	for idx, executor := range ad.Executors {
