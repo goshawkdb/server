@@ -165,7 +165,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 			twoFInc := int(txnCap.TwoFInc())
 			alloc := AllocForRMId(txnCap, pm.RMId)
 			ballots := MakeAbortBallots(txn, alloc)
-			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, true)
+			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, false)
 			// ActiveLearner is right - we don't want the proposer to
 			// vote, but it should exist to collect the 2Bs that should
 			// come back.
@@ -236,7 +236,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 		outcome := twoBTxnVotes.Outcome()
 
 		if proposer, found := pm.proposers[*txnId]; found {
-			server.DebugLog(pm.logger, "debug", "2B outcome received. Known Active.", "TxnId", txnId, "sender", sender)
+			server.DebugLog(pm.logger, "debug", "2B outcome received. Known.", "TxnId", txnId, "sender", sender)
 			proposer.BallotOutcomeReceived(sender, &outcome)
 			return
 		}
