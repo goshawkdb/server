@@ -182,7 +182,7 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, don
 func (am *AcceptorManager) SetMetrics(metrics *AcceptorMetrics) {
 	am.metrics = metrics
 	if am.metrics != nil {
-		am.metrics.Gauge.Set(float64(len(am.acceptors)))
+		am.metrics.Gauge.Add(float64(len(am.acceptors)))
 	}
 }
 

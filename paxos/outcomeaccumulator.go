@@ -126,6 +126,10 @@ func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outc
 	}
 
 	tOut := oa.getOutcome(outcomeEq)
+	if (*msgs.Outcome)(tOut.outcome).Which() != outcome.Which() {
+		panic(fmt.Sprintf("new outcome %v with id %v; found outcome %v with id %v",
+			outcome.Which(), outcomeEq, (*msgs.Outcome)(tOut.outcome).Which(), tOut))
+	}
 	// We've checked for duplicate msgs above, so we don't need to
 	// worry about that here.
 	tOut.outcomeReceivedCount++

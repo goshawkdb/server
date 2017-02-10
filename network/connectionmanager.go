@@ -207,7 +207,7 @@ type connectionManagerMsgStatus struct {
 	*server.StatusConsumer
 }
 
-type connectionManagerMsgGauges struct {
+type connectionManagerMsgMetrics struct {
 	connectionManagerMsgBasic
 	client           prometheus.Gauge
 	server           prometheus.Gauge
@@ -340,8 +340,8 @@ func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
 	cm.enqueueQuery(connectionManagerMsgStatus{StatusConsumer: sc})
 }
 
-func (cm *ConnectionManager) SetGauges(client, server prometheus.Gauge, clientTxnMetrics *paxos.ClientTxnMetrics) {
-	cm.enqueueQuery(connectionManagerMsgGauges{
+func (cm *ConnectionManager) SetMetrics(client, server prometheus.Gauge, clientTxnMetrics *paxos.ClientTxnMetrics) {
+	cm.enqueueQuery(connectionManagerMsgMetrics{
 		client:           client,
 		server:           server,
 		clientTxnMetrics: clientTxnMetrics,
@@ -479,8 +479,8 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 				cm.Transmogrifier.RequestConfigurationChange(msgT.config)
 			case connectionManagerMsgStatus:
 				cm.status(msgT.StatusConsumer)
-			case connectionManagerMsgGauges:
-				cm.setGauges(msgT)
+			case connectionManagerMsgMetrics:
+				cm.setMetrics(msgT)
 			default:
 				err = fmt.Errorf("Fatal to ConnectionManager: Received unexpected message: %#v", msgT)
 			}
@@ -826,7 +826,7 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (cm *ConnectionManager) setGauges(msg connectionManagerMsgGauges) {
+func (cm *ConnectionManager) setMetrics(msg connectionManagerMsgMetrics) {
 	cm.Lock()
 	cm.clientConnsGauge = msg.client
 	cm.clientConnsGauge.Set(float64(len(cm.connCountToClient)))

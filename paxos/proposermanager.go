@@ -7,6 +7,7 @@ import (
 	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
+	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -14,6 +15,7 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
+	"time"
 )
 
 func init() {
@@ -37,6 +39,12 @@ type ProposerManager struct {
 	proposals     map[instanceIdPrefix]*proposal
 	proposers     map[common.TxnId]*Proposer
 	topology      *configuration.Topology
+	metrics       *ProposerMetrics
+}
+
+type ProposerMetrics struct {
+	Gauge    prometheus.Gauge
+	Lifespan prometheus.Histogram
 }
 
 func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {
@@ -88,6 +96,13 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 		})
 	} else {
 		done(false)
+	}
+}
+
+func (pm *ProposerManager) SetMetrics(metrics *ProposerMetrics) {
+	pm.metrics = metrics
+	if pm.metrics != nil {
+		pm.metrics.Gauge.Add(float64(len(pm.proposers)))
 	}
 }
 
@@ -143,9 +158,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 			}
 		}
 		if accept {
-			proposer := NewProposer(pm, txn, ProposerActiveVoter, pm.topology)
-			pm.proposers[*txnId] = proposer
-			proposer.Start()
+			pm.createProposerStart(txn, ProposerActiveVoter, pm.topology)
 
 		} else {
 			acceptors := GetAcceptorsFromTxn(txnCap)
@@ -156,9 +169,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 			// ActiveLearner is right - we don't want the proposer to
 			// vote, but it should exist to collect the 2Bs that should
 			// come back.
-			proposer := NewProposer(pm, txn, ProposerActiveLearner, pm.topology)
-			pm.proposers[*txnId] = proposer
-			proposer.Start()
+			pm.createProposerStart(txn, ProposerActiveLearner, pm.topology)
 		}
 	}
 }
@@ -257,18 +268,14 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			ballots := MakeAbortBallots(txn, alloc)
 			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, false)
 
-			proposer := NewProposer(pm, txn, ProposerActiveLearner, pm.topology)
-			pm.proposers[*txnId] = proposer
-			proposer.Start()
+			proposer := pm.createProposerStart(txn, ProposerActiveLearner, pm.topology)
 			proposer.BallotOutcomeReceived(sender, &outcome)
 		} else {
 			// Not active, so we are a learner
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
 				server.DebugLog(pm.logger, "debug", "2B outcome received. Unknown Learner.", "TxnId", txnId, "sender", sender)
 				// we must be a learner.
-				proposer := NewProposer(pm, txn, ProposerPassiveLearner, pm.topology)
-				pm.proposers[*txnId] = proposer
-				proposer.Start()
+				proposer := pm.createProposerStart(txn, ProposerPassiveLearner, pm.topology)
 				proposer.BallotOutcomeReceived(sender, &outcome)
 
 			} else {
@@ -310,9 +317,24 @@ func (pm *ProposerManager) TxnSubmissionAbortReceived(sender common.RMId, txnId 
 	}
 }
 
+func (pm *ProposerManager) createProposerStart(txn *eng.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
+	proposer := NewProposer(pm, txn, mode, topology)
+	pm.proposers[*txn.Id] = proposer
+	if pm.metrics != nil {
+		pm.metrics.Gauge.Inc()
+	}
+	proposer.Start()
+	return proposer
+}
+
 // from proposer
-func (pm *ProposerManager) TxnFinished(txnId *common.TxnId) {
-	delete(pm.proposers, *txnId)
+func (pm *ProposerManager) TxnFinished(proposer *Proposer) {
+	delete(pm.proposers, *proposer.txnId)
+	if pm.metrics != nil {
+		pm.metrics.Gauge.Dec()
+		elapsed := time.Now().Sub(proposer.birthday)
+		pm.metrics.Lifespan.Observe(float64(elapsed) / float64(time.Second))
+	}
 }
 
 // We have an outcome by this point, so we should stop sending proposals.

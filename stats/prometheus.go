@@ -35,6 +35,8 @@ type PrometheusListener struct {
 	txnRerunVec         *prometheus.CounterVec
 	acceptorLifespanVec *prometheus.HistogramVec
 	acceptorsVec        *prometheus.GaugeVec
+	proposerLifespanVec *prometheus.HistogramVec
+	proposersVec        *prometheus.GaugeVec
 }
 
 type prometheusListenerMsg interface {
@@ -205,7 +207,7 @@ func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
 	txnResubmit := l.txnResubmitVec.With(labels)
 	txnRerun := l.txnRerunVec.With(labels)
 
-	l.connectionManager.SetGauges(clientConns, serverConns,
+	l.connectionManager.SetMetrics(clientConns, serverConns,
 		&paxos.ClientTxnMetrics{
 			TxnSubmit:   txnSubmit,
 			TxnLatency:  txnLatency,
@@ -219,6 +221,14 @@ func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
 		&paxos.AcceptorMetrics{
 			Gauge:    acceptorsGauge,
 			Lifespan: acceptorLifespan,
+		})
+
+	proposersGauge := l.proposersVec.With(labels)
+	proposerLifespan := l.proposerLifespanVec.With(labels)
+	l.connectionManager.Dispatchers.ProposerDispatcher.SetMetrics(
+		&paxos.ProposerMetrics{
+			Gauge:    proposersGauge,
+			Lifespan: proposerLifespan,
 		})
 }
 
@@ -319,7 +329,7 @@ func (l *PrometheusListener) initMetrics() {
 		Namespace: common.ProductName,
 		Name:      "transaction_submit_duration_seconds",
 		Help:      "Time taken to determine transaction outcome.",
-		Buckets:   prometheus.ExponentialBuckets(0.0005, 1.2, 50),
+		Buckets:   prometheus.ExponentialBuckets(0.0005, 1.2, 55),
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.txnLatencyVec)
 
@@ -349,7 +359,23 @@ func (l *PrometheusListener) initMetrics() {
 		Namespace: common.ProductName,
 		Name:      "acceptor_life_duration_seconds",
 		Help:      "Duration for which each acceptor is alive.",
-		Buckets:   prometheus.ExponentialBuckets(0.001, 1.2, 50),
+		Buckets:   prometheus.ExponentialBuckets(0.002, 1.2, 55),
 	}, []string{"ClusterId", "RMId"})
 	prometheus.MustRegister(l.acceptorLifespanVec)
+
+	// proposers
+	l.proposersVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: common.ProductName,
+		Name:      "proposers_count",
+		Help:      "Current count of proposers.",
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.proposersVec)
+
+	l.proposerLifespanVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: common.ProductName,
+		Name:      "proposer_life_duration_seconds",
+		Help:      "Duration for which each proposer is alive.",
+		Buckets:   prometheus.ExponentialBuckets(0.002, 1.2, 55),
+	}, []string{"ClusterId", "RMId"})
+	prometheus.MustRegister(l.proposerLifespanVec)
 }

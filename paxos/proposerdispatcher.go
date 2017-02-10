@@ -81,6 +81,13 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, sta
 	}
 }
 
+func (pd *ProposerDispatcher) SetMetrics(metrics *ProposerMetrics) {
+	for idx, executor := range pd.Executors {
+		manager := pd.proposermanagers[idx]
+		executor.Enqueue(func() { manager.SetMetrics(metrics) })
+	}
+}
+
 func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Proposers")
 	for idx, executor := range pd.Executors {

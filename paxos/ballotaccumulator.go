@@ -189,19 +189,19 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	seg := capn.NewBuffer(nil)
 	outcome := msgs.NewOutcome(seg)
 	outcomeIdList := msgs.NewOutcomeIdList(seg, len(vUUIds))
-	outcome.SetId(outcomeIdList)
 	for idx, vUUId := range vUUIds {
 		outcomeId := outcomeIdList.At(idx)
 		outcomeId.SetVarId(vUUId[:])
 		vBallot := ba.vUUIdToBallots[*vUUId]
 		instanceIdList := msgs.NewAcceptedInstanceIdList(seg, len(vBallot.rmToBallot))
-		outcomeId.SetAcceptedInstances(instanceIdList)
 		for idy, rmBal := range vBallot.rmToBallot {
 			instanceId := instanceIdList.At(idy)
 			instanceId.SetRmId(uint32(rmBal.instanceRMId))
 			instanceId.SetVote(rmBal.ballot.Vote.ToVoteEnum())
 		}
+		outcomeId.SetAcceptedInstances(instanceIdList)
 	}
+	outcome.SetId(outcomeIdList)
 
 	if aborted {
 		outcome.SetTxn(ba.txn.AsDeflated().Data)

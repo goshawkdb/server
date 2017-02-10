@@ -10,6 +10,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
+	"time"
 )
 
 type ProposerMode uint8
@@ -27,6 +28,7 @@ type Proposer struct {
 	mode            ProposerMode
 	txn             *eng.Txn
 	txnId           *common.TxnId
+	birthday        time.Time
 	acceptors       common.RMIds
 	topology        *configuration.Topology
 	twoFInc         int
@@ -48,6 +50,7 @@ func NewProposer(pm *ProposerManager, txn *eng.TxnReader, mode ProposerMode, top
 		proposerManager: pm,
 		mode:            mode,
 		txnId:           txn.Id,
+		birthday:        time.Now(),
 		acceptors:       GetAcceptorsFromTxn(txnCap),
 		topology:        topology,
 		twoFInc:         int(txnCap.TwoFInc()),
@@ -79,6 +82,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 		proposerManager: pm,
 		mode:            proposerTLCSender,
 		txnId:           txnId,
+		birthday:        time.Now(),
 		acceptors:       acceptors,
 		topology:        topology,
 		twoFInc:         -1,
@@ -335,7 +339,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// abort outcome from.
 			server.DebugLog(pro, "debug", "Abandoning learner with all aborts.", "knownAcceptors", knownAcceptors)
 			pro.proposerManager.FinishProposers(pro.txnId)
-			pro.proposerManager.TxnFinished(pro.txnId)
+			pro.proposerManager.TxnFinished(pro.Proposer)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
 			// We are destroying out state here. Thus even if this msg
 			// goes missing, if the acceptor sends us further 2Bs then
@@ -527,7 +531,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 				paf.proposerManager.Exe.Enqueue(func() {
 					paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender)
 					paf.tlcSender = nil
-					paf.proposerManager.TxnFinished(paf.txnId)
+					paf.proposerManager.TxnFinished(paf.Proposer)
 				})
 			}
 		}()
