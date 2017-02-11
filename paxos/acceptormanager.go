@@ -111,6 +111,9 @@ func (am *AcceptorManager) ensureAcceptor(txn *eng.TxnReader) *Acceptor {
 */
 
 func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error {
+	if _, found := am.acceptors[*txnId]; found {
+		panic(fmt.Sprintf("AcceptorManager loadFromData: For %v, acceptor already exists!", txnId))
+	}
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
 		return err
@@ -127,6 +130,9 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	acc := AcceptorFromData(txnId, &outcome, state.SendToAll(), &instances, am)
 	aInst := &acceptorInstances{acceptor: acc}
 	am.acceptors[*txnId] = aInst
+	if am.metrics != nil {
+		am.metrics.Gauge.Inc()
+	}
 
 	for idx, l := 0, instances.Len(); idx < l; idx++ {
 		instancesForVar := instances.At(idx)
@@ -145,6 +151,9 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 			}
 			binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], acceptedInstance.RmId())
 			copy(instIdSlice[common.KeyLen+4:], vUUId[:])
+			if _, found := am.instances[instId]; found {
+				panic(fmt.Sprintf("AcceptorManager loadFromData: For %v, instanceId %v exists twice!", txnId, instId))
+			}
 			am.instances[instId] = instance
 			aInst.addInstance(&instId)
 		}
@@ -180,10 +189,19 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, don
 }
 
 func (am *AcceptorManager) SetMetrics(metrics *AcceptorMetrics) {
-	am.metrics = metrics
-	if am.metrics != nil {
-		am.metrics.Gauge.Add(float64(len(am.acceptors)))
+	count := 0
+	for _, aInst := range am.acceptors {
+		if aInst.acceptor != nil {
+			count++
+		}
 	}
+	if am.metrics != nil {
+		am.metrics.Gauge.Sub(float64(count))
+	}
+	if metrics != nil {
+		metrics.Gauge.Add(float64(count))
+	}
+	am.metrics = metrics
 }
 
 func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {
@@ -301,16 +319,18 @@ func (am *AcceptorManager) TxnSubmissionCompleteReceived(sender common.RMId, txn
 
 func (am *AcceptorManager) AcceptorFinished(txnId *common.TxnId) {
 	server.DebugLog(am.logger, "debug", "Acceptor finished.", "TxnId", txnId)
-	if aInst, found := am.acceptors[*txnId]; found {
-		delete(am.acceptors, *txnId)
-		if am.metrics != nil {
-			am.metrics.Gauge.Dec()
-			elapsed := time.Now().Sub(aInst.acceptor.birthday)
-			am.metrics.Lifespan.Observe(float64(elapsed) / float64(time.Second))
-		}
-		for _, instId := range aInst.instances {
-			delete(am.instances, *instId)
-		}
+	aInst, found := am.acceptors[*txnId]
+	if !found {
+		panic(fmt.Sprintf("AcceptorManager AcceptorFinished: No such acceptor found! %v", txnId))
+	}
+	delete(am.acceptors, *txnId)
+	if aInst.acceptor != nil && am.metrics != nil {
+		am.metrics.Gauge.Dec()
+		elapsed := time.Now().Sub(aInst.acceptor.birthday)
+		am.metrics.Lifespan.Observe(float64(elapsed) / float64(time.Second))
+	}
+	for _, instId := range aInst.instances {
+		delete(am.instances, *instId)
 	}
 }
 

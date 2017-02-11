@@ -65,14 +65,18 @@ func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount ui
 }
 
 func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error {
-	if _, found := pm.proposers[*txnId]; !found {
-		proposer, err := ProposerFromData(pm, txnId, data, pm.topology)
-		if err != nil {
-			return err
-		}
-		pm.proposers[*txnId] = proposer
-		proposer.Start()
+	if _, found := pm.proposers[*txnId]; found {
+		panic(fmt.Sprintf("ProposerManager loadFromData: For %v, proposer already exists!", txnId))
 	}
+	proposer, err := ProposerFromData(pm, txnId, data, pm.topology)
+	if err != nil {
+		return err
+	}
+	pm.proposers[*txnId] = proposer
+	if pm.metrics != nil {
+		pm.metrics.Gauge.Inc()
+	}
+	proposer.Start()
 	return nil
 }
 
@@ -100,10 +104,14 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 }
 
 func (pm *ProposerManager) SetMetrics(metrics *ProposerMetrics) {
-	pm.metrics = metrics
+	l := float64(len(pm.proposers))
 	if pm.metrics != nil {
-		pm.metrics.Gauge.Add(float64(len(pm.proposers)))
+		pm.metrics.Gauge.Sub(l)
 	}
+	if metrics != nil {
+		metrics.Gauge.Add(l)
+	}
+	pm.metrics = metrics
 }
 
 func (pm *ProposerManager) ImmigrationReceived(txn *eng.TxnReader, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {
@@ -165,6 +173,8 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 			twoFInc := int(txnCap.TwoFInc())
 			alloc := AllocForRMId(txnCap, pm.RMId)
 			ballots := MakeAbortBallots(txn, alloc)
+			// We must not skip phase 1 - it's possible in a previous
+			// life we did vote on this.
 			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, false)
 			// ActiveLearner is right - we don't want the proposer to
 			// vote, but it should exist to collect the 2Bs that should
@@ -318,6 +328,9 @@ func (pm *ProposerManager) TxnSubmissionAbortReceived(sender common.RMId, txnId 
 }
 
 func (pm *ProposerManager) createProposerStart(txn *eng.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
+	if _, found := pm.proposers[*txn.Id]; found {
+		panic(fmt.Sprintf("ProposerManager createProposerStart: Proposer for %v already exists!", txn.Id))
+	}
 	proposer := NewProposer(pm, txn, mode, topology)
 	pm.proposers[*txn.Id] = proposer
 	if pm.metrics != nil {
@@ -329,6 +342,10 @@ func (pm *ProposerManager) createProposerStart(txn *eng.TxnReader, mode Proposer
 
 // from proposer
 func (pm *ProposerManager) TxnFinished(proposer *Proposer) {
+	if prop, found := pm.proposers[*proposer.txnId]; !found || prop != proposer {
+		panic(fmt.Sprintf("ProposerManager TxnFinished: No such proposer found! %v %v %v %v",
+			proposer.txnId, proposer, found, prop))
+	}
 	delete(pm.proposers, *proposer.txnId)
 	if pm.metrics != nil {
 		pm.metrics.Gauge.Dec()
@@ -338,7 +355,7 @@ func (pm *ProposerManager) TxnFinished(proposer *Proposer) {
 }
 
 // We have an outcome by this point, so we should stop sending proposals.
-func (pm *ProposerManager) FinishProposers(txnId *common.TxnId) {
+func (pm *ProposerManager) FinishProposals(txnId *common.TxnId) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])

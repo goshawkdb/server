@@ -204,7 +204,10 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 			create := actionCap.Create()
 			value = create.Value()
 			references = create.References()
-		case msgs.ACTION_ROLL: // deliberately do nothing
+		case msgs.ACTION_ROLL:
+			roll := actionCap.Roll()
+			value = roll.Value()
+			references = roll.References()
 		default:
 			panic(fmt.Sprintf("Unexpected action type: %v", actionCap.Which()))
 		}

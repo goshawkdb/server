@@ -10,6 +10,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
+	"os"
 	"time"
 )
 
@@ -338,7 +339,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// sending TLCs immediately to everyone we've received the
 			// abort outcome from.
 			server.DebugLog(pro, "debug", "Abandoning learner with all aborts.", "knownAcceptors", knownAcceptors)
-			pro.proposerManager.FinishProposers(pro.txnId)
+			pro.proposerManager.FinishProposals(pro.txnId)
 			pro.proposerManager.TxnFinished(pro.Proposer)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
 			// We are destroying out state here. Thus even if this msg
@@ -383,6 +384,17 @@ func (palc *proposerAwaitLocallyComplete) start() {
 	if palc.txn == nil && palc.outcome.Which() == msgs.OUTCOME_COMMIT {
 		// We are a learner (either active or passive), and the result
 		// has turned out to be a commit.
+		defer func() {
+			if r := recover(); r != nil {
+				palc.Log("msg", "Recovered!", "error", fmt.Sprint(r), "outcomeWhich", palc.outcome.Which())
+				sc := server.NewStatusConsumer()
+				palc.outcomeAccumulator.Status(sc)
+				sc.Consume(func(str string) {
+					os.Stderr.WriteString(str + "\n")
+				})
+				panic("repanic")
+			}
+		}()
 		txn := eng.TxnReaderFromData(palc.outcome.Txn())
 		pm := palc.proposerManager
 		palc.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, txn, palc.Proposer)
@@ -411,7 +423,7 @@ func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete(*eng.Txn) {
 func (palc *proposerAwaitLocallyComplete) allAcceptorsAgree() {
 	if !palc.allAcceptorsAgreed {
 		palc.allAcceptorsAgreed = true
-		palc.proposerManager.FinishProposers(palc.txnId)
+		palc.proposerManager.FinishProposals(palc.txnId)
 		palc.maybeWriteToDisk()
 	}
 }
