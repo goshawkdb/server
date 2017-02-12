@@ -496,6 +496,7 @@ func (tcs *TLSCapnpServer) InternalShutdown() {
 	tcs.internalShutdown()
 	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
+	tcs.Connection.shutdownComplete()
 }
 
 func (tcs *TLSCapnpServer) internalShutdown() {
@@ -704,10 +705,16 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 		tcc.reader.stop()
 		tcc.reader = nil
 	}
-	if tcc.submitter != nil {
-		tcc.submitter.Shutdown()
+	cont := func() {
+		tcc.submitter = nil
+		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+		tcc.Connection.shutdownComplete()
 	}
-	tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+	if tcc.submitter == nil {
+		cont()
+	} else {
+		tcc.submitter.Shutdown(cont)
+	}
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }
 

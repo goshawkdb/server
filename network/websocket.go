@@ -491,9 +491,15 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 		wmpc.reader.stop()
 		wmpc.reader = nil
 	}
-	if wmpc.submitter != nil {
-		wmpc.submitter.Shutdown()
+	cont := func() {
 		wmpc.submitter = nil
+		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
+		wmpc.Connection.shutdownComplete()
+	}
+	if wmpc.submitter == nil {
+		cont()
+	} else {
+		wmpc.submitter.Shutdown(cont)
 	}
 	if wmpc.beater != nil {
 		wmpc.beater.stop()
@@ -503,7 +509,6 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 		wmpc.socket.Close()
 		wmpc.socket = nil
 	}
-	wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
 }
 
 func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {

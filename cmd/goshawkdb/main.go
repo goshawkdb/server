@@ -15,7 +15,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
-	"goshawkdb.io/server/paxos"
 	"goshawkdb.io/server/stats"
 	"io/ioutil"
 	"math/rand"
@@ -206,7 +205,7 @@ func (s *server) start() {
 	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
-	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
+	s.addOnShutdown(cm.Shutdown)
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.Shutdown)
 	s.connectionManager = cm
@@ -339,8 +338,10 @@ func (s *server) signalDumpStacks() {
 	size := 16384
 	for {
 		buf := make([]byte, size)
-		if l := runtime.Stack(buf, true); l < size {
-			s.logger.Log("msg", "Stacks dump", "stacks", buf[:l])
+		if l := runtime.Stack(buf, true); l <= size {
+			s.logger.Log("msg", "Stacks Dump Start", "RMId", s.rmId)
+			os.Stderr.Write(buf[:l])
+			s.logger.Log("msg", "Stacks Dump End", "RMId", s.rmId)
 			return
 		} else {
 			size += size

@@ -9,13 +9,6 @@ import (
 	eng "goshawkdb.io/server/txnengine"
 )
 
-type Blocking bool
-
-const (
-	Async Blocking = false
-	Sync  Blocking = true
-)
-
 type ConnectionManager interface {
 	ServerConnectionPublisher
 	eng.TopologyPublisher
@@ -58,7 +51,7 @@ type ClientConnection interface {
 }
 
 type Shutdownable interface {
-	Shutdown(sync Blocking)
+	Shutdown()
 }
 
 type Actorish interface {

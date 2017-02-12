@@ -173,10 +173,9 @@ func (lc *LocalConnection) enqueueQuerySync(msg localConnectionMsg, resultChan c
 	}
 }
 
-func (lc *LocalConnection) Shutdown(sync paxos.Blocking) {
-	if lc.enqueueQuery(localConnectionMsgShutdown{}) && sync == paxos.Sync {
-		lc.cellTail.Wait()
-	}
+// async
+func (lc *LocalConnection) Shutdown() {
+	lc.enqueueQuery(localConnectionMsgShutdown{})
 }
 
 func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
@@ -358,7 +357,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	if err != nil {
 		lc.logger.Log("msg", "Fatal error.", "error", err)
 	}
-	lc.submitter.Shutdown()
+	lc.submitter.Shutdown(nil)
 	lc.cellTail.Terminate()
 }
 

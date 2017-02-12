@@ -127,9 +127,7 @@ type connectionManagerMsgBasic struct{}
 
 func (cmmb connectionManagerMsgBasic) witness() connectionManagerMsg { return cmmb }
 
-type connectionManagerMsgShutdown chan struct{}
-
-func (cmms connectionManagerMsgShutdown) witness() connectionManagerMsg { return cmms }
+type connectionManagerMsgShutdown struct{ connectionManagerMsgBasic }
 
 type connectionManagerMsgServerEstablished struct {
 	connectionManagerMsgBasic
@@ -214,12 +212,9 @@ type connectionManagerMsgMetrics struct {
 	clientTxnMetrics *paxos.ClientTxnMetrics
 }
 
-func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
-	c := make(chan struct{})
-	cm.enqueueSyncQuery(connectionManagerMsgShutdown(c), c)
-	if sync == paxos.Sync {
-		<-c
-	}
+func (cm *ConnectionManager) Shutdown() {
+	cm.enqueueSyncQuery(connectionManagerMsgShutdown{}, nil)
+	<-cm.cellTail.Terminated
 }
 
 func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func()) {
@@ -447,12 +442,10 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = cm.queryChan, cell }
 	head.WithCell(chanFun)
 	terminate := false
-	var shutdownChan chan struct{}
 	for !terminate {
 		if msg, ok := <-queryChan; ok {
 			switch msgT := msg.(type) {
 			case connectionManagerMsgShutdown:
-				shutdownChan = msgT
 				terminate = true
 			case *connectionManagerMsgServerEstablished:
 				cm.serverEstablished(msgT)
@@ -496,19 +489,16 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	for _, cds := range cm.servers {
 		for _, cd := range cds {
 			if cd != nil {
-				cd.Shutdown(paxos.Sync)
+				cd.Shutdown()
 			}
 		}
 	}
-	cm.localConnection.Shutdown(paxos.Sync)
+	cm.localConnection.Shutdown()
 	cm.RLock()
 	for _, cc := range cm.connCountToClient {
-		cc.Shutdown(paxos.Sync)
+		cc.Shutdown()
 	}
 	cm.RUnlock()
-	if shutdownChan != nil {
-		close(shutdownChan)
-	}
 }
 
 func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServerEstablished) {
@@ -518,13 +508,13 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 
 	if connEst.rmId == cm.RMId {
 		cm.logger.Log("msg", "RMId collision with ourself detected.", "RMId", cm.RMId, "remoteHost", connEst.host)
-		connEst.Shutdown(paxos.Async)
+		connEst.Shutdown()
 		return
 
 	} else if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.host != cd.host {
 		cm.logger.Log("msg", "RMId collision with remote hosts detected. Restarting both connections.", "RMId", connEst.rmId, "remoteHost1", cd.host, "remoteHost2", connEst.host)
-		cd.Shutdown(paxos.Async)
-		connEst.Shutdown(paxos.Async)
+		cd.Shutdown()
+		connEst.Shutdown()
 		return
 
 	} else if !found {
@@ -604,7 +594,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 					cds[idx] = nil
 					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
 						server.DebugLog(cm.logger, "debug", "Shutting down connection.", "RMId", rmId)
-						cd.Shutdown(paxos.Async)
+						cd.Shutdown()
 					}
 				} else if cd != nil {
 					allNil = false
@@ -746,7 +736,7 @@ func (cm *ConnectionManager) setDesiredServers(localHost string, remote []string
 			delete(cm.servers, host)
 			for _, cd := range cds {
 				if cd != nil && !cd.established {
-					cd.Shutdown(paxos.Async)
+					cd.Shutdown()
 				}
 			}
 		}
@@ -972,9 +962,9 @@ func (cd *connectionManagerMsgServerEstablished) Send(msg []byte) {
 	cd.send(msg)
 }
 
-func (cd *connectionManagerMsgServerEstablished) Shutdown(sync paxos.Blocking) {
+func (cd *connectionManagerMsgServerEstablished) Shutdown() {
 	if cd.Connection != nil {
-		cd.Connection.Shutdown(sync)
+		cd.Connection.Shutdown()
 	}
 }
 
