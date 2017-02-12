@@ -18,6 +18,7 @@ type Acceptor struct {
 	txnId           *common.TxnId
 	acceptorManager *AcceptorManager
 	birthday        time.Time
+	createdFromDisk bool
 	currentState    acceptorStateMachineComponent
 	acceptorReceiveBallots
 	acceptorWriteToDisk
@@ -44,6 +45,7 @@ func AcceptorFromData(txnId *common.TxnId, outcome *msgs.Outcome, sendToAll bool
 	a.sendToAll = sendToAll
 	a.sendToAllOnDisk = sendToAll
 	a.outcomeOnDisk = outcomeEqualId
+	a.createdFromDisk = true
 	return a
 }
 
@@ -75,9 +77,12 @@ func (a *Acceptor) Start() {
 
 func (a *Acceptor) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Acceptor for %v", a.txnId))
+	sc.Emit(fmt.Sprintf("- Born: %v", a.birthday))
+	sc.Emit(fmt.Sprintf("- Created from disk: %v", a.createdFromDisk))
 	sc.Emit(fmt.Sprintf("- Current State: %v", a.currentState))
 	sc.Emit(fmt.Sprintf("- Outcome determined? %v", a.outcome != nil))
 	sc.Emit(fmt.Sprintf("- Pending TLC: %v", a.pendingTLC))
+	sc.Emit(fmt.Sprintf("- Received TLC: %v", a.tlcsReceived))
 	sc.Emit(fmt.Sprintf("- Received TSC: %v", a.tscReceived))
 	a.ballotAccumulator.Status(sc.Fork())
 	sc.Join()
@@ -143,7 +148,7 @@ func (arb *acceptorReceiveBallots) start() {
 	// 2. But consider what happens if the submitter and a proposer are
 	// on the same node which fails: That proposer has local votes and
 	// has sent those votes to us, so we now contain state. But that
-	// node now goes now. The txn never made it to any other node (we
+	// node now goes down. The txn never made it to any other node (we
 	// must be an acceptor, and a learner), so when the node comes back
 	// up, there is no record of it anywhere, other than in any such
 	// acceptor.

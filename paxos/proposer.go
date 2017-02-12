@@ -27,12 +27,14 @@ type Proposer struct {
 	proposerManager *ProposerManager
 	logger          log.Logger
 	mode            ProposerMode
+	initialMode     ProposerMode
 	txn             *eng.Txn
 	txnId           *common.TxnId
 	birthday        time.Time
 	acceptors       common.RMIds
 	topology        *configuration.Topology
 	twoFInc         int
+	createdFromDisk bool
 	currentState    proposerStateMachineComponent
 	proposerAwaitBallots
 	proposerReceiveOutcomes
@@ -50,6 +52,7 @@ func NewProposer(pm *ProposerManager, txn *eng.TxnReader, mode ProposerMode, top
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            mode,
+		initialMode:     mode,
 		txnId:           txn.Id,
 		birthday:        time.Now(),
 		acceptors:       GetAcceptorsFromTxn(txnCap),
@@ -82,11 +85,13 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            proposerTLCSender,
+		initialMode:     proposerTLCSender,
 		txnId:           txnId,
 		birthday:        time.Now(),
 		acceptors:       acceptors,
 		topology:        topology,
 		twoFInc:         -1,
+		createdFromDisk: true,
 	}
 	p.init()
 	p.allAcceptorsAgreed = true
@@ -135,7 +140,10 @@ func (p *Proposer) Start() {
 
 func (p *Proposer) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Proposer for %v", p.txnId))
+	sc.Emit(fmt.Sprintf("- Born: %v", p.birthday))
+	sc.Emit(fmt.Sprintf("- Created from disk: %v", p.createdFromDisk))
 	sc.Emit(fmt.Sprintf("- Mode: %v", p.mode))
+	sc.Emit(fmt.Sprintf("- Initial Mode: %v", p.initialMode))
 	sc.Emit(fmt.Sprintf("- Current state: %v", p.currentState))
 	sc.Emit("- Outcome Accumulator")
 	p.outcomeAccumulator.Status(sc.Fork())

@@ -185,27 +185,37 @@ func (oa *OutcomeAccumulator) getOutcome(outcome *outcomeEqualId) *txnOutcome {
 
 func (oa *OutcomeAccumulator) deleteFromOutcomes(tOut *txnOutcome) {
 	tOut.outcome = nil
+	tOut.acceptors = nil
 }
 
-func (oa *OutcomeAccumulator) IsAllAborts() []common.RMId {
-	count := len(oa.acceptorOutcomes)
+func (oa *OutcomeAccumulator) IsAllAborts() (acceptors []common.RMId) {
 	for _, tOut := range oa.allKnownOutcomes {
-		if tOut.outcome != nil && tOut.outcomeReceivedCount == count && (*msgs.Outcome)(tOut.outcome).Which() == msgs.OUTCOME_ABORT {
-			return tOut.acceptors.NonEmpty()
+		if tOut.outcome != nil {
+			if (*msgs.Outcome)(tOut.outcome).Which() == msgs.OUTCOME_ABORT {
+				// dups are impossible by construction
+				if acceptors == nil {
+					acceptors = make([]common.RMId, 0, len(oa.acceptors))
+				}
+				acceptors = append(acceptors, tOut.acceptors.NonEmpty()...)
+			} else { // if it's not abort, it must be commit
+				return nil
+			}
 		}
 	}
-	return nil
+	return acceptors
 }
 
 func (oa *OutcomeAccumulator) Status(sc *server.StatusConsumer) {
+	sc.Emit(fmt.Sprintf("- acceptor outcomes len: %v", len(oa.acceptorOutcomes)))
 	sc.Emit(fmt.Sprintf("- unique outcomes: %v", oa.allKnownOutcomes))
 	sc.Emit(fmt.Sprintf("- outcome decided? %v", oa.winningOutcome != nil))
 	sc.Emit(fmt.Sprintf("- pending TGC count: %v", oa.pendingTGC))
+	sc.Emit(fmt.Sprintf("- is all aborts? %v", oa.IsAllAborts()))
 	sc.Join()
 }
 
 func (to *txnOutcome) String() string {
-	return fmt.Sprintf("%v:%v", to.outcome, to.acceptors.NonEmpty())
+	return fmt.Sprintf("%v:%v(%v)", to.outcome, to.acceptors.NonEmpty(), to.outcomeReceivedCount)
 }
 
 type outcomeEqualId msgs.Outcome
