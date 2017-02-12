@@ -706,7 +706,6 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 		tcc.reader = nil
 	}
 	cont := func() {
-		tcc.submitter = nil
 		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
 		tcc.Connection.shutdownComplete()
 	}

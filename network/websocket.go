@@ -492,7 +492,6 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 		wmpc.reader = nil
 	}
 	cont := func() {
-		wmpc.submitter = nil
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
 		wmpc.Connection.shutdownComplete()
 	}
