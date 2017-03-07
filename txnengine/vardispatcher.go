@@ -43,11 +43,11 @@ func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *d
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
-	logger = log.NewContext(logger).With("subsystem", "varManager")
+	logger = log.With(logger, "subsystem", "varManager")
 	vd.Dispatcher.Init(count, logger)
 	for idx, exe := range vd.Executors {
 		vd.varmanagers[idx] = NewVarManager(exe, rmId, cm, db, lc,
-			log.NewContext(logger).With("instance", idx))
+			log.With(logger, "instance", idx))
 	}
 	return vd
 }

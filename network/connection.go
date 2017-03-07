@@ -118,13 +118,13 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 }
 
 func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
-	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
+	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
 	dialer := NewTCPDialerForTLSCapnp(remoteHost, cm, logger)
 	return NewConnectionWithDialer(dialer, cm, logger)
 }
 
 func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) *Connection {
-	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "incoming", "protocol", "capnp")
+	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
 	yesman := NewTLSCapnpHandshaker(nil, socket, cm, count, "", logger)
 	return NewConnectionWithHandshaker(yesman, cm, logger)
 }

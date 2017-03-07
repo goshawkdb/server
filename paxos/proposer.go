@@ -100,7 +100,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 
 func (p *Proposer) Log(keyvals ...interface{}) error {
 	if p.logger == nil {
-		p.logger = log.NewContext(p.proposerManager.logger).With("TxnId", p.txnId)
+		p.logger = log.With(p.proposerManager.logger, "TxnId", p.txnId)
 	}
 	return p.logger.Log(keyvals...)
 }

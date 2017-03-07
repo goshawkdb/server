@@ -65,7 +65,7 @@ func NewListener(listenPort uint16, cm *ConnectionManager, logger log.Logger) (*
 		return nil, err
 	}
 	l := &Listener{
-		logger:            log.NewContext(logger).With("subsystem", "tcpListener"),
+		logger:            log.With(logger, "subsystem", "tcpListener"),
 		parentLogger:      logger,
 		connectionManager: cm,
 		listener:          ln,

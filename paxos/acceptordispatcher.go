@@ -22,14 +22,14 @@ type AcceptorDispatcher struct {
 
 func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
-		logger:           log.NewContext(logger).With("subsystem", "acceptorDispatcher"),
+		logger:           log.With(logger, "subsystem", "acceptorDispatcher"),
 		acceptormanagers: make([]*AcceptorManager, count),
 	}
-	logger = log.NewContext(logger).With("subsystem", "acceptorManager")
+	logger = log.With(logger, "subsystem", "acceptorManager")
 	ad.Dispatcher.Init(count, logger)
 	for idx, exe := range ad.Executors {
 		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db,
-			log.NewContext(logger).With("instance", idx))
+			log.With(logger, "instance", idx))
 	}
 	ad.loadFromDisk(db)
 	return ad

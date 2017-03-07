@@ -51,7 +51,7 @@ func AcceptorFromData(txnId *common.TxnId, outcome *msgs.Outcome, sendToAll bool
 
 func (a *Acceptor) Log(keyvals ...interface{}) error {
 	if a.logger == nil {
-		a.logger = log.NewContext(a.acceptorManager.logger).With("TxnId", a.txnId)
+		a.logger = log.With(a.acceptorManager.logger, "TxnId", a.txnId)
 	}
 	return a.logger.Log(keyvals...)
 }

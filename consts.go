@@ -21,4 +21,6 @@ const (
 	MigrationBatchElemCount       = 64
 	PoissonSamples                = 64
 	ConfigRootName                = "system:config"
+	MetricsRootName               = "system:metrics"
+	HttpProfilePort               = 6060
 )

@@ -14,7 +14,7 @@ type Dispatcher struct {
 func (dis *Dispatcher) Init(count uint8, logger log.Logger) {
 	executors := make([]*Executor, count)
 	for idx := range executors {
-		executors[idx] = newExecutor(log.NewContext(logger).With("instance", idx))
+		executors[idx] = newExecutor(log.With(logger, "instance", idx))
 	}
 	dis.Executors = executors
 	dis.ExecutorCount = count

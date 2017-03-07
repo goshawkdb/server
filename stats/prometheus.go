@@ -1,19 +1,17 @@
 package stats
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"goshawkdb.io/common"
+	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
-	"net"
 	"net/http"
 	"sync"
 )
@@ -24,7 +22,7 @@ type PrometheusListener struct {
 	enqueueQueryInner   func(prometheusListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan           <-chan prometheusListenerMsg
 	connectionManager   *network.ConnectionManager
-	listener            *net.TCPListener
+	mux                 *network.HttpListenerWithMux
 	topology            *configuration.Topology
 	topologyLock        *sync.RWMutex
 	clientConnsVec      *prometheus.GaugeVec
@@ -42,13 +40,6 @@ type PrometheusListener struct {
 type prometheusListenerMsg interface {
 	prometheusListenerMsgWitness()
 }
-
-type prometheusListenerMsgAcceptError struct {
-	listener *net.TCPListener
-	err      error
-}
-
-func (lae prometheusListenerMsgAcceptError) prometheusListenerMsgWitness() {}
 
 type prometheusListenerMsgShutdown struct{}
 
@@ -109,18 +100,10 @@ func (l *PrometheusListener) enqueueQuery(msg prometheusListenerMsg) bool {
 	return l.cellTail.WithCell(wlqc.ccc)
 }
 
-func NewPrometheusListener(listenPort uint16, cm *network.ConnectionManager, logger log.Logger) (*PrometheusListener, error) {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", listenPort))
-	if err != nil {
-		return nil, err
-	}
-	ln, err := net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
-		return nil, err
-	}
+func NewPrometheusListener(mux *network.HttpListenerWithMux, cm *network.ConnectionManager, logger log.Logger) *PrometheusListener {
 	l := &PrometheusListener{
-		logger:            log.NewContext(logger).With("subsystem", "prometheusListener"),
-		listener:          ln,
+		logger:            log.With(logger, "subsystem", "prometheusListener"),
+		mux:               mux,
 		connectionManager: cm,
 		topologyLock:      new(sync.RWMutex),
 	}
@@ -145,7 +128,7 @@ func NewPrometheusListener(listenPort uint16, cm *network.ConnectionManager, log
 		})
 
 	go l.actorLoop(head)
-	return l, nil
+	return l
 }
 
 func (l *PrometheusListener) actorLoop(head *cc.ChanCellHead) {
@@ -154,7 +137,7 @@ func (l *PrometheusListener) actorLoop(head *cc.ChanCellHead) {
 	topology := l.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, l)
 	defer l.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, l)
 	l.putTopology(topology)
-	go l.acceptLoop()
+	l.configureMux()
 
 	var (
 		err       error
@@ -169,10 +152,6 @@ func (l *PrometheusListener) actorLoop(head *cc.ChanCellHead) {
 			switch msgT := msg.(type) {
 			case *prometheusListenerMsgShutdown:
 				terminate = true
-			case prometheusListenerMsgAcceptError:
-				if msgT.listener == l.listener {
-					err = msgT.err
-				}
 			case *prometheusListenerMsgTopologyChanged:
 				l.putTopology(msgT.topology)
 				msgT.maybeClose()
@@ -186,7 +165,6 @@ func (l *PrometheusListener) actorLoop(head *cc.ChanCellHead) {
 		l.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	l.cellTail.Terminate()
-	l.listener.Close()
 }
 
 func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
@@ -238,67 +216,22 @@ func (l *PrometheusListener) getTopology() *configuration.Topology {
 	return l.topology
 }
 
-func (l *PrometheusListener) acceptLoop() {
-	nodeCertPrivKeyPair := l.connectionManager.NodeCertificatePrivateKeyPair()
-	roots := x509.NewCertPool()
-	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{
-			tls.Certificate{
-				Certificate: [][]byte{nodeCertPrivKeyPair.Certificate},
-				PrivateKey:  nodeCertPrivKeyPair.PrivateKey,
-			},
-		},
-		CipherSuites:             []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
-		MinVersion:               tls.VersionTLS12,
-		PreferServerCipherSuites: true,
-		ClientCAs:                roots,
-		RootCAs:                  roots,
-		ClientAuth:               tls.RequireAnyClientCert,
-		NextProtos:               []string{"h2", "http/1.1"},
-	}
-
+func (l *PrometheusListener) configureMux() {
 	promHandler := promhttp.Handler()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
+	l.mux.HandleFunc(fmt.Sprintf("/%s", server.MetricsRootName), func(w http.ResponseWriter, req *http.Request) {
 		peerCerts := req.TLS.PeerCertificates
-		if authenticated, _, _ := l.getTopology().VerifyPeerCerts(peerCerts); authenticated {
-			promHandler.ServeHTTP(w, req)
-		} else {
-			l.logger.Log("type", "client", "authentication", "failure")
-			w.WriteHeader(http.StatusForbidden)
+		if authenticated, _, roots := l.getTopology().VerifyPeerCerts(peerCerts); authenticated {
+			if _, found := roots[server.MetricsRootName]; found {
+				promHandler.ServeHTTP(w, req)
+				return
+			}
 		}
+		l.logger.Log("type", "client", "authentication", "failure")
+		w.WriteHeader(http.StatusForbidden)
 	})
 
-	s := &http.Server{
-		ReadTimeout:  common.HeartbeatInterval * 2,
-		WriteTimeout: common.HeartbeatInterval * 2,
-		Handler:      mux,
-	}
-
-	listener := l.listener
-	tlsListener := tls.NewListener(&wrappedPrometheusListener{TCPListener: listener}, tlsConfig)
-	l.enqueueQuery(prometheusListenerMsgAcceptError{
-		err:      s.Serve(tlsListener),
-		listener: listener,
-	})
-}
-
-type wrappedPrometheusListener struct {
-	*net.TCPListener
-}
-
-func (pl *wrappedPrometheusListener) Accept() (net.Conn, error) {
-	socket, err := pl.AcceptTCP()
-	if err != nil {
-		return nil, err
-	}
-	if err = common.ConfigureSocket(socket); err != nil {
-		return nil, err
-	}
-	return socket, nil
+	l.mux.Done()
 }
 
 func (l *PrometheusListener) initMetrics() {

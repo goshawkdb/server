@@ -275,7 +275,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
 	lc := &LocalConnection{
-		logger:            log.NewContext(logger).With("subsystem", "localConnection"),
+		logger:            log.With(logger, "subsystem", "localConnection"),
 		rmId:              rmId,
 		connectionManager: cm,
 		namespace:         namespace,

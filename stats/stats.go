@@ -71,7 +71,7 @@ func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
 
 func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection, logger log.Logger) *StatsPublisher {
 	sp := &StatsPublisher{
-		logger:            log.NewContext(logger).With("subsystem", "statsPublisher"),
+		logger:            log.With(logger, "subsystem", "statsPublisher"),
 		localConnection:   lc,
 		connectionManager: cm,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),

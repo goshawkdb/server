@@ -372,7 +372,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 
 func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
 	cm := &ConnectionManager{
-		logger:            log.NewContext(logger).With("subsystem", "connectionManager"),
+		logger:            log.With(logger, "subsystem", "connectionManager"),
 		parentLogger:      logger,
 		localHost:         "",
 		RMId:              rmId,

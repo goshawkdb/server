@@ -266,7 +266,7 @@ func (tch *TLSCapnpHandshaker) verifyHello(hello *cmsgs.Hello) bool {
 func (tch *TLSCapnpHandshaker) newTLSCapnpClient() *TLSCapnpClient {
 	return &TLSCapnpClient{
 		TLSCapnpHandshaker: tch,
-		logger:             log.NewContext(tch.logger).With("type", "client", "connNumber", tch.connectionNumber),
+		logger:             log.With(tch.logger, "type", "client", "connNumber", tch.connectionNumber),
 	}
 }
 
@@ -277,7 +277,7 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 	// (i.e. dialer == nil) then we never restart it anyway.
 	return &TLSCapnpServer{
 		TLSCapnpHandshaker: tch,
-		logger:             log.NewContext(tch.logger).With("type", "server"),
+		logger:             log.With(tch.logger, "type", "server"),
 	}
 }
 
