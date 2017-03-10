@@ -60,7 +60,7 @@ func newServer(logger log.Logger) (*server, error) {
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
 	flag.BoolVar(&noWSS, "noWSS", false, "Disable the WebSocket service.")
-	flag.IntVar(&wssPort, "wssport", common.DefaultWSSPort, "Port to provide WebSocket service on.")
+	flag.IntVar(&wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on.")
 	flag.BoolVar(&noProm, "noPrometheus", false, "Disable the HTTP Prometheus metrics service.")
 	flag.IntVar(&promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on.")
 	flag.BoolVar(&httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))

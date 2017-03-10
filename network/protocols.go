@@ -283,6 +283,9 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 
 func (tch *TLSCapnpHandshaker) baseTLSConfig() *tls.Config {
 	nodeCertPrivKeyPair := tch.connectionManager.NodeCertificatePrivateKeyPair()
+	if nodeCertPrivKeyPair == nil {
+		return nil
+	}
 	roots := x509.NewCertPool()
 	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
 
@@ -569,6 +572,9 @@ type TLSCapnpClient struct {
 
 func (tcc *TLSCapnpClient) finishHandshake() error {
 	config := tcc.baseTLSConfig()
+	if config == nil {
+		return errors.New("Cluster not yet formed")
+	}
 	config.ClientAuth = tls.RequireAnyClientCert
 	socket := tls.Server(tcc.socket, config)
 	tcc.socket = socket

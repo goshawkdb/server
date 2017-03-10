@@ -144,8 +144,8 @@ func (config *ConfigurationJSON) Validate() error {
 					return fmt.Errorf("Invalid configuration: Account with fingerprint %v, root %s: no capability has been granted.",
 						fingerprint, rootName)
 				}
-				if rootName == server.ConfigRootName && capability.Write {
-					return fmt.Errorf("Invalid configuration: Write capability on root %s is not possible. (Account with fingerprint %v)", server.ConfigRootName, fingerprint)
+				if capability.Write && (rootName == server.ConfigRootName || rootName == server.MetricsRootName) {
+					return fmt.Errorf("Invalid configuration: Write capability on root %s is not possible. (Account with fingerprint %v)", rootName, fingerprint)
 				}
 			}
 		}
