@@ -11,6 +11,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	"time"
 )
 
 type ClientTxnCompletionConsumer func(*cmsgs.ClientTxnOutcome, error) error
@@ -20,15 +21,17 @@ type ClientTxnSubmitter struct {
 	versionCache *versionCache
 	txnLive      bool
 	backoff      *server.BinaryBackoffEngine
+	metrics      *paxos.ClientTxnMetrics
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger, metrics *paxos.ClientTxnMetrics) *ClientTxnSubmitter {
 	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, logger)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots, namespace),
 		txnLive:            false,
 		backoff:            server.NewBinaryBackoffEngine(sts.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+		metrics:            metrics,
 	}
 }
 
@@ -48,6 +51,12 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 		return continuation(nil, err)
 	}
 
+	if cts.metrics != nil {
+		cts.metrics.TxnSubmit.Inc()
+	}
+	start := time.Now()
+	resubmitCount := 1
+
 	seg := capn.NewBuffer(nil)
 	clientOutcome := cmsgs.NewClientTxnOutcome(seg)
 	clientOutcome.SetId(ctxnCap.Id())
@@ -60,6 +69,9 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			cts.txnLive = false
 			return continuation(nil, err)
 		}
+		if cts.metrics != nil {
+			cts.metrics.TxnLatency.Observe(float64(int64(time.Now().Sub(start))) / float64(time.Second))
+		}
 		txnId := txn.Id
 		switch outcome.Which() {
 		case msgs.OUTCOME_COMMIT:
@@ -68,6 +80,9 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			clientOutcome.SetCommit()
 			cts.addCreatesToCache(txn)
 			cts.txnLive = false
+			if cts.metrics != nil {
+				cts.metrics.TxnResubmit.Add(float64(resubmitCount))
+			}
 			return continuation(&clientOutcome, nil)
 
 		default:
@@ -83,6 +98,10 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					clientOutcome.SetFinalId(txnId[:])
 					clientOutcome.SetAbort(cts.translateUpdates(seg, validUpdates))
 					cts.txnLive = false
+					if cts.metrics != nil {
+						cts.metrics.TxnRerun.Inc()
+						cts.metrics.TxnResubmit.Add(float64(resubmitCount))
+					}
 					return continuation(&clientOutcome, nil)
 				}
 			}
@@ -91,6 +110,8 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 
 			cts.backoff.Advance()
 			//fmt.Printf("%v ", cts.backoff.Cur)
+			resubmitCount++
+			start = time.Now()
 
 			curTxnIdNum := binary.BigEndian.Uint64(txnId[:8])
 			curTxnIdNum += 1 + uint64(cts.rng.Intn(8))

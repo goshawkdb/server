@@ -21,14 +21,14 @@ type ProposerDispatcher struct {
 
 func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
-		logger:           log.NewContext(logger).With("subsystem", "proposerDispatcher"),
+		logger:           log.With(logger, "subsystem", "proposerDispatcher"),
 		proposermanagers: make([]*ProposerManager, count),
 	}
-	logger = log.NewContext(logger).With("subsystem", "proposerManager")
+	logger = log.With(logger, "subsystem", "proposerManager")
 	pd.Dispatcher.Init(count, logger)
 	for idx, exe := range pd.Executors {
 		pd.proposermanagers[idx] = NewProposerManager(exe, rmId, bootCount, cm, db, varDispatcher,
-			log.NewContext(logger).With("instance", idx))
+			log.With(logger, "instance", idx))
 	}
 	pd.loadFromDisk(db)
 	return pd
@@ -78,6 +78,13 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, sta
 		txnId := txn.Id
 		varCaps := elem.Vars()
 		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txn, &varCaps, stateChange) })
+	}
+}
+
+func (pd *ProposerDispatcher) SetMetrics(metrics *ProposerMetrics) {
+	for idx, executor := range pd.Executors {
+		manager := pd.proposermanagers[idx]
+		executor.Enqueue(func() { manager.SetMetrics(metrics) })
 	}
 }
 

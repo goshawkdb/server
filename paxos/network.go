@@ -2,25 +2,26 @@ package paxos
 
 import (
 	"github.com/go-kit/kit/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
 )
 
-type Blocking bool
-
-const (
-	Async Blocking = false
-	Sync  Blocking = true
-)
-
 type ConnectionManager interface {
 	ServerConnectionPublisher
 	eng.TopologyPublisher
-	ClientEstablished(connNumber uint32, conn ClientConnection) map[common.RMId]Connection
+	ClientEstablished(connNumber uint32, conn ClientConnection) (map[common.RMId]Connection, *ClientTxnMetrics)
 	ClientLost(connNumber uint32, conn ClientConnection)
 	GetClient(bootNumber, connNumber uint32) ClientConnection
+}
+
+type ClientTxnMetrics struct {
+	TxnSubmit   prometheus.Counter
+	TxnLatency  prometheus.Histogram
+	TxnResubmit prometheus.Counter
+	TxnRerun    prometheus.Counter
 }
 
 type ServerConnectionPublisher interface {
@@ -50,7 +51,7 @@ type ClientConnection interface {
 }
 
 type Shutdownable interface {
-	Shutdown(sync Blocking)
+	Shutdown()
 }
 
 type Actorish interface {

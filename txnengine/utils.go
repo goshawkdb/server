@@ -70,24 +70,25 @@ func (tr *TxnReader) AsDeflated() *TxnReader {
 	if tr.deflated == nil {
 		if tr.IsDeflated() {
 			tr.deflated = tr
-		}
 
-		actions := tr.actions.AsDeflated()
-		cap := tr.Txn
-		seg := capn.NewBuffer(nil)
-		root := msgs.NewRootTxn(seg)
-		root.SetId(cap.Id())
-		root.SetRetry(cap.Retry())
-		root.SetActions(actions.Data)
-		root.SetAllocations(cap.Allocations())
-		root.SetTwoFInc(cap.TwoFInc())
-		root.SetTopologyVersion(cap.TopologyVersion())
+		} else {
+			actions := tr.actions.AsDeflated()
+			cap := tr.Txn
+			seg := capn.NewBuffer(nil)
+			root := msgs.NewRootTxn(seg)
+			root.SetId(cap.Id())
+			root.SetRetry(cap.Retry())
+			root.SetActions(actions.Data)
+			root.SetAllocations(cap.Allocations())
+			root.SetTwoFInc(cap.TwoFInc())
+			root.SetTopologyVersion(cap.TopologyVersion())
 
-		tr.deflated = &TxnReader{
-			Id:      tr.Id,
-			actions: actions,
-			Data:    server.SegToBytes(seg),
-			Txn:     root,
+			tr.deflated = &TxnReader{
+				Id:      tr.Id,
+				actions: actions,
+				Data:    server.SegToBytes(seg),
+				Txn:     root,
+			}
 		}
 	}
 	return tr.deflated

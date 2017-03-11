@@ -10,6 +10,8 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
+	"os"
+	"time"
 )
 
 type ProposerMode uint8
@@ -25,11 +27,14 @@ type Proposer struct {
 	proposerManager *ProposerManager
 	logger          log.Logger
 	mode            ProposerMode
+	initialMode     ProposerMode
 	txn             *eng.Txn
 	txnId           *common.TxnId
+	birthday        time.Time
 	acceptors       common.RMIds
 	topology        *configuration.Topology
 	twoFInc         int
+	createdFromDisk bool
 	currentState    proposerStateMachineComponent
 	proposerAwaitBallots
 	proposerReceiveOutcomes
@@ -47,7 +52,9 @@ func NewProposer(pm *ProposerManager, txn *eng.TxnReader, mode ProposerMode, top
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            mode,
+		initialMode:     mode,
 		txnId:           txn.Id,
+		birthday:        time.Now(),
 		acceptors:       GetAcceptorsFromTxn(txnCap),
 		topology:        topology,
 		twoFInc:         int(txnCap.TwoFInc()),
@@ -78,10 +85,13 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 	p := &Proposer{
 		proposerManager: pm,
 		mode:            proposerTLCSender,
+		initialMode:     proposerTLCSender,
 		txnId:           txnId,
+		birthday:        time.Now(),
 		acceptors:       acceptors,
 		topology:        topology,
 		twoFInc:         -1,
+		createdFromDisk: true,
 	}
 	p.init()
 	p.allAcceptorsAgreed = true
@@ -90,7 +100,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 
 func (p *Proposer) Log(keyvals ...interface{}) error {
 	if p.logger == nil {
-		p.logger = log.NewContext(p.proposerManager.logger).With("TxnId", p.txnId)
+		p.logger = log.With(p.proposerManager.logger, "TxnId", p.txnId)
 	}
 	return p.logger.Log(keyvals...)
 }
@@ -130,7 +140,10 @@ func (p *Proposer) Start() {
 
 func (p *Proposer) Status(sc *server.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Proposer for %v", p.txnId))
+	sc.Emit(fmt.Sprintf("- Born: %v", p.birthday))
+	sc.Emit(fmt.Sprintf("- Created from disk: %v", p.createdFromDisk))
 	sc.Emit(fmt.Sprintf("- Mode: %v", p.mode))
+	sc.Emit(fmt.Sprintf("- Initial Mode: %v", p.initialMode))
 	sc.Emit(fmt.Sprintf("- Current state: %v", p.currentState))
 	sc.Emit("- Outcome Accumulator")
 	p.outcomeAccumulator.Status(sc.Fork())
@@ -334,8 +347,8 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// sending TLCs immediately to everyone we've received the
 			// abort outcome from.
 			server.DebugLog(pro, "debug", "Abandoning learner with all aborts.", "knownAcceptors", knownAcceptors)
-			pro.proposerManager.FinishProposers(pro.txnId)
-			pro.proposerManager.TxnFinished(pro.txnId)
+			pro.proposerManager.FinishProposals(pro.txnId)
+			pro.proposerManager.TxnFinished(pro.Proposer)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
 			// We are destroying out state here. Thus even if this msg
 			// goes missing, if the acceptor sends us further 2Bs then
@@ -379,6 +392,17 @@ func (palc *proposerAwaitLocallyComplete) start() {
 	if palc.txn == nil && palc.outcome.Which() == msgs.OUTCOME_COMMIT {
 		// We are a learner (either active or passive), and the result
 		// has turned out to be a commit.
+		defer func() {
+			if r := recover(); r != nil {
+				palc.Log("msg", "Recovered!", "error", fmt.Sprint(r), "outcomeWhich", palc.outcome.Which())
+				sc := server.NewStatusConsumer()
+				palc.outcomeAccumulator.Status(sc)
+				sc.Consume(func(str string) {
+					os.Stderr.WriteString(str + "\n")
+				})
+				panic("repanic")
+			}
+		}()
 		txn := eng.TxnReaderFromData(palc.outcome.Txn())
 		pm := palc.proposerManager
 		palc.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, txn, palc.Proposer)
@@ -407,7 +431,7 @@ func (palc *proposerAwaitLocallyComplete) TxnLocallyComplete(*eng.Txn) {
 func (palc *proposerAwaitLocallyComplete) allAcceptorsAgree() {
 	if !palc.allAcceptorsAgreed {
 		palc.allAcceptorsAgreed = true
-		palc.proposerManager.FinishProposers(palc.txnId)
+		palc.proposerManager.FinishProposals(palc.txnId)
 		palc.maybeWriteToDisk()
 	}
 }
@@ -527,7 +551,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 				paf.proposerManager.Exe.Enqueue(func() {
 					paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender)
 					paf.tlcSender = nil
-					paf.proposerManager.TxnFinished(paf.txnId)
+					paf.proposerManager.TxnFinished(paf.Proposer)
 				})
 			}
 		}()

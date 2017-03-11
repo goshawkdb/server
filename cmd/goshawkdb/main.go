@@ -15,26 +15,25 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/network"
-	"goshawkdb.io/server/paxos"
 	"goshawkdb.io/server/stats"
 	"io/ioutil"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 )
 
-//import _ "net/http/pprof"
-//import "net/http"
-
 func main() {
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
-	logger = log.NewContext(logger).With("ts", log.DefaultTimestampUTC)
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
 
 	logger.Log("product", common.ProductName, "version", goshawk.ServerVersion, "mdbVersion", mdb.Version(), "args", fmt.Sprint(os.Args))
 
@@ -44,17 +43,14 @@ func main() {
 		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
 		os.Exit(1)
 	} else if s != nil {
-		// go func() {
-		// 	logger.Log("pprofResult",http.ListenAndServe("localhost:6060", nil))
-		// }()
 		s.start()
 	}
 }
 
 func newServer(logger log.Logger) (*server, error) {
 	var configFile, dataDir, certFile string
-	var port, wssPort int
-	var wss, version, genClusterCert, genClientCert bool
+	var port, wssPort, promPort int
+	var httpProf, noWSS, noProm, version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
@@ -63,8 +59,11 @@ func newServer(logger log.Logger) (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.BoolVar(&wss, "wss", false, "Enable the HTTP and WebSocket service.")
-	flag.IntVar(&wssPort, "wssport", 0, fmt.Sprintf("Port to provide HTTP and WebSocket service on. Implies -wss. (default %d)", common.DefaultWSSPort))
+	flag.BoolVar(&noWSS, "noWSS", false, "Disable the WebSocket service.")
+	flag.IntVar(&wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on.")
+	flag.BoolVar(&noProm, "noPrometheus", false, "Disable the HTTP Prometheus metrics service.")
+	flag.IntVar(&promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on.")
+	flag.BoolVar(&httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))
 	flag.Parse()
 
 	if version {
@@ -123,12 +122,19 @@ func newServer(logger log.Logger) (*server, error) {
 		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
 	}
 
-	if wss && wssPort == 0 { // wss is enabled, but no port is provided. Use default port
-		wssPort = common.DefaultWSSPort
+	if noWSS {
+		wssPort = 0
 	}
-	wss = wss || wssPort != 0 // -wssport implies -wss
-	if wss && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
+	if noProm {
+		promPort = 0
+	}
+
+	if wssPort != 0 && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
 		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
+	}
+
+	if promPort != 0 && !(0 < promPort && promPort < 65536 && promPort != port) {
+		return nil, fmt.Errorf("Supplied Prometheus port is illegal (%d). Prometheus Port must be > 0 and < 65536 and not equal to the main communication port (%d)", promPort, port)
 	}
 
 	s := &server{
@@ -139,9 +145,9 @@ func newServer(logger log.Logger) (*server, error) {
 		port:         uint16(port),
 		onShutdown:   []func(){},
 		shutdownChan: make(chan goshawk.EmptyStruct),
-	}
-	if wss {
-		s.wssPort = uint16(wssPort)
+		wssPort:      uint16(wssPort),
+		promPort:     uint16(promPort),
+		httpProf:     httpProf,
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -161,6 +167,8 @@ type server struct {
 	dataDir           string
 	port              uint16
 	wssPort           uint16
+	promPort          uint16
+	httpProf          bool
 	rmId              common.RMId
 	bootCount         uint32
 	connectionManager *network.ConnectionManager
@@ -173,6 +181,12 @@ type server struct {
 }
 
 func (s *server) start() {
+	if s.httpProf {
+		go func() {
+			s.logger.Log("pprofResult", http.ListenAndServe(fmt.Sprintf("localhost:%d", goshawk.HttpProfilePort), nil))
+		}()
+	}
+
 	os.Stdin.Close()
 
 	procs := runtime.NumCPU()
@@ -192,7 +206,7 @@ func (s *server) start() {
 	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
-	s.addOnShutdown(func() { cm.Shutdown(paxos.Sync) })
+	s.addOnShutdown(cm.Shutdown)
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.Shutdown)
 	s.connectionManager = cm
@@ -204,10 +218,33 @@ func (s *server) start() {
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.Shutdown)
 
+	var wssMux, promMux *network.HttpListenerWithMux
+	var wssWG, promWG *sync.WaitGroup
 	if s.wssPort != 0 {
-		wssListener, err := network.NewWebsocketListener(s.wssPort, cm, s.logger)
+		wssWG := new(sync.WaitGroup)
+		if s.wssPort == s.promPort {
+			wssWG.Add(2)
+		} else {
+			wssWG.Add(1)
+		}
+		wssMux, err = network.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 		s.maybeShutdown(err)
+		wssListener := network.NewWebsocketListener(wssMux, cm, s.logger)
 		s.addOnShutdown(wssListener.Shutdown)
+	}
+
+	if s.promPort != 0 {
+		if s.wssPort == s.promPort {
+			promWG = wssWG
+			promMux = wssMux
+		} else {
+			promWG = new(sync.WaitGroup)
+			promWG.Add(1)
+			promMux, err = network.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
+			s.maybeShutdown(err)
+		}
+		promListener := stats.NewPrometheusListener(promMux, cm, s.logger)
+		s.addOnShutdown(promListener.Shutdown)
 	}
 
 	defer s.shutdown(nil)
@@ -319,8 +356,10 @@ func (s *server) signalDumpStacks() {
 	size := 16384
 	for {
 		buf := make([]byte, size)
-		if l := runtime.Stack(buf, true); l < size {
-			s.logger.Log("msg", "Stacks dump", "stacks", buf[:l])
+		if l := runtime.Stack(buf, true); l <= size {
+			s.logger.Log("msg", "Stacks Dump Start", "RMId", s.rmId)
+			os.Stderr.Write(buf[:l])
+			s.logger.Log("msg", "Stacks Dump End", "RMId", s.rmId)
 			return
 		} else {
 			size += size

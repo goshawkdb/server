@@ -266,7 +266,7 @@ func (tch *TLSCapnpHandshaker) verifyHello(hello *cmsgs.Hello) bool {
 func (tch *TLSCapnpHandshaker) newTLSCapnpClient() *TLSCapnpClient {
 	return &TLSCapnpClient{
 		TLSCapnpHandshaker: tch,
-		logger:             log.NewContext(tch.logger).With("type", "client", "connNumber", tch.connectionNumber),
+		logger:             log.With(tch.logger, "type", "client", "connNumber", tch.connectionNumber),
 	}
 }
 
@@ -277,12 +277,15 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 	// (i.e. dialer == nil) then we never restart it anyway.
 	return &TLSCapnpServer{
 		TLSCapnpHandshaker: tch,
-		logger:             log.NewContext(tch.logger).With("type", "server"),
+		logger:             log.With(tch.logger, "type", "server"),
 	}
 }
 
 func (tch *TLSCapnpHandshaker) baseTLSConfig() *tls.Config {
 	nodeCertPrivKeyPair := tch.connectionManager.NodeCertificatePrivateKeyPair()
+	if nodeCertPrivKeyPair == nil {
+		return nil
+	}
 	roots := x509.NewCertPool()
 	roots.AddCert(nodeCertPrivKeyPair.CertificateRoot)
 
@@ -483,21 +486,27 @@ func (tcs *TLSCapnpServer) Send(msg []byte) {
 }
 
 func (tcs *TLSCapnpServer) RestartDialer() Dialer {
-	tcs.internalShutdown(tcs.dialer != nil)
+	tcs.internalShutdown()
+	if restarting := tcs.dialer != nil; restarting {
+		tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, restarting)
+		tcs.TLSCapnpHandshaker.InternalShutdown()
+	}
+
 	return tcs.dialer
 }
 
 func (tcs *TLSCapnpServer) InternalShutdown() {
-	tcs.internalShutdown(false)
+	tcs.internalShutdown()
+	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, false)
+	tcs.TLSCapnpHandshaker.InternalShutdown()
+	tcs.Connection.shutdownComplete()
 }
 
-func (tcs *TLSCapnpServer) internalShutdown(restarting bool) {
+func (tcs *TLSCapnpServer) internalShutdown() {
 	if tcs.reader != nil {
 		tcs.reader.stop()
 		tcs.reader = nil
 	}
-	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, restarting)
-	tcs.TLSCapnpHandshaker.InternalShutdown()
 }
 
 func (tcs *TLSCapnpServer) readAndHandleOneMsg() error {
@@ -563,6 +572,9 @@ type TLSCapnpClient struct {
 
 func (tcc *TLSCapnpClient) finishHandshake() error {
 	config := tcc.baseTLSConfig()
+	if config == nil {
+		return errors.New("Cluster not yet formed")
+	}
 	config.ClientAuth = tls.RequireAnyClientCert
 	socket := tls.Server(tcc.socket, config)
 	tcc.socket = socket
@@ -623,7 +635,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 
 func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 	tcc.Connection = conn
-	servers := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
+	servers, metrics := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
 
@@ -638,7 +650,8 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
 		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace,
-			paxos.NewServerConnectionPublisherProxy(tcc.Connection, cm, tcc.logger), tcc.Connection, tcc.logger)
+			paxos.NewServerConnectionPublisherProxy(tcc.Connection, cm, tcc.logger), tcc.Connection,
+			tcc.logger, metrics)
 		tcc.submitter.TopologyChanged(tcc.topology)
 		tcc.submitter.ServerConnectionsChanged(servers)
 		return nil
@@ -690,7 +703,6 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) err
 }
 
 func (tcc *TLSCapnpClient) RestartDialer() Dialer {
-	tcc.InternalShutdown()
 	return nil // client connections are never restarted
 }
 
@@ -699,10 +711,15 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 		tcc.reader.stop()
 		tcc.reader = nil
 	}
-	if tcc.submitter != nil {
-		tcc.submitter.Shutdown()
+	cont := func() {
+		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+		tcc.Connection.shutdownComplete()
 	}
-	tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+	if tcc.submitter == nil {
+		cont()
+	} else {
+		tcc.submitter.Shutdown(cont)
+	}
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }
 

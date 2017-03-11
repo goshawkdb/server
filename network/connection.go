@@ -7,7 +7,6 @@ import (
 	cc "github.com/msackman/chancell"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"math/rand"
 	"net"
@@ -36,7 +35,8 @@ type connectionMsgBasic struct{}
 
 func (cmb connectionMsgBasic) witness() connectionMsg { return cmb }
 
-type connectionMsgShutdown struct{ connectionMsgBasic }
+type connectionMsgStartShutdown struct{ connectionMsgBasic }
+type connectionMsgShutdownComplete struct{ connectionMsgBasic }
 
 type connectionMsgTopologyChanged struct {
 	connectionMsgBasic
@@ -62,10 +62,12 @@ type connectionMsgExec func()
 
 func (cme connectionMsgExec) witness() connectionMsg { return cme }
 
-func (conn *Connection) Shutdown(sync paxos.Blocking) {
-	if conn.enqueueQuery(connectionMsgShutdown{}) && sync == paxos.Sync {
-		conn.cellTail.Wait()
-	}
+// is async
+func (conn *Connection) Shutdown() {
+	conn.enqueueQuery(connectionMsgStartShutdown{})
+}
+func (conn *Connection) shutdownComplete() {
+	conn.enqueueQuery(connectionMsgShutdownComplete{})
 }
 
 func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
@@ -116,13 +118,13 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 }
 
 func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
-	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
+	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
 	dialer := NewTCPDialerForTLSCapnp(remoteHost, cm, logger)
 	return NewConnectionWithDialer(dialer, cm, logger)
 }
 
 func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) *Connection {
-	logger = log.NewContext(logger).With("subsystem", "connection", "dir", "incoming", "protocol", "capnp")
+	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
 	yesman := NewTLSCapnpHandshaker(nil, socket, cm, count, "", logger)
 	return NewConnectionWithHandshaker(yesman, cm, logger)
 }
@@ -202,28 +204,36 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 		err = errors.New("No local topology, not ready for any connections.")
 	}
 
-	terminate := err != nil
-	for !terminate {
+	terminated := err != nil // have we stopped?
+	shuttingDown := false    // are we shutting down?
+	terminate := false       // what should we do next?
+	for !terminated {
 		if oldState != conn.currentState {
 			oldState = conn.currentState
 			terminate, err = conn.currentState.start()
 		} else if msg, ok := <-queryChan; ok {
-			terminate, err = conn.handleMsg(msg)
+			terminate, terminated, err = conn.handleMsg(msg)
 		} else {
 			head.Next(queryCell, chanFun)
 		}
 		terminate = terminate || err != nil
+		if terminate {
+			conn.startShutdown(shuttingDown, err)
+			shuttingDown = true
+			err = nil
+		}
 	}
 	conn.cellTail.Terminate()
 	conn.handleShutdown(err)
 	conn.logger.Log("msg", "Terminated.")
 }
 
-func (conn *Connection) handleMsg(msg connectionMsg) (terminate bool, err error) {
+func (conn *Connection) handleMsg(msg connectionMsg) (terminate, terminated bool, err error) {
 	switch msgT := msg.(type) {
-	case connectionMsgShutdown:
+	case connectionMsgStartShutdown:
 		terminate = true
-		conn.currentState = nil
+	case connectionMsgShutdownComplete:
+		terminated = true
 	case *connectionDelay:
 		msgT.received()
 	case connectionReadError:
@@ -258,6 +268,21 @@ func (conn *Connection) maybeRestartConnection(err error) error {
 		conn.logger.Log("msg", "Restarting.", "error", err)
 		conn.nextState(&conn.connectionDelay)
 		return nil
+	}
+}
+
+func (conn *Connection) startShutdown(shutdownStarted bool, err error) {
+	if err != nil {
+		conn.logger.Log("error", err)
+	}
+	if !shutdownStarted {
+		if conn.Protocol != nil {
+			conn.Protocol.InternalShutdown()
+			conn.Protocol = nil
+			conn.Handshaker = nil
+		} else {
+			conn.shutdownComplete()
+		}
 	}
 }
 
@@ -389,8 +414,8 @@ func (cah *connectionHandshake) init(conn *Connection) {
 
 func (cah *connectionHandshake) start() (bool, error) {
 	protocol, err := cah.PerformHandshake(cah.topology)
-	cah.Protocol = protocol
 	if err == nil {
+		cah.Protocol = protocol
 		cah.nextState(nil)
 		return false, nil
 	} else {

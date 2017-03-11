@@ -173,10 +173,9 @@ func (lc *LocalConnection) enqueueQuerySync(msg localConnectionMsg, resultChan c
 	}
 }
 
-func (lc *LocalConnection) Shutdown(sync paxos.Blocking) {
-	if lc.enqueueQuery(localConnectionMsgShutdown{}) && sync == paxos.Sync {
-		lc.cellTail.Wait()
-	}
+// async
+func (lc *LocalConnection) Shutdown() {
+	lc.enqueueQuery(localConnectionMsgShutdown{})
 }
 
 func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
@@ -276,7 +275,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
 	lc := &LocalConnection{
-		logger:            log.NewContext(logger).With("subsystem", "localConnection"),
+		logger:            log.With(logger, "subsystem", "localConnection"),
 		rmId:              rmId,
 		connectionManager: cm,
 		namespace:         namespace,
@@ -311,7 +310,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	topology := lc.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, lc)
 	defer lc.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, lc)
-	servers := lc.connectionManager.ClientEstablished(0, lc)
+	servers, _ := lc.connectionManager.ClientEstablished(0, lc)
 	if servers == nil {
 		panic("LocalConnection failed to register with ConnectionManager!")
 	}
@@ -358,7 +357,7 @@ func (lc *LocalConnection) actorLoop(head *cc.ChanCellHead) {
 	if err != nil {
 		lc.logger.Log("msg", "Fatal error.", "error", err)
 	}
-	lc.submitter.Shutdown()
+	lc.submitter.Shutdown(nil)
 	lc.cellTail.Terminate()
 }
 

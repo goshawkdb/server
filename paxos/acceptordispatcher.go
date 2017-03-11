@@ -22,14 +22,14 @@ type AcceptorDispatcher struct {
 
 func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
-		logger:           log.NewContext(logger).With("subsystem", "acceptorDispatcher"),
+		logger:           log.With(logger, "subsystem", "acceptorDispatcher"),
 		acceptormanagers: make([]*AcceptorManager, count),
 	}
-	logger = log.NewContext(logger).With("subsystem", "acceptorManager")
+	logger = log.With(logger, "subsystem", "acceptorManager")
 	ad.Dispatcher.Init(count, logger)
 	for idx, exe := range ad.Executors {
 		ad.acceptormanagers[idx] = NewAcceptorManager(rmId, exe, cm, db,
-			log.NewContext(logger).With("instance", idx))
+			log.With(logger, "instance", idx))
 	}
 	ad.loadFromDisk(db)
 	return ad
@@ -54,6 +54,13 @@ func (ad *AcceptorDispatcher) TxnLocallyCompleteReceived(sender common.RMId, tlc
 func (ad *AcceptorDispatcher) TxnSubmissionCompleteReceived(sender common.RMId, tsc *msgs.TxnSubmissionComplete) {
 	txnId := common.MakeTxnId(tsc.TxnId())
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TxnSubmissionCompleteReceived(sender, txnId, tsc) })
+}
+
+func (ad *AcceptorDispatcher) SetMetrics(metrics *AcceptorMetrics) {
+	for idx, executor := range ad.Executors {
+		manager := ad.acceptormanagers[idx]
+		executor.Enqueue(func() { manager.SetMetrics(metrics) })
+	}
 }
 
 func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {

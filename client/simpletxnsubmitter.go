@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
@@ -27,7 +28,8 @@ type SimpleTxnSubmitter struct {
 	connectionsBool     map[common.RMId]bool
 	connPub             paxos.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
-	onShutdown          map[*func(bool) error]server.EmptyStruct
+	onShutdown          map[*func(bool)]server.EmptyStruct
+	shutdownRequested   func()
 	hashCache           *ch.ConsistentHashCache
 	topology            *configuration.Topology
 	rng                 *rand.Rand
@@ -43,16 +45,17 @@ func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.Ser
 	cache := ch.NewCache(nil, rng)
 
 	sts := &SimpleTxnSubmitter{
-		logger:           logger,
-		rmId:             rmId,
-		bootCount:        bootCount,
-		connections:      nil,
-		connPub:          connPub,
-		outcomeConsumers: make(map[common.TxnId]txnOutcomeConsumer),
-		onShutdown:       make(map[*func(bool) error]server.EmptyStruct),
-		hashCache:        cache,
-		rng:              rng,
-		actor:            actor,
+		logger:            logger,
+		rmId:              rmId,
+		bootCount:         bootCount,
+		connections:       nil,
+		connPub:           connPub,
+		outcomeConsumers:  make(map[common.TxnId]txnOutcomeConsumer),
+		onShutdown:        make(map[*func(bool)]server.EmptyStruct),
+		shutdownRequested: nil,
+		hashCache:         cache,
+		rng:               rng,
+		actor:             actor,
 	}
 	return sts
 }
@@ -90,6 +93,10 @@ func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn
 
 // txnCap must be a root
 func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine) {
+	if sts.shutdownRequested != nil {
+		continuation(nil, nil, errors.New("Shutdown in progress"))
+		return
+	}
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTxnSubmission(server.SegToBytes(txnCap.Segment))
@@ -113,31 +120,48 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	}
 	acceptors := paxos.GetAcceptorsFromTxn(*txnCap)
 
-	shutdownFun := func(shutdown bool) error {
-		delete(sts.outcomeConsumers, *txnId)
-		// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
-		if sleeping {
-			if !atomic.CompareAndSwapUint32(&removeNeeded, 0, 1) {
-				// for this to fail, we must have added the subscriber, so
-				// we must remove it
+	shutdownFun := func(completed bool) {
+		// If we're a retry then we have a specific Abort message to
+		// send which helps tidy up garbage in the case that this node
+		// *isn't* going down (connection dying only, and !completed).
+		//
+		// But, if we're not a retry, then we must *not* cancel the
+		// sender (unless completed!): in the case that this node
+		// *isn't* going down then no one else will react to the loss of
+		// this connection and so we could end up with a dangling
+		// transaction if the txnSender only manages to send to some but
+		// not all active voters.
+
+		// OSS is safe here - see above. In the case that the node's
+		// exiting, this informs acceptors that we don't care about the
+		// answer so they shouldn't hang around waiting for the node to
+		// return. Of course, it's best effort.
+		paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
+		retry := txnCap.Retry()
+		if completed || retry { // need to stop the txnSender
+			if sleeping {
+				if !atomic.CompareAndSwapUint32(&removeNeeded, 0, 1) {
+					// for this to fail, we must have added the subscriber, so
+					// we must remove it
+					sts.connPub.RemoveServerConnectionSubscriber(txnSender)
+				}
+			} else {
 				sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 			}
-		} else {
-			sts.connPub.RemoveServerConnectionSubscriber(txnSender)
 		}
-		// OSS is safe here - see above.
-		paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
-		if shutdown {
-			if txnCap.Retry() {
-				// If this msg doesn't make it then proposers should
-				// observe our death and tidy up anyway. If it's just this
-				// connection shutting down then there should be no
-				// problem with these msgs getting to the propposers.
-				paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
+		if !completed && retry {
+			// If this msg doesn't make it then proposers should
+			// observe our death and tidy up anyway. If it's just this
+			// connection shutting down then there should be no
+			// problem with these msgs getting to the proposers.
+			paxos.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
+		}
+		if !completed {
+			// We're shutting down, there's really nothing sensible we can
+			// do with any error from the continuation, so let's just log it
+			if err := continuation(nil, nil, nil); err != nil {
+				sts.logger.Log("msg", "Error during shutdown.", "error", err)
 			}
-			return continuation(nil, nil, nil)
-		} else {
-			return nil
 		}
 	}
 	shutdownFunPtr := &shutdownFun
@@ -147,11 +171,13 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	consumer := func(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
-			if err := shutdownFun(false); err != nil {
-				return err
-			} else {
-				return continuation(txn, outcome, nil)
+			shutdownFun(true)
+			delete(sts.outcomeConsumers, *txnId)
+			if onIdle := sts.shutdownRequested; onIdle != nil && sts.IsIdle() {
+				sts.shutdownRequested = nil
+				onIdle()
 			}
+			return continuation(txn, outcome, nil)
 		}
 		return nil
 	}
@@ -238,9 +264,15 @@ func (sts *SimpleTxnSubmitter) calculateDisabledHashcodes() error {
 	return nil
 }
 
-func (sts *SimpleTxnSubmitter) Shutdown() {
+func (sts *SimpleTxnSubmitter) Shutdown(onIdle func()) {
 	for fun := range sts.onShutdown {
-		(*fun)(true)
+		(*fun)(false)
+	}
+	sts.onShutdown = make(map[*func(bool)]server.EmptyStruct)
+	if sts.IsIdle() && onIdle != nil {
+		onIdle()
+	} else {
+		sts.shutdownRequested = onIdle
 	}
 }
 

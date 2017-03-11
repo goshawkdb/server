@@ -5,6 +5,7 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
+	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
 	"goshawkdb.io/server"
@@ -45,6 +46,9 @@ type ConnectionManager struct {
 	topologySubscribers           topologySubscribers
 	Dispatchers                   *paxos.Dispatchers
 	localConnection               *client.LocalConnection
+	clientConnsGauge              prometheus.Gauge
+	serverConnsGauge              prometheus.Gauge
+	clientTxnMetrics              *paxos.ClientTxnMetrics
 }
 
 type serverConnSubscribers struct {
@@ -123,9 +127,7 @@ type connectionManagerMsgBasic struct{}
 
 func (cmmb connectionManagerMsgBasic) witness() connectionManagerMsg { return cmmb }
 
-type connectionManagerMsgShutdown chan struct{}
-
-func (cmms connectionManagerMsgShutdown) witness() connectionManagerMsg { return cmms }
+type connectionManagerMsgShutdown struct{ connectionManagerMsgBasic }
 
 type connectionManagerMsgServerEstablished struct {
 	connectionManagerMsgBasic
@@ -154,10 +156,11 @@ type connectionManagerMsgServerFlushed struct {
 
 type connectionManagerMsgClientEstablished struct {
 	connectionManagerMsgBasic
-	connNumber uint32
-	conn       paxos.ClientConnection
-	servers    map[common.RMId]paxos.Connection
-	resultChan chan struct{}
+	connNumber       uint32
+	conn             paxos.ClientConnection
+	servers          map[common.RMId]paxos.Connection
+	clientTxnMetrics *paxos.ClientTxnMetrics
+	resultChan       chan struct{}
 }
 
 type connectionManagerMsgServerConnAddSubscriber struct {
@@ -202,12 +205,16 @@ type connectionManagerMsgStatus struct {
 	*server.StatusConsumer
 }
 
-func (cm *ConnectionManager) Shutdown(sync paxos.Blocking) {
-	c := make(chan struct{})
-	cm.enqueueSyncQuery(connectionManagerMsgShutdown(c), c)
-	if sync == paxos.Sync {
-		<-c
-	}
+type connectionManagerMsgMetrics struct {
+	connectionManagerMsgBasic
+	client           prometheus.Gauge
+	server           prometheus.Gauge
+	clientTxnMetrics *paxos.ClientTxnMetrics
+}
+
+func (cm *ConnectionManager) Shutdown() {
+	cm.enqueueSyncQuery(connectionManagerMsgShutdown{}, nil)
+	<-cm.cellTail.Terminated
 }
 
 func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func()) {
@@ -240,22 +247,25 @@ func (cm *ConnectionManager) ServerConnectionFlushed(rmId common.RMId) {
 
 // NB client established gets you server connection subscriber too. It
 // does not get you a topology subscriber.
-func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) map[common.RMId]paxos.Connection {
+func (cm *ConnectionManager) ClientEstablished(connNumber uint32, conn paxos.ClientConnection) (map[common.RMId]paxos.Connection, *paxos.ClientTxnMetrics) {
 	query := &connectionManagerMsgClientEstablished{
 		connNumber: connNumber,
 		conn:       conn,
 		resultChan: make(chan struct{}),
 	}
 	if cm.enqueueSyncQuery(query, query.resultChan) {
-		return query.servers
+		return query.servers, query.clientTxnMetrics
 	} else {
-		return nil
+		return nil, nil
 	}
 }
 
 func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConnection) {
 	cm.Lock()
 	delete(cm.connCountToClient, connNumber)
+	if cm.clientConnsGauge != nil {
+		cm.clientConnsGauge.Dec()
+	}
 	cm.Unlock()
 	cm.RemoveServerConnectionSubscriber(conn)
 }
@@ -325,6 +335,14 @@ func (cm *ConnectionManager) Status(sc *server.StatusConsumer) {
 	cm.enqueueQuery(connectionManagerMsgStatus{StatusConsumer: sc})
 }
 
+func (cm *ConnectionManager) SetMetrics(client, server prometheus.Gauge, clientTxnMetrics *paxos.ClientTxnMetrics) {
+	cm.enqueueQuery(connectionManagerMsgMetrics{
+		client:           client,
+		server:           server,
+		clientTxnMetrics: clientTxnMetrics,
+	})
+}
+
 type connectionManagerQueryCapture struct {
 	cm  *ConnectionManager
 	msg connectionManagerMsg
@@ -354,7 +372,7 @@ func (cm *ConnectionManager) enqueueSyncQuery(msg connectionManagerMsg, resultCh
 
 func NewConnectionManager(rmId common.RMId, bootCount uint32, procs int, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
 	cm := &ConnectionManager{
-		logger:            log.NewContext(logger).With("subsystem", "connectionManager"),
+		logger:            log.With(logger, "subsystem", "connectionManager"),
 		parentLogger:      logger,
 		localHost:         "",
 		RMId:              rmId,
@@ -424,12 +442,10 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = cm.queryChan, cell }
 	head.WithCell(chanFun)
 	terminate := false
-	var shutdownChan chan struct{}
 	for !terminate {
 		if msg, ok := <-queryChan; ok {
 			switch msgT := msg.(type) {
 			case connectionManagerMsgShutdown:
-				shutdownChan = msgT
 				terminate = true
 			case *connectionManagerMsgServerEstablished:
 				cm.serverEstablished(msgT)
@@ -456,6 +472,8 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 				cm.Transmogrifier.RequestConfigurationChange(msgT.config)
 			case connectionManagerMsgStatus:
 				cm.status(msgT.StatusConsumer)
+			case connectionManagerMsgMetrics:
+				cm.setMetrics(msgT)
 			default:
 				err = fmt.Errorf("Fatal to ConnectionManager: Received unexpected message: %#v", msgT)
 			}
@@ -471,33 +489,32 @@ func (cm *ConnectionManager) actorLoop(head *cc.ChanCellHead) {
 	for _, cds := range cm.servers {
 		for _, cd := range cds {
 			if cd != nil {
-				cd.Shutdown(paxos.Sync)
+				cd.Shutdown()
 			}
 		}
 	}
-	cm.localConnection.Shutdown(paxos.Sync)
+	cm.localConnection.Shutdown()
 	cm.RLock()
 	for _, cc := range cm.connCountToClient {
-		cc.Shutdown(paxos.Sync)
+		cc.Shutdown()
 	}
 	cm.RUnlock()
-	if shutdownChan != nil {
-		close(shutdownChan)
-	}
 }
 
 func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServerEstablished) {
+	if cm.serverConnsGauge != nil {
+		cm.serverConnsGauge.Inc()
+	}
+
 	if connEst.rmId == cm.RMId {
 		cm.logger.Log("msg", "RMId collision with ourself detected.", "RMId", cm.RMId, "remoteHost", connEst.host)
-		connEst.Shutdown(paxos.Async)
+		connEst.Shutdown()
 		return
 
 	} else if cd, found := cm.rmToServer[connEst.rmId]; found && connEst.host != cd.host {
 		cm.logger.Log("msg", "RMId collision with remote hosts detected. Restarting both connections.", "RMId", connEst.rmId, "remoteHost1", cd.host, "remoteHost2", connEst.host)
-		cd.Shutdown(paxos.Async)
-		connEst.Shutdown(paxos.Async)
-		delete(cm.rmToServer, cd.rmId)
-		cm.serverConnSubscribers.ServerConnLost(cd.rmId)
+		cd.Shutdown()
+		connEst.Shutdown()
 		return
 
 	} else if !found {
@@ -542,6 +559,10 @@ func (cm *ConnectionManager) serverEstablished(connEst *connectionManagerMsgServ
 }
 
 func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost) {
+	if cm.serverConnsGauge != nil {
+		cm.serverConnsGauge.Dec()
+	}
+
 	rmId := connLost.rmId
 	host := connLost.host
 	server.DebugLog(cm.logger, "debug", "Server Connection reported down.",
@@ -573,7 +594,7 @@ func (cm *ConnectionManager) serverLost(connLost connectionManagerMsgServerLost)
 					cds[idx] = nil
 					if connLost.restarting { // it's restarting, but we don't want it to, so kill it off
 						server.DebugLog(cm.logger, "debug", "Shutting down connection.", "RMId", rmId)
-						cd.Shutdown(paxos.Async)
+						cd.Shutdown()
 					}
 				} else if cd != nil {
 					allNil = false
@@ -613,8 +634,12 @@ func (cm *ConnectionManager) clientEstablished(msg *connectionManagerMsgClientEs
 	if cm.flushedServers == nil || msg.connNumber == 0 { // must always allow localconnection through!
 		cm.Lock()
 		cm.connCountToClient[msg.connNumber] = msg.conn
+		if cm.clientConnsGauge != nil {
+			cm.clientConnsGauge.Inc()
+		}
 		cm.Unlock()
 		msg.servers = cm.cloneRMToServer()
+		msg.clientTxnMetrics = cm.clientTxnMetrics
 		close(msg.resultChan)
 		cm.serverConnSubscribers.AddSubscriber(msg.conn)
 	} else {
@@ -711,7 +736,7 @@ func (cm *ConnectionManager) setDesiredServers(localHost string, remote []string
 			delete(cm.servers, host)
 			for _, cd := range cds {
 				if cd != nil && !cd.established {
-					cd.Shutdown(paxos.Async)
+					cd.Shutdown()
 				}
 			}
 		}
@@ -789,6 +814,26 @@ func (cm *ConnectionManager) status(sc *server.StatusConsumer) {
 	cm.Dispatchers.ProposerDispatcher.Status(sc.Fork())
 	cm.Dispatchers.AcceptorDispatcher.Status(sc.Fork())
 	sc.Join()
+}
+
+func (cm *ConnectionManager) setMetrics(msg connectionManagerMsgMetrics) {
+	cm.Lock()
+	cm.clientConnsGauge = msg.client
+	cm.clientConnsGauge.Set(float64(len(cm.connCountToClient)))
+	cm.Unlock()
+
+	cm.serverConnsGauge = msg.server
+	count := 0
+	for _, cds := range cm.servers {
+		for _, cd := range cds {
+			if cd != nil && cd.established {
+				count++
+			}
+		}
+	}
+	cm.serverConnsGauge.Set(float64(count))
+
+	cm.clientTxnMetrics = msg.clientTxnMetrics
 }
 
 // paxos.Connection interface to allow sending to ourself.
@@ -917,19 +962,21 @@ func (cd *connectionManagerMsgServerEstablished) Send(msg []byte) {
 	cd.send(msg)
 }
 
-func (cd *connectionManagerMsgServerEstablished) Shutdown(sync paxos.Blocking) {
+func (cd *connectionManagerMsgServerEstablished) Shutdown() {
 	if cd.Connection != nil {
-		cd.Connection.Shutdown(sync)
+		cd.Connection.Shutdown()
 	}
 }
 
 func (cd *connectionManagerMsgServerEstablished) clone() *connectionManagerMsgServerEstablished {
 	return &connectionManagerMsgServerEstablished{
-		Connection:  cd.Connection,
-		send:        cd.send,
-		host:        cd.host,
-		rmId:        cd.rmId,
-		bootCount:   cd.bootCount,
-		clusterUUId: cd.clusterUUId,
+		Connection:    cd.Connection,
+		send:          cd.send,
+		host:          cd.host,
+		rmId:          cd.rmId,
+		bootCount:     cd.bootCount,
+		clusterUUId:   cd.clusterUUId,
+		flushCallback: cd.flushCallback,
+		established:   cd.established,
 	}
 }

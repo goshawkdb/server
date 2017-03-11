@@ -128,7 +128,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 
 func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
 	tt := &TopologyTransmogrifier{
-		logger:            log.NewContext(logger).With("subsystem", "topologyTransmogrifier"),
+		logger:            log.With(logger, "subsystem", "topologyTransmogrifier"),
 		db:                db,
 		connectionManager: cm,
 		localConnection:   lc,

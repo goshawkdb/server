@@ -71,7 +71,7 @@ func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
 
 func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection, logger log.Logger) *StatsPublisher {
 	sp := &StatsPublisher{
-		logger:            log.NewContext(logger).With("subsystem", "statsPublisher"),
+		logger:            log.With(logger, "subsystem", "statsPublisher"),
 		localConnection:   lc,
 		connectionManager: cm,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -227,14 +227,19 @@ func (cp *configPublisher) publishConfig() error {
 
 		server.DebugLog(cp.logger, "debug", "Publishing Config.", "config", string(cp.json))
 		_, result, err := cp.localConnection.RunClientTransaction(&ctxn, varPosMap, nil)
+		retryAfterDelay := err != nil || (result != nil && result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT)
 		if err != nil {
-			return err
+			// log, but ignore the error as it's most likely temporary
+			cp.logger.Log("msg", "Error during config publish.", "error", err)
+			err = nil
 		} else if result == nil { // shutdown
 			return nil
 		} else if result.Which() == msgs.OUTCOME_COMMIT {
 			server.DebugLog(cp.logger, "debug", "Publishing Config committed.")
 			return nil
-		} else if abort := result.Abort(); abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
+		}
+
+		if retryAfterDelay {
 			server.DebugLog(cp.logger, "debug", "Publishing Config requires resubmit.")
 			backoff := cp.backoff
 			cp.backoff.Advance()
@@ -248,43 +253,43 @@ func (cp *configPublisher) publishConfig() error {
 				})
 			})
 			return nil
-		} else {
-			server.DebugLog(cp.logger, "debug", "Publishing Config requires rerun.")
-			updates := abort.Rerun()
-			found := false
-			var value []byte
-			for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
-				update := updates.At(idx)
-				updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
-				for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
-					updateAction := updateActions.At(idy)
-					if found = bytes.Equal(cp.root.VarUUId[:], updateAction.VarId()); found {
-						if updateAction.Which() == msgs.ACTION_WRITE {
-							cp.vsn = common.MakeTxnId(update.TxnId())
-							updateWrite := updateAction.Write()
-							value = updateWrite.Value()
-						} else {
-							// must be MISSING, which I'm really not sure should ever happen!
-							cp.vsn = common.VersionZero
-						}
+		}
+
+		server.DebugLog(cp.logger, "debug", "Publishing Config requires rerun.")
+		updates := result.Abort().Rerun()
+		found := false
+		var value []byte
+		for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
+			update := updates.At(idx)
+			updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
+			for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
+				updateAction := updateActions.At(idy)
+				if found = bytes.Equal(cp.root.VarUUId[:], updateAction.VarId()); found {
+					if updateAction.Which() == msgs.ACTION_WRITE {
+						cp.vsn = common.MakeTxnId(update.TxnId())
+						updateWrite := updateAction.Write()
+						value = updateWrite.Value()
+					} else {
+						// must be MISSING, which I'm really not sure should ever happen!
+						cp.vsn = common.VersionZero
 					}
 				}
 			}
-			if !found {
-				return errors.New("Internal error: failed to find update for rerun of config publishing")
+		}
+		if !found {
+			return errors.New("Internal error: failed to find update for rerun of config publishing")
+		}
+		if len(value) > 0 {
+			inDB := new(configuration.ConfigurationJSON)
+			if err := json.Unmarshal(value, inDB); err != nil {
+				return err
 			}
-			if len(value) > 0 {
-				inDB := new(configuration.ConfigurationJSON)
-				if err := json.Unmarshal(value, inDB); err != nil {
-					return err
-				}
-				if inDB.Version > cp.topology.Version {
-					server.DebugLog(cp.logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
-					return nil
-				} else if inDB.Version == cp.topology.Version {
-					server.DebugLog(cp.logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
-					return nil
-				}
+			if inDB.Version > cp.topology.Version {
+				server.DebugLog(cp.logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
+				return nil
+			} else if inDB.Version == cp.topology.Version {
+				server.DebugLog(cp.logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
+				return nil
 			}
 		}
 	}

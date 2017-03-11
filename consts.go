@@ -21,4 +21,6 @@ const (
 	MigrationBatchElemCount       = 64
 	PoissonSamples                = 64
 	ConfigRootName                = "system:config"
+	MetricsRootName               = "system:prometheus"
+	HttpProfilePort               = 6060
 )
