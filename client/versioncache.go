@@ -6,6 +6,7 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
+	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
 	eng "goshawkdb.io/server/txnengine"
@@ -58,10 +59,17 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 	}
 
 	actions := cTxn.Actions()
+	actionsMap := make(map[common.VarUUId]server.EmptyStruct, actions.Len())
+
 	if cTxn.Retry() {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
+			if _, found := actionsMap[*vUUId]; found {
+				return fmt.Errorf("Var Id appears twice in txn actions: %v", vUUId)
+			} else {
+				actionsMap[*vUUId] = server.EmptyStructVal
+			}
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
 			} else if c, found := vc.cache[*vUUId]; !found {
@@ -75,6 +83,11 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
+			if _, found := actionsMap[*vUUId]; found {
+				return fmt.Errorf("Var Id appears twice in txn actions: %v", vUUId)
+			} else {
+				actionsMap[*vUUId] = server.EmptyStructVal
+			}
 			c, found := vc.cache[*vUUId]
 			switch act := action.Which(); act {
 			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
