@@ -500,12 +500,12 @@ func (wmpc *wssMsgPackClient) submitTransaction(ctxn *cmsgs.ClientTxn) error {
 	origTxnId := common.MakeTxnId(ctxn.Id)
 	seg := capn.NewBuffer(nil)
 	ctxnCapn, err := ctxn.ToCapnp(seg)
-	if err != nil {
-		return err
+	if err != nil { // error is non-fatal to connection
+		return wmpc.beater.sendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
 	}
 	return wmpc.submitter.SubmitClientTransaction(ctxnCapn, func(clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
 		switch {
-		case err != nil: // error is non-fatal to connection
+		case err != nil:
 			return wmpc.beater.sendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
 		case clientOutcome == nil: // shutdown
 			return nil
