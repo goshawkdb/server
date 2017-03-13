@@ -190,6 +190,12 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	conn.topology = conn.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, conn)
 	defer conn.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, conn)
 
+	defer func() {
+		if r := recover(); r != nil {
+			conn.logger.Log("msg", "Connection panicked!", "error", fmt.Sprint(r))
+		}
+	}()
+
 	var (
 		err       error
 		oldState  connectionStateMachineComponent
