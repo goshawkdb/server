@@ -76,6 +76,9 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
 			} else if cap := c.caps.Which(); !(cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE) {
 				return fmt.Errorf("Retry transaction has attempted illegal read from object: %v", vUUId)
+			} else if read := action.Read(); !bytes.Equal(c.txnId[:], read.Version()) {
+				return fmt.Errorf("Retry transaction has attempted read of object %v at wrong version.",
+					vUUId)
 			}
 		}
 
@@ -104,6 +107,20 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 						return fmt.Errorf("Transaction has illegal write action on object: %v", vUUId)
 					case act == cmsgs.CLIENTACTION_READWRITE && cap != cmsgs.CAPABILITY_READWRITE:
 						return fmt.Errorf("Transaction has illegal readwrite action on object: %v", vUUId)
+					}
+
+					var readVersion []byte
+					if act == cmsgs.CLIENTACTION_READ {
+						readVersion = action.Read().Version()
+					} else if act == cmsgs.CLIENTACTION_READWRITE {
+						readVersion = action.Readwrite().Version()
+					}
+					if readVersion != nil {
+						if c.txnId == nil && !bytes.Equal(common.VersionZero[:], readVersion) {
+							return fmt.Errorf("Transaction has illegal read of object %v. Should be a read at version zero, but was %v.", vUUId, common.MakeTxnId(readVersion))
+						} else if c.txnId != nil && !bytes.Equal(c.txnId[:], readVersion) {
+							return fmt.Errorf("Transaction has illegal read of object %v. Should be a read at version %v but was %v.", vUUId, c.txnId, common.MakeTxnId(readVersion))
+						}
 					}
 				}
 
@@ -445,8 +462,10 @@ func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.
 	clientAction.SetVarId(u.varUUId[:])
 	c := u.cached
 	if c.txnId == nil {
+		// fmt.Printf("Requesting delete of %v\n", u.varUUId)
 		clientAction.SetDelete()
 	} else {
+		// fmt.Printf("Requesting write of %v\n", u.varUUId)
 		clientAction.SetWrite()
 		clientWrite := clientAction.Write()
 
