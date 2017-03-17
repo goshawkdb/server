@@ -6,6 +6,7 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
+	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
 	eng "goshawkdb.io/server/txnengine"
@@ -58,16 +59,26 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 	}
 
 	actions := cTxn.Actions()
+	actionsMap := make(map[common.VarUUId]server.EmptyStruct, actions.Len())
+
 	if cTxn.Retry() {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
+			if _, found := actionsMap[*vUUId]; found {
+				return fmt.Errorf("Var Id appears twice in txn actions: %v", vUUId)
+			} else {
+				actionsMap[*vUUId] = server.EmptyStructVal
+			}
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
 			} else if c, found := vc.cache[*vUUId]; !found {
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
 			} else if cap := c.caps.Which(); !(cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE) {
 				return fmt.Errorf("Retry transaction has attempted illegal read from object: %v", vUUId)
+			} else if read := action.Read(); !bytes.Equal(c.txnId[:], read.Version()) {
+				return fmt.Errorf("Retry transaction has attempted read of object %v at wrong version.",
+					vUUId)
 			}
 		}
 
@@ -75,6 +86,11 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 			vUUId := common.MakeVarUUId(action.VarId())
+			if _, found := actionsMap[*vUUId]; found {
+				return fmt.Errorf("Var Id appears twice in txn actions: %v", vUUId)
+			} else {
+				actionsMap[*vUUId] = server.EmptyStructVal
+			}
 			c, found := vc.cache[*vUUId]
 			switch act := action.Which(); act {
 			case cmsgs.CLIENTACTION_READ, cmsgs.CLIENTACTION_WRITE, cmsgs.CLIENTACTION_READWRITE:
@@ -91,6 +107,20 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 						return fmt.Errorf("Transaction has illegal write action on object: %v", vUUId)
 					case act == cmsgs.CLIENTACTION_READWRITE && cap != cmsgs.CAPABILITY_READWRITE:
 						return fmt.Errorf("Transaction has illegal readwrite action on object: %v", vUUId)
+					}
+
+					var readVersion []byte
+					if act == cmsgs.CLIENTACTION_READ {
+						readVersion = action.Read().Version()
+					} else if act == cmsgs.CLIENTACTION_READWRITE {
+						readVersion = action.Readwrite().Version()
+					}
+					if readVersion != nil {
+						if c.txnId == nil && !bytes.Equal(common.VersionZero[:], readVersion) {
+							return fmt.Errorf("Transaction has illegal read of object %v. Should be a read at version zero, but was %v.", vUUId, common.MakeTxnId(readVersion))
+						} else if c.txnId != nil && !bytes.Equal(c.txnId[:], readVersion) {
+							return fmt.Errorf("Transaction has illegal read of object %v. Should be a read at version %v but was %v.", vUUId, c.txnId, common.MakeTxnId(readVersion))
+						}
 					}
 				}
 
@@ -432,8 +462,10 @@ func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.
 	clientAction.SetVarId(u.varUUId[:])
 	c := u.cached
 	if c.txnId == nil {
+		// fmt.Printf("Requesting delete of %v\n", u.varUUId)
 		clientAction.SetDelete()
 	} else {
+		// fmt.Printf("Requesting write of %v\n", u.varUUId)
 		clientAction.SetWrite()
 		clientWrite := clientAction.Write()
 
