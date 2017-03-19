@@ -788,7 +788,9 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	ctxn, varPosMap := fo.createRollClientTxn()
 	server.DebugLog(fo.v.vm.logger, "debug", "Starting roll.", "frame", fo.frame)
 	go func() {
-		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, rollCB.rollTranslationCallback)
+		// Yes, we really must mark these as topology txns so that they
+		// are allowed through during topology changes.
+		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, true, varPosMap, rollCB.rollTranslationCallback)
 		ow := ""
 		if outcome != nil {
 			ow = fmt.Sprint(outcome.Which())

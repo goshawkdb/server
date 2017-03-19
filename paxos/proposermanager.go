@@ -130,14 +130,10 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 		server.DebugLog(pm.logger, "debug", "Received.", "TxnId", txnId)
 		accept := true
 		if pm.topology != nil {
-			accept = (pm.topology.NextConfiguration == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
-				// Could also do pm.topology.BarrierReached1(sender), but
-				// would need to specialise that to rolls rather than
-				// topology txns, and it's enforced on the sending side
-				// anyway. Once the sender has received the next topology,
-				// it'll do the right thing and locally block until it's
-				// in barrier1.
-				(pm.topology.NextConfiguration != nil && pm.topology.NextConfiguration.Version == txnCap.TopologyVersion())
+			accept = pm.topology.Version == txnCap.TopologyVersion()
+			if accept && pm.topology.NextConfiguration != nil {
+				accept = txnCap.IsTopology()
+			}
 			if accept {
 				_, found := pm.topology.RMsRemoved[sender]
 				accept = !found
@@ -158,11 +154,11 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 					}
 				} else {
 					server.DebugLog(pm.logger, "debug", "Aborting received txn as sender has been removed from topology.",
-						"TxnId", txnId, "sender", sender)
+						"TxnId", txnId, "sender", sender, "topology", pm.topology)
 				}
 			} else {
 				server.DebugLog(pm.logger, "debug", "Aborting received txn due to non-matching topology.",
-					"TxnId", txnId, "topologyVersion", txnCap.TopologyVersion())
+					"TxnId", txnId, "topologyVersion", txnCap.TopologyVersion(), "isTopologyTxn", txnCap.IsTopology(), "topology", pm.topology)
 			}
 		}
 		if accept {

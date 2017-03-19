@@ -27,11 +27,9 @@ struct Configuration {
       lostRMIds       @14: List(UInt32);
       rootIndices     @15: List(UInt32);
       installedOnNew  @16: Bool;
-      barrierReached1 @17: List(UInt32);
-      barrierReached2 @18: List(UInt32);
-      pending         @19: List(ConditionPair);
+      pending         @17: List(ConditionPair);
     }
-    stable           @20: Void;
+    stable           @18: Void;
   }
 }
 

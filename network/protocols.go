@@ -471,7 +471,7 @@ func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) err
 	topology := tc.topology
 	tcs.topology = topology
 
-	server.DebugLog(tcs.logger, "debug", "TopologyChanged.", "topology", tc)
+	server.DebugLog(tcs.logger, "debug", "TopologyChanged.", "topology", topology)
 	if topology != nil && tcs.dialer != nil {
 		if _, found := topology.RMsRemoved[tcs.remoteRMId]; found {
 			tcs.dialer = nil
@@ -560,14 +560,13 @@ func (tcs *TLSCapnpServer) createReader() {
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
 	*Connection
-	logger        log.Logger
-	peerCerts     []*x509.Certificate
-	roots         map[string]*common.Capability
-	rootsVar      map[common.VarUUId]*common.Capability
-	namespace     []byte
-	submitter     *client.ClientTxnSubmitter
-	submitterIdle *connectionMsgTopologyChanged
-	reader        *socketReader
+	logger    log.Logger
+	peerCerts []*x509.Certificate
+	roots     map[string]*common.Capability
+	rootsVar  map[common.VarUUId]*common.Capability
+	namespace []byte
+	submitter *client.ClientTxnSubmitter
+	reader    *socketReader
 }
 
 func (tcc *TLSCapnpClient) finishHandshake() error {
@@ -659,30 +658,26 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 }
 
 func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
-	if si := tcc.submitterIdle; si != nil {
-		tcc.submitterIdle = nil
-		server.DebugLog(tcc.logger, "debug", "TopologyChanged.", "topology", tc, "clearingSI", si)
-		si.maybeClose()
-	}
-
 	topology := tc.topology
 	tcc.topology = topology
 
+	server.DebugLog(tcc.logger, "debug", "TopologyChanged", "topology", topology)
+
 	if topology != nil {
 		if authenticated, _, roots := tcc.topology.VerifyPeerCerts(tcc.peerCerts); !authenticated {
-			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", tc)
+			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
 			tc.maybeClose()
 			return errors.New("Client connection closed: No client certificate known")
 		} else if len(roots) == len(tcc.roots) {
 			for name, capsOld := range tcc.roots {
 				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
-					server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", tc)
+					server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
 					tc.maybeClose()
 					return errors.New("Client connection closed: roots have changed")
 				}
 			}
 		} else {
-			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", tc)
+			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
 			tc.maybeClose()
 			return errors.New("Client connection closed: roots have changed")
 		}
@@ -691,13 +686,7 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) err
 		tc.maybeClose()
 		return err
 	}
-	if tcc.submitter.IsIdle() {
-		server.DebugLog(tcc.logger, "debug", "TopologyChanged. Submitter is idle.", "topology", tc)
-		tc.maybeClose()
-	} else {
-		server.DebugLog(tcc.logger, "debug", "TopologyChanged. Submitter not idle.", "topology", tc)
-		tcc.submitterIdle = tc
-	}
+	tc.maybeClose()
 
 	return nil
 }
@@ -734,14 +723,7 @@ func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *en
 }
 
 func (tcc *TLSCapnpClient) outcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
-	err := tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
-	if tcc.submitterIdle != nil && tcc.submitter.IsIdle() {
-		si := tcc.submitterIdle
-		tcc.submitterIdle = nil
-		server.DebugLog(tcc.logger, "debug", "OutcomeReceived.", "submitterIdle", si)
-		si.maybeClose()
-	}
-	return err
+	return tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 }
 
 func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {

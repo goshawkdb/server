@@ -10,10 +10,11 @@ using Var = import "var.capnp";
 struct Txn {
   id                 @0: Data;
   retry              @1: Bool;
-  actions            @2: Data;
-  allocations        @3: List(Allocation);
-  twoFInc            @4: UInt16;
-  topologyVersion    @5: UInt32;
+  isTopology         @2: Bool;
+  actions            @3: Data;
+  allocations        @4: List(Allocation);
+  twoFInc            @5: UInt16;
+  topologyVersion    @6: UInt32;
 }
 
 struct ActionListWrapper {

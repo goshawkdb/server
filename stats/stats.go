@@ -226,7 +226,7 @@ func (cp *configPublisher) publishConfig() error {
 		varPosMap[*cp.root.VarUUId] = cp.root.Positions
 
 		server.DebugLog(cp.logger, "debug", "Publishing Config.", "config", string(cp.json))
-		_, result, err := cp.localConnection.RunClientTransaction(&ctxn, varPosMap, nil)
+		_, result, err := cp.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)
 		retryAfterDelay := err != nil || (result != nil && result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT)
 		if err != nil {
 			// log, but ignore the error as it's most likely temporary
