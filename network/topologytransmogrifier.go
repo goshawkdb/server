@@ -209,6 +209,7 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 					if err != nil {
 						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 					}
+					server.DebugLog(tt.logger, "debug", "Observation enqueued.", "topology", topology)
 					tt.enqueueQuery(topologyTransmogrifierMsgTopologyObserved{topology: topology})
 				},
 				Cancel: func(v *eng.Var) {

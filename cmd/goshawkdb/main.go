@@ -206,9 +206,9 @@ func (s *server) start() {
 	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
-	s.addOnShutdown(cm.Shutdown)
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.Shutdown)
+	s.addOnShutdown(cm.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
