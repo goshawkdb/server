@@ -451,7 +451,7 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 
 	data := server.SegToBytes(stateSeg)
 
-	future := palc.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+	future := palc.proposerManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Put(palc.proposerManager.DB.Proposers, palc.txnId[:], data, 0)
 		return true
 	})
@@ -540,7 +540,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 	server.DebugLog(paf, "debug", "Txn Finished Callback.")
 	if paf.currentState == paf {
 		paf.nextState()
-		future := paf.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		future := paf.proposerManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 			rwtxn.Del(paf.proposerManager.DB.Proposers, paf.txnId[:], nil)
 			return true
 		})

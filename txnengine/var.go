@@ -257,7 +257,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
-	future := v.db.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+	future := v.db.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 		if err := v.db.WriteTxnToDisk(rwtxn, f.frameTxnId, txnBytes); err == nil {
 			if err = rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err == nil {
 				if v.curFrameOnDisk != nil {

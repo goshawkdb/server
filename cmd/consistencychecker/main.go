@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	"github.com/go-kit/kit/log"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
@@ -15,7 +16,6 @@ import (
 	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 	"io/ioutil"
-	"log"
 	"os"
 	"runtime"
 	"time"
@@ -26,18 +26,20 @@ type store struct {
 	db       *db.Databases
 	rmId     common.RMId
 	topology *configuration.Topology
+	logger   log.Logger
 }
 
 type stores []*store
 
 func main() {
-	log.SetPrefix(common.ProductName + "ConsistencyChecker ")
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println(os.Args)
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
+	logger.Log("args", fmt.Sprint(os.Args))
 
 	dirs := os.Args[1:]
 	if len(dirs) == 0 {
-		log.Fatal("No dirs supplied")
+		logger.Log("error", "No dirs supplied")
+		os.Exit(1)
 	}
 
 	runtime.GOMAXPROCS(1 + (2 * len(dirs)))
@@ -45,8 +47,11 @@ func main() {
 	stores := stores(make([]*store, 0, len(dirs)))
 	defer stores.Shutdown()
 	for _, dir := range dirs {
-		log.Printf("...loading from %v\n", dir)
-		store := &store{dir: dir}
+		logger.Log("msg", "Loading.", "dir", dir)
+		store := &store{
+			dir:    dir,
+			logger: log.With(logger, "dir", dir),
+		}
 		var err error
 		if err = store.LoadRMId(); err == nil {
 			if err = store.StartDisk(); err == nil {
@@ -54,22 +59,23 @@ func main() {
 			}
 		}
 		if err != nil {
-			log.Println(err)
-			return
+			logger.Log("error", err)
+			os.Exit(1)
 		}
 		stores = append(stores, store)
 	}
 
 	if err := stores.CheckEqualTopology(); err != nil {
-		log.Println(err)
-		return
+		logger.Log("error", err)
+		os.Exit(1)
 	}
 
 	locationChecker := newLocationChecker(stores)
 	if err := stores.IterateVars(locationChecker.locationCheck); err != nil {
-		log.Println(err)
+		logger.Log("error", err)
+		os.Exit(1)
 	} else {
-		log.Println("Finished with no fatal errors.")
+		logger.Log("msg", "Finished with no fatal errors.")
 	}
 }
 
@@ -213,8 +219,8 @@ func (s *store) LoadRMId() error {
 }
 
 func (s *store) StartDisk() error {
-	log.Printf("Starting disk server on %v", s.dir)
-	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, 2, 10*time.Millisecond, db.DB)
+	s.logger.Log("msg", "Starting disk server.")
+	disk, err := mdbs.NewMDBServer(s.dir, 0, 0600, server.MDBInitialSize, time.Millisecond, db.DB, s.logger)
 	if err != nil {
 		return err
 	}
@@ -267,11 +273,6 @@ func (s *store) LoadTopology() error {
 			return nil
 		}
 
-		if refs.Len() != 1 {
-			rtxn.Error(fmt.Errorf("Topology txn action has %v references; expected 1", refs.Len()))
-			return nil
-		}
-
 		seg, _, err = capn.ReadFromMemoryZeroCopy(bites)
 		if err != nil {
 			rtxn.Error(err)
@@ -282,6 +283,12 @@ func (s *store) LoadTopology() error {
 			rtxn.Error(err)
 			return nil
 		}
+
+		if refs.Len() != len(topology.Roots) {
+			rtxn.Error(fmt.Errorf("Topology txn action has %v references; expected %v", refs.Len(), len(topology.Roots)))
+			return nil
+		}
+
 		return topology
 	}).ResultError()
 	if err != nil {
@@ -382,7 +389,6 @@ func (is *iterateState) init() {
 }
 
 func (is *iterateState) shutdown() {
-	log.Println("Shutting down iterator")
 	for _, wrapper := range is.wrappers {
 		for wrapper.curCell != nil && wrapper.curCell.err != nil {
 			wrapper.next()
