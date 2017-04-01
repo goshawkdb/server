@@ -105,8 +105,10 @@ func (v *Var) RemoveWriteSubscriber(txnId *common.TxnId) {
 	v.maybeMakeInactive()
 }
 
-func (v *Var) ReceiveTxn(action *localAction) {
+func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 	server.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
+	v.poisson.AddThen(enqueuedAt)
+
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
 	if isRead && action.Retry {
@@ -137,8 +139,10 @@ func (v *Var) ReceiveTxn(action *localAction) {
 	}
 }
 
-func (v *Var) ReceiveTxnOutcome(action *localAction) {
+func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	server.DebugLog(v.vm.logger, "debug", "ReceiveTxnOutcome.", "VarUUId", v.UUId, "action", action)
+	v.poisson.AddThen(enqueuedAt)
+
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
 	switch {
@@ -284,11 +288,12 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	}()
 }
 
-func (v *Var) TxnGloballyComplete(action *localAction) {
+func (v *Var) TxnGloballyComplete(action *localAction, enqueuedAt time.Time) {
 	server.DebugLog(v.vm.logger, "debug", "Txn globally complete.", "VarUUId", v.UUId, "action", action)
 	if action.frame.v != v {
 		panic(fmt.Sprintf("%v frame var has changed %p -> %p (%v)", v.UUId, action.frame.v, v, action))
 	}
+	v.poisson.AddThen(enqueuedAt)
 	if action.IsWrite() {
 		action.frame.WriteGloballyComplete(action)
 	} else {

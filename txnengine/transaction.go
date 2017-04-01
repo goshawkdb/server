@@ -10,6 +10,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
 	"sync/atomic"
+	"time"
 )
 
 type TxnLocalStateChange interface {
@@ -173,13 +174,14 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 
 	txn.Start(false)
 	txn.nextState()
+	enqueuedAt := time.Now()
 	for idx := range txn.localActions {
 		action := &txn.localActions[idx]
 		f := func(v *Var) {
 			if v == nil {
 				panic(fmt.Sprintf("%v immigration error: %v unable to create var!", txn.Id, action.vUUId))
 			} else {
-				v.ReceiveTxnOutcome(action)
+				v.ReceiveTxnOutcome(action, enqueuedAt)
 			}
 		}
 		vd.ApplyToVar(f, true, action.vUUId)
@@ -386,13 +388,14 @@ func (tdb *txnDetermineLocalBallots) init(txn *Txn) {
 
 func (tdb *txnDetermineLocalBallots) start() {
 	tdb.nextState() // advance state FIRST!
+	enqueuedAt := time.Now()
 	for idx := 0; idx < len(tdb.localActions); idx++ {
 		action := &tdb.localActions[idx]
 		f := func(v *Var) {
 			if v == nil {
 				panic(fmt.Sprintf("%v error (%v): %v Unable to create var!", tdb.Id, tdb, action.vUUId))
 			} else {
-				v.ReceiveTxn(action)
+				v.ReceiveTxn(action, enqueuedAt)
 			}
 		}
 		tdb.vd.ApplyToVar(f, true, action.vUUId)
@@ -537,11 +540,12 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	for idx := 0; idx < len(tro.localActions); idx++ {
 		action := &tro.localActions[idx]
 		action.outcomeClock = tro.outcomeClock
+		enqueuedAt := time.Now()
 		f := func(v *Var) {
 			if v == nil {
 				panic(fmt.Sprintf("%v error (%v, aborted? %v, preAborted? %v, frame == nil? %v): %v not found!", tro.Id, tro, tro.aborted, tro.preAbortedBool, action.frame == nil, action.vUUId))
 			} else {
-				v.ReceiveTxnOutcome(action)
+				v.ReceiveTxnOutcome(action, enqueuedAt)
 			}
 		}
 		// Should only have to create missing vars if we're a learner (i.e. !voter).
@@ -618,6 +622,7 @@ func (trc *txnReceiveCompletion) CompletionReceived() {
 	if trc.aborted {
 		return
 	}
+	enqueuedAt := time.Now()
 	for idx := 0; idx < len(trc.localActions); idx++ {
 		action := &trc.localActions[idx]
 		if action.frame == nil {
@@ -629,7 +634,7 @@ func (trc *txnReceiveCompletion) CompletionReceived() {
 			if v == nil {
 				panic(fmt.Sprintf("%v error (%v, aborted? %v, frame == nil? %v): %v Not found!", trc.Id, trc, trc.aborted, action.frame == nil, action.vUUId))
 			} else {
-				v.TxnGloballyComplete(action)
+				v.TxnGloballyComplete(action, enqueuedAt)
 			}
 		}
 		trc.vd.ApplyToVar(f, false, action.vUUId)
