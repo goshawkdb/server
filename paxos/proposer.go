@@ -132,7 +132,7 @@ func (p *Proposer) Start() {
 	if p.topology != nil {
 		topology := p.topology
 		p.topology = nil
-		p.TopologyChange(topology)
+		p.TopologyChanged(topology)
 	}
 
 	p.currentState.start()
@@ -155,13 +155,13 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (p *Proposer) TopologyChange(topology *configuration.Topology) {
+func (p *Proposer) TopologyChanged(topology *configuration.Topology) {
 	if topology == p.topology {
 		return
 	}
 	p.topology = topology
 	rmsRemoved := topology.RMsRemoved
-	server.DebugLog(p, "debug", "TopologyChange.",
+	server.DebugLog(p, "debug", "TopologyChanged.",
 		"currentState", p.currentState, "RMsRemoved", rmsRemoved)
 	if _, found := rmsRemoved[p.proposerManager.RMId]; found {
 		return
@@ -178,7 +178,7 @@ func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 
 	switch p.currentState {
 	case &p.proposerAwaitBallots, &p.proposerReceiveOutcomes, &p.proposerAwaitLocallyComplete:
-		if p.outcomeAccumulator.TopologyChange(topology) {
+		if p.outcomeAccumulator.TopologyChanged(topology) {
 			p.allAcceptorsAgree()
 		}
 	case &p.proposerReceiveGloballyComplete:

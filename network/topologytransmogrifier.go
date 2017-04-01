@@ -935,18 +935,34 @@ func (task *installTargetOld) tick() error {
 		"newRoots", rootsRequired, "active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	if rootsRequired != 0 {
-		resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
-		if err != nil {
-			return task.fatal(err)
-		}
-		if resubmit {
-			task.createOrAdvanceBackoff()
-			task.enqueueTick(task, task.targetConfig)
-			return nil
-		}
-		targetTopology.RootVarUUIds = append(targetTopology.RootVarUUIds, roots...)
-	}
+		go func() {
+			resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
+			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				switch {
+				case task.task != task:
+					return nil
 
+				case err != nil:
+					return task.fatal(err)
+
+				case resubmit:
+					task.createOrAdvanceBackoff()
+					task.enqueueTick(task, task.targetConfig)
+					return nil
+
+				default:
+					targetTopology.RootVarUUIds = append(targetTopology.RootVarUUIds, roots...)
+					return task.installTargetOld(targetTopology, active, passive)
+				}
+			}))
+		}()
+	} else {
+		return task.installTargetOld(targetTopology, active, passive)
+	}
+	return nil
+}
+
+func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology, active, passive common.RMIds) error {
 	targetTopology.EnsureClusterUUId(task.active.ClusterUUId)
 	server.DebugLog(task.logger, "debug", "Set cluster uuid.", "uuid", targetTopology.ClusterUUId)
 
@@ -954,21 +970,34 @@ func (task *installTargetOld) tick() error {
 	// acceptors. We will require a majority of them are alive, which
 	// we've checked once above.
 	twoFInc := uint16(task.active.RMs.NonEmptyLen())
-	_, committed, resubmit, err := task.rewriteTopology(task.active, targetTopology, twoFInc, active, passive)
-	if err != nil {
-		return task.fatal(err)
-	} else if resubmit {
-		server.DebugLog(task.logger, "debug", "Installing to old requires resubmit.")
-		task.createOrAdvanceBackoff()
-		task.enqueueTick(task, task.targetConfig)
-		return nil
-	} else if committed {
-		return nil
-	} else {
-		// Must be badread, which means again we should receive the
-		// updated topology through the subscriber.
-		return nil
-	}
+	txn := task.createTopologyTransaction(task.active, targetTopology, twoFInc, active, passive)
+	go func() {
+		committed, resubmit, err := task.rewriteTopology(txn, active, passive)
+		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			switch {
+			case task.task != task:
+				return nil
+
+			case err != nil:
+				return task.fatal(err)
+
+			case resubmit:
+				server.DebugLog(task.logger, "debug", "Installing to old requires resubmit.")
+				task.createOrAdvanceBackoff()
+				task.enqueueTick(task, task.targetConfig)
+				return nil
+
+			case committed:
+				return nil
+
+			default:
+				// Must be badread, which means again we should receive
+				// the updated topology through the subscriber.
+				return nil
+			}
+		}))
+	}()
+	return nil
 }
 
 func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, int, error) {
@@ -1247,17 +1276,29 @@ func (task *installTargetNew) tick() error {
 	topology := task.active.Clone()
 	topology.NextConfiguration.InstalledOnNew = true
 
-	_, _, resubmit, err := task.rewriteTopology(task.active, topology, twoFInc, active, passive)
-	if err != nil {
-		return task.fatal(err)
-	} else if resubmit {
-		server.DebugLog(task.logger, "debug", "Installing to new requires resubmit.")
-		task.createOrAdvanceBackoff()
-		task.enqueueTick(task, task.targetConfig)
-		return nil
-	} else {
-		return nil
-	}
+	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
+	go func() {
+		_, resubmit, err := task.rewriteTopology(txn, active, passive)
+		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			switch {
+			case task.task != task:
+				return nil
+
+			case err != nil:
+				return task.fatal(err)
+
+			case resubmit:
+				server.DebugLog(task.logger, "debug", "Installing to new requires resubmit.")
+				task.createOrAdvanceBackoff()
+				task.enqueueTick(task, task.targetConfig)
+				return nil
+
+			default:
+				return nil
+			}
+		}))
+	}()
+	return nil
 }
 
 // migrate
@@ -1293,6 +1334,9 @@ func (task *migrate) tick() error {
 		task.proposerBarrierReached = nil
 		task.varBarrierReached = nil
 
+		// 1. Install to the proposerManagers. Once we know this is on
+		// all our proposerManagers, we know that they will stop
+		// accepting client txns.
 		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
 			eng.ProposerSubscriber: func() error {
 				if activeNextConfig == task.installing {
@@ -1310,6 +1354,9 @@ func (task *migrate) tick() error {
 		activeNextConfig != task.varBarrierReached {
 		task.logger.Log("msg", "Migration: installing on to Vars.")
 
+		// 2. Install to the varManagers. They only confirm back to us
+		// once they've banned rolls, and ensured all active txns are
+		// completed.
 		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
 			eng.VarSubscriber: func() error {
 				if activeNextConfig == task.installing {
@@ -1327,6 +1374,12 @@ func (task *migrate) tick() error {
 		activeNextConfig == task.varBarrierReached {
 		task.logger.Log("msg", "Migration: all quiet, ready to attempt migration.")
 
+		// 3. By this point, we know that our vars can be safely
+		// migrated. They can still learn from other txns going on, but,
+		// because any RM receiving immigration will get F+1 copies, we
+		// guarantee that they will get at least one most-up-to-date
+		// copy of each relevant var, so it does not cause any problems
+		// for us if we receive learnt outcomes during emigration.
 		if task.isInRMs(task.active.RMs) {
 			// don't attempt any emigration unless we were in the old
 			// topology
@@ -1356,6 +1409,8 @@ func (task *migrate) tick() error {
 				changed = next.Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
 			}
 		}
+		// We track progress by updating the topology to remove RMs who
+		// have completed sending to us.
 		if !changed {
 			return nil
 		}
@@ -1377,18 +1432,29 @@ func (task *migrate) tick() error {
 		task.logger.Log("msg", "Recording local immigration progress.", "pending", next.Pending,
 			"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
-		_, _, resubmit, err := task.rewriteTopology(task.active, topology, twoFInc, active, passive)
-		if err != nil {
-			return task.fatal(err)
-		} else if resubmit {
-			task.createOrAdvanceBackoff()
-			task.enqueueTick(task, task.targetConfig)
-			return nil
-		} else {
-			// Must be commit, or badread, which means again we should
-			// receive the updated topology through the subscriber.
-			return nil
-		}
+		txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
+		go func() {
+			_, resubmit, err := task.rewriteTopology(txn, active, passive)
+			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+				switch {
+				case task.task != task:
+					return nil
+
+				case err != nil:
+					return task.fatal(err)
+
+				case resubmit:
+					task.createOrAdvanceBackoff()
+					task.enqueueTick(task, task.targetConfig)
+					return nil
+
+				default:
+					// Must be commit, or badread, which means again we should
+					// receive the updated topology through the subscriber.
+					return nil
+				}
+			}))
+		}()
 	}
 
 	task.shareGoalWithAll()
@@ -1469,18 +1535,30 @@ func (task *installCompletion) tick() error {
 	}
 	topology.RootVarUUIds = newRoots
 
-	_, _, resubmit, err := task.rewriteTopology(task.active, topology, twoFInc, active, passive)
-	if err != nil {
-		return task.fatal(err)
-	} else if resubmit {
-		task.createOrAdvanceBackoff()
-		task.enqueueTick(task, task.targetConfig)
-		return nil
-	} else {
-		// Must be commit, or badread, which means again we should
-		// receive the updated topology through the subscriber.
-		return nil
-	}
+	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
+	go func() {
+		_, resubmit, err := task.rewriteTopology(txn, active, passive)
+		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			switch {
+			case task.task != task:
+				return nil
+
+			case err != nil:
+				return task.fatal(err)
+
+			case resubmit:
+				task.createOrAdvanceBackoff()
+				task.enqueueTick(task, task.targetConfig)
+				return nil
+
+			default:
+				// Must be commit, or badread, which means again we should
+				// receive the updated topology through the subscriber.
+				return nil
+			}
+		}))
+	}()
+	return nil
 }
 
 // utils
@@ -1638,30 +1716,26 @@ func (task *targetConfig) createTopologyZero(config *configuration.NextConfigura
 	}
 }
 
-func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, twoFInc uint16, active, passive common.RMIds) (*configuration.Topology, bool, bool, error) {
-	txn := task.createTopologyTransaction(read, write, twoFInc, active, passive)
-
+func (task *targetConfig) rewriteTopology(txn *msgs.Txn, active, passive common.RMIds) (bool, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
 	server.DebugLog(task.logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := task.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
-		return nil, false, false, err
+		return false, false, err
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		topology := write.Clone()
-		topology.DBVersion = txnId
-		server.DebugLog(task.logger, "debug", "Txn Committed.", "TxnId", topology.DBVersion)
-		return topology, true, false, nil
+		server.DebugLog(task.logger, "debug", "Txn Committed.", "TxnId", txnId)
+		return true, false, nil
 	}
 	abort := result.Abort()
 	server.DebugLog(task.logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-		return nil, false, true, nil
+		return false, true, nil
 	}
 	abortUpdates := abort.Rerun()
 	if abortUpdates.Len() != 1 {
-		return nil, false, false,
+		return false, false,
 			fmt.Errorf("Internal error: readwrite of topology gave %v updates (1 expected)",
 				abortUpdates.Len())
 	}
@@ -1670,27 +1744,24 @@ func (task *targetConfig) rewriteTopology(read, write *configuration.Topology, t
 
 	updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
-		return nil, false, false,
+		return false, false,
 			fmt.Errorf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
 				updateActions.Len())
 	}
 	updateAction := updateActions.At(0)
 	if !bytes.Equal(updateAction.VarId(), configuration.TopologyVarUUId[:]) {
-		return nil, false, false,
+		return false, false,
 			fmt.Errorf("Internal error: update action from readwrite of topology is not for topology! %v",
 				common.MakeVarUUId(updateAction.VarId()))
 	}
 	if updateAction.Which() != msgs.ACTION_WRITE {
-		return nil, false, false,
+		return false, false,
 			fmt.Errorf("Internal error: update action from readwrite of topology gave non-write action!")
 	}
 	writeAction := updateAction.Write()
 	refs := writeAction.References()
-	topology, err := configuration.TopologyFromCap(dbversion, &refs, writeAction.Value())
-	if err != nil {
-		return nil, false, false, err
-	}
-	return topology, false, false, nil
+	_, err = configuration.TopologyFromCap(dbversion, &refs, writeAction.Value())
+	return false, false, err
 }
 
 func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {

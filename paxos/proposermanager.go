@@ -85,7 +85,7 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 	enqueued := pm.Exe.Enqueue(func() {
 		pm.topology = topology
 		for _, proposer := range pm.proposers {
-			proposer.TopologyChange(topology)
+			proposer.TopologyChanged(topology)
 		}
 		close(finished)
 	})

@@ -55,20 +55,14 @@ func NewOutcomeAccumulator(twoFInc int, acceptors common.RMIds, logger log.Logge
 	}
 }
 
-func (oa *OutcomeAccumulator) TopologyChange(topology *configuration.Topology) bool {
-	// We can only gain more RMsRemoved when a new topology is
-	// installed post barrier2 and migration. To get to barrier2, every
-	// live transaction must have its outcome known. Therefore by this
-	// point we should not have to deal with the removal of nodes
-	// causing winningOutcome needing to go from nil to non-nil.
-
-	// The above holds for user txns, but not for txns which are
-	// actually involved in a topology change. For example, a node
-	// which is being removed could start a topology txn, and then
-	// observe that the topology has changed and it has been
-	// removed. It then shuts down. This could result in a loss of
-	// acceptors and proposers. It's the loss of acceptors that's the
-	// biggest problem because we have no way to replace them.
+func (oa *OutcomeAccumulator) TopologyChanged(topology *configuration.Topology) bool {
+	// For txns which are actually involved in a topology change we
+	// have problems. For example, a node which is being removed could
+	// start a topology txn, and then observe that the topology has
+	// changed and it has been removed. It then shuts down. This could
+	// result in a loss of acceptors and proposers. It's the loss of
+	// acceptors that's the biggest problem because we have no way to
+	// replace them.
 
 	for rmId := range topology.RMsRemoved {
 		if acceptorOutcome, found := oa.acceptorOutcomes[rmId]; found {
@@ -76,7 +70,7 @@ func (oa *OutcomeAccumulator) TopologyChange(topology *configuration.Topology) b
 			server.DebugLog(oa.logger, "debug", "TopologyChange. OutcomeAccumulator deleting acceptor.", "acceptor", rmId)
 			oa.acceptors[acceptorOutcome.idx] = common.RMIdEmpty
 			if l := oa.acceptors.NonEmptyLen(); l < oa.fInc {
-				oa.fInc = l
+				oa.logger.Log("warning", "Enough acceptors have been removed that this txn will now never complete. Sorry.")
 			}
 			if !acceptorOutcome.tgcReceived {
 				acceptorOutcome.tgcReceived = true
