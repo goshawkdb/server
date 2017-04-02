@@ -73,10 +73,7 @@ func (bbe *BinaryBackoffEngine) After(fun func()) {
 	if duration := bbe.Cur; duration == 0 {
 		fun()
 	} else {
-		go func() {
-			time.Sleep(duration)
-			fun()
-		}()
+		time.AfterFunc(duration, fun)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"goshawkdb.io/server/network"
 	eng "goshawkdb.io/server/txnengine"
 	"math/rand"
+	"sync/atomic"
 	"time"
 )
 
@@ -202,95 +203,132 @@ func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) 
 }
 
 func (cp *configPublisher) publishConfig() error {
-	for {
-		if cp.root == nil || cp.json == nil {
-			return nil
+	if cp.root == nil || cp.json == nil {
+		return nil
+	}
+	seg := capn.NewBuffer(nil)
+	ctxn := cmsgs.NewClientTxn(seg)
+	ctxn.SetRetry(false)
+
+	actions := cmsgs.NewClientActionList(seg, 1)
+
+	action := actions.At(0)
+	action.SetVarId(cp.root.VarUUId[:])
+	action.SetReadwrite()
+	rw := action.Readwrite()
+	rw.SetVersion(cp.vsn[:])
+	rw.SetValue(cp.json)
+	rw.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
+
+	ctxn.SetActions(actions)
+
+	varPosMap := make(map[common.VarUUId]*common.Positions)
+	varPosMap[*cp.root.VarUUId] = cp.root.Positions
+
+	server.DebugLog(cp.logger, "debug", "Publishing Config.", "config", string(cp.json))
+
+	backoff := cp.backoff
+	var i uint32 = 0
+	closer := func() bool {
+		return atomic.CompareAndSwapUint32(&i, 0, 1)
+	}
+
+	time.AfterFunc(2*time.Second, func() {
+		if !closer() {
+			return
 		}
-		seg := capn.NewBuffer(nil)
-		ctxn := cmsgs.NewClientTxn(seg)
-		ctxn.SetRetry(false)
+		cp.exec(func() error {
+			if cp.backoff == backoff {
+				return cp.publishConfig()
+			} else {
+				return nil
+			}
+		})
+	})
 
-		actions := cmsgs.NewClientActionList(seg, 1)
-
-		action := actions.At(0)
-		action.SetVarId(cp.root.VarUUId[:])
-		action.SetReadwrite()
-		rw := action.Readwrite()
-		rw.SetVersion(cp.vsn[:])
-		rw.SetValue(cp.json)
-		rw.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
-
-		ctxn.SetActions(actions)
-
-		varPosMap := make(map[common.VarUUId]*common.Positions)
-		varPosMap[*cp.root.VarUUId] = cp.root.Positions
-
-		server.DebugLog(cp.logger, "debug", "Publishing Config.", "config", string(cp.json))
+	go func() {
 		_, result, err := cp.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)
-		retryAfterDelay := err != nil || (result != nil && result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT)
-		if err != nil {
-			// log, but ignore the error as it's most likely temporary
-			cp.logger.Log("msg", "Error during config publish.", "error", err)
-			err = nil
-		} else if result == nil { // shutdown
-			return nil
-		} else if result.Which() == msgs.OUTCOME_COMMIT {
-			server.DebugLog(cp.logger, "debug", "Publishing Config committed.")
-			return nil
+		if !closer() {
+			return
 		}
+		cp.exec(func() error {
+			if cp.backoff != backoff {
+				return nil
+			}
 
-		if retryAfterDelay {
-			server.DebugLog(cp.logger, "debug", "Publishing Config requires resubmit.")
-			backoff := cp.backoff
-			cp.backoff.Advance()
-			cp.backoff.After(func() {
-				cp.exec(func() error {
-					if cp.backoff == backoff {
-						return cp.publishConfig()
-					} else {
-						return nil
-					}
+			retryAfterDelay := err != nil || (result != nil && result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT)
+			if err != nil {
+				// log, but ignore the error as it's most likely temporary
+				cp.logger.Log("msg", "Error during config publish.", "error", err)
+				err = nil
+			} else if result == nil { // shutdown
+				return nil
+			} else if result.Which() == msgs.OUTCOME_COMMIT {
+				server.DebugLog(cp.logger, "debug", "Publishing Config committed.")
+				return nil
+			}
+
+			if retryAfterDelay {
+				server.DebugLog(cp.logger, "debug", "Publishing Config requires resubmit.")
+				cp.backoff.Advance()
+				cp.backoff.After(func() {
+					cp.exec(func() error {
+						if cp.backoff == backoff {
+							return cp.publishConfig()
+						} else {
+							return nil
+						}
+					})
 				})
-			})
-			return nil
-		}
+				return nil
+			}
 
-		server.DebugLog(cp.logger, "debug", "Publishing Config requires rerun.")
-		updates := result.Abort().Rerun()
-		found := false
-		var value []byte
-		for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
-			update := updates.At(idx)
-			updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
-			for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
-				updateAction := updateActions.At(idy)
-				if found = bytes.Equal(cp.root.VarUUId[:], updateAction.VarId()); found {
-					if updateAction.Which() == msgs.ACTION_WRITE {
-						cp.vsn = common.MakeTxnId(update.TxnId())
-						updateWrite := updateAction.Write()
-						value = updateWrite.Value()
-					} else {
-						// must be MISSING, which I'm really not sure should ever happen!
-						cp.vsn = common.VersionZero
+			server.DebugLog(cp.logger, "debug", "Publishing Config requires rerun.")
+			updates := result.Abort().Rerun()
+			found := false
+			var value []byte
+			for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
+				update := updates.At(idx)
+				updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
+				for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
+					updateAction := updateActions.At(idy)
+					if found = bytes.Equal(cp.root.VarUUId[:], updateAction.VarId()); found {
+						if updateAction.Which() == msgs.ACTION_WRITE {
+							cp.vsn = common.MakeTxnId(update.TxnId())
+							updateWrite := updateAction.Write()
+							value = updateWrite.Value()
+						} else {
+							// must be MISSING, which I'm really not sure should ever happen!
+							cp.vsn = common.VersionZero
+						}
 					}
 				}
 			}
-		}
-		if !found {
-			return errors.New("Internal error: failed to find update for rerun of config publishing")
-		}
-		if len(value) > 0 {
-			inDB := new(configuration.ConfigurationJSON)
-			if err := json.Unmarshal(value, inDB); err != nil {
-				return err
+			if !found {
+				return errors.New("Internal error: failed to find update for rerun of config publishing")
 			}
-			if inDB.Version > cp.topology.Version {
-				server.DebugLog(cp.logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
-				return nil
-			} else if inDB.Version == cp.topology.Version {
-				server.DebugLog(cp.logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
-				return nil
+			if len(value) > 0 {
+				inDB := new(configuration.ConfigurationJSON)
+				if err := json.Unmarshal(value, inDB); err != nil {
+					return err
+				}
+				if inDB.Version > cp.topology.Version {
+					server.DebugLog(cp.logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
+					return nil
+				} else if inDB.Version == cp.topology.Version {
+					server.DebugLog(cp.logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
+					return nil
+				}
 			}
-		}
-	}
+			cp.exec(func() error {
+				if cp.backoff == backoff {
+					return cp.publishConfig()
+				} else {
+					return nil
+				}
+			})
+			return nil
+		})
+	}()
+	return nil
 }

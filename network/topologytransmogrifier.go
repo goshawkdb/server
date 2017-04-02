@@ -468,6 +468,23 @@ func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask, tc *targetConfi
 	}
 }
 
+func (tt *TopologyTransmogrifier) maybeTick(task topologyTask, tc *targetConfig) func() bool {
+	var i uint32 = 0
+	closer := func() bool {
+		return atomic.CompareAndSwapUint32(&i, 0, 1)
+	}
+	time.AfterFunc(2*time.Second, func() {
+		if !closer() {
+			return
+		}
+		tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			tt.enqueueTick(task, tc)
+			return nil
+		}))
+	})
+	return closer
+}
+
 func (tt *TopologyTransmogrifier) migrationReceived(migration topologyTransmogrifierMsgMigration) error {
 	version := migration.migration.Version()
 	if version <= tt.active.Version {
@@ -936,7 +953,11 @@ func (task *installTargetOld) tick() error {
 
 	if rootsRequired != 0 {
 		go func() {
+			closer := task.maybeTick(task, task.targetConfig)
 			resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
+			if !closer() {
+				return
+			}
 			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				switch {
 				case task.task != task:
@@ -972,7 +993,11 @@ func (task *installTargetOld) installTargetOld(targetTopology *configuration.Top
 	twoFInc := uint16(task.active.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.active, targetTopology, twoFInc, active, passive)
 	go func() {
+		closer := task.maybeTick(task, task.targetConfig)
 		committed, resubmit, err := task.rewriteTopology(txn, active, passive)
+		if !closer() {
+			return
+		}
 		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 			switch {
 			case task.task != task:
@@ -1278,7 +1303,11 @@ func (task *installTargetNew) tick() error {
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 	go func() {
+		closer := task.maybeTick(task, task.targetConfig)
 		_, resubmit, err := task.rewriteTopology(txn, active, passive)
+		if !closer() {
+			return
+		}
 		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 			switch {
 			case task.task != task:
@@ -1434,7 +1463,11 @@ func (task *migrate) tick() error {
 
 		txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 		go func() {
+			closer := task.maybeTick(task, task.targetConfig)
 			_, resubmit, err := task.rewriteTopology(txn, active, passive)
+			if !closer() {
+				return
+			}
 			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				switch {
 				case task.task != task:
@@ -1537,7 +1570,11 @@ func (task *installCompletion) tick() error {
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 	go func() {
+		closer := task.maybeTick(task, task.targetConfig)
 		_, resubmit, err := task.rewriteTopology(txn, active, passive)
+		if !closer() {
+			return
+		}
 		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 			switch {
 			case task.task != task:
