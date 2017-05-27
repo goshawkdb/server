@@ -37,7 +37,7 @@ type AcceptorManager struct {
 
 type AcceptorMetrics struct {
 	Gauge    prometheus.Gauge
-	Lifespan prometheus.Histogram
+	Lifespan prometheus.Observer
 }
 
 func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {

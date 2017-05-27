@@ -44,7 +44,7 @@ type ProposerManager struct {
 
 type ProposerMetrics struct {
 	Gauge    prometheus.Gauge
-	Lifespan prometheus.Histogram
+	Lifespan prometheus.Observer
 }
 
 func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {

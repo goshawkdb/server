@@ -19,7 +19,7 @@ type ConnectionManager interface {
 
 type ClientTxnMetrics struct {
 	TxnSubmit   prometheus.Counter
-	TxnLatency  prometheus.Histogram
+	TxnLatency  prometheus.Observer
 	TxnResubmit prometheus.Counter
 	TxnRerun    prometheus.Counter
 }
