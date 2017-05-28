@@ -550,6 +550,13 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 
 		rootIndices := next.RootIndices().ToArray()
 		installedOnNew := next.InstalledOnNew()
+
+		quietRMIdsCap := next.QuietRMIds()
+		quietRMIds := make(map[common.RMId]bool, quietRMIdsCap.Len())
+		for idx, l := 0, quietRMIdsCap.Len(); idx < l; idx++ {
+			quietRMIds[common.RMId(quietRMIdsCap.At(idx))] = true
+		}
+
 		pending := next.Pending()
 
 		c.NextConfiguration = &NextConfiguration{
@@ -560,6 +567,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			LostRMIds:      lostRMIds,
 			RootIndices:    rootIndices,
 			InstalledOnNew: installedOnNew,
+			QuietRMIds:     quietRMIds,
 			Pending:        ConditionsFromCap(&pending),
 		}
 	}
@@ -662,6 +670,15 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		nextCap.SetRootIndices(rootIndicesCap)
 
 		nextCap.SetInstalledOnNew(nextConfig.InstalledOnNew)
+
+		quietRMIdsCap := seg.NewUInt32List(len(nextConfig.QuietRMIds))
+		idx := 0
+		for rmId := range nextConfig.QuietRMIds {
+			quietRMIdsCap.Set(idx, uint32(rmId))
+			idx++
+		}
+		nextCap.SetQuietRMIds(quietRMIdsCap)
+
 		nextCap.SetPending(nextConfig.Pending.AddToSeg(seg))
 	}
 	return cap
@@ -677,12 +694,13 @@ type NextConfiguration struct {
 	LostRMIds      common.RMIds
 	RootIndices    []uint32
 	InstalledOnNew bool
+	QuietRMIds     map[common.RMId]bool
 	Pending        Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n RootIndices: %v;\n InstalledOnNew: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.RootIndices, next.InstalledOnNew, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n RootIndices: %v;\n InstalledOnNew: %v;\n QuietRMIds: %v;\n Pending: %v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.RootIndices, next.InstalledOnNew, next.QuietRMIds, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -701,6 +719,15 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 	if len(a.RootIndices) == len(b.RootIndices) {
 		for idx, aIndex := range a.RootIndices {
 			if aIndex != b.RootIndices[idx] {
+				return false
+			}
+		}
+	} else {
+		return false
+	}
+	if len(a.QuietRMIds) == len(b.QuietRMIds) {
+		for rmId := range a.QuietRMIds {
+			if _, found := b.QuietRMIds[rmId]; !found {
 				return false
 			}
 		}
@@ -735,6 +762,11 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	rootIndices := make([]uint32, len(next.RootIndices))
 	copy(rootIndices, next.RootIndices)
 
+	quietRMIds := make(map[common.RMId]bool, len(next.QuietRMIds))
+	for rmId := range next.QuietRMIds {
+		quietRMIds[rmId] = true
+	}
+
 	// Assumption is that conditions are immutable. So the only thing
 	// we'll want to do is shrink the suppliers, so we do a copy of the
 	// suppliers, not a deep copy of the conditions.
@@ -756,6 +788,7 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 		LostRMIds:      lostRMIds,
 		RootIndices:    rootIndices,
 		InstalledOnNew: next.InstalledOnNew,
+		QuietRMIds:     quietRMIds,
 		Pending:        pending,
 	}
 }

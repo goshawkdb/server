@@ -27,9 +27,10 @@ struct Configuration {
       lostRMIds       @14: List(UInt32);
       rootIndices     @15: List(UInt32);
       installedOnNew  @16: Bool;
-      pending         @17: List(ConditionPair);
+      quietRMIds      @17: List(UInt32);
+      pending         @18: List(ConditionPair);
     }
-    stable           @18: Void;
+    stable           @19: Void;
   }
 }
 

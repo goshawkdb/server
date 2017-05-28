@@ -20,9 +20,9 @@ const (
 	CONFIGURATION_STABLE          Configuration_Which = 1
 )
 
-func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(24, 12)) }
-func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(24, 12)) }
-func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(24, 12)) }
+func NewConfiguration(s *C.Segment) Configuration      { return Configuration(s.NewStruct(24, 13)) }
+func NewRootConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewRootStruct(24, 13)) }
+func AutoNewConfiguration(s *C.Segment) Configuration  { return Configuration(s.NewStructAR(24, 13)) }
 func ReadRootConfiguration(s *C.Segment) Configuration { return Configuration(s.Root(0).ToStruct()) }
 func (s Configuration) Which() Configuration_Which     { return Configuration_Which(C.Struct(s).Get16(16)) }
 func (s Configuration) ClusterId() string              { return C.Struct(s).GetObject(0).ToText() }
@@ -88,11 +88,17 @@ func (s ConfigurationTransitioningTo) SetRootIndices(v C.UInt32List) {
 }
 func (s ConfigurationTransitioningTo) InstalledOnNew() bool     { return C.Struct(s).Get1(105) }
 func (s ConfigurationTransitioningTo) SetInstalledOnNew(v bool) { C.Struct(s).Set1(105, v) }
+func (s ConfigurationTransitioningTo) QuietRMIds() C.UInt32List {
+	return C.UInt32List(C.Struct(s).GetObject(11))
+}
+func (s ConfigurationTransitioningTo) SetQuietRMIds(v C.UInt32List) {
+	C.Struct(s).SetObject(11, C.Object(v))
+}
 func (s ConfigurationTransitioningTo) Pending() ConditionPair_List {
-	return ConditionPair_List(C.Struct(s).GetObject(11))
+	return ConditionPair_List(C.Struct(s).GetObject(12))
 }
 func (s ConfigurationTransitioningTo) SetPending(v ConditionPair_List) {
-	C.Struct(s).SetObject(11, C.Object(v))
+	C.Struct(s).SetObject(12, C.Object(v))
 }
 func (s Configuration) SetStable() { C.Struct(s).Set16(16, 1) }
 func (s Configuration) WriteJSON(w io.Writer) error {
@@ -580,6 +586,43 @@ func (s Configuration) WriteJSON(w io.Writer) error {
 					return err
 				}
 				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(',')
+			if err != nil {
+				return err
+			}
+			_, err = b.WriteString("\"quietRMIds\":")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.QuietRMIds()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
 				if err != nil {
 					return err
 				}
@@ -1139,6 +1182,43 @@ func (s Configuration) WriteCapLit(w io.Writer) error {
 			if err != nil {
 				return err
 			}
+			_, err = b.WriteString("quietRMIds = ")
+			if err != nil {
+				return err
+			}
+			{
+				s := s.QuietRMIds()
+				{
+					err = b.WriteByte('[')
+					if err != nil {
+						return err
+					}
+					for i, s := range s.ToArray() {
+						if i != 0 {
+							_, err = b.WriteString(", ")
+						}
+						if err != nil {
+							return err
+						}
+						buf, err = json.Marshal(s)
+						if err != nil {
+							return err
+						}
+						_, err = b.Write(buf)
+						if err != nil {
+							return err
+						}
+					}
+					err = b.WriteByte(']')
+				}
+				if err != nil {
+					return err
+				}
+			}
+			_, err = b.WriteString(", ")
+			if err != nil {
+				return err
+			}
 			_, err = b.WriteString("pending = ")
 			if err != nil {
 				return err
@@ -1201,7 +1281,7 @@ func (s Configuration) MarshalCapLit() ([]byte, error) {
 type Configuration_List C.PointerList
 
 func NewConfigurationList(s *C.Segment, sz int) Configuration_List {
-	return Configuration_List(s.NewCompositeList(24, 12, sz))
+	return Configuration_List(s.NewCompositeList(24, 13, sz))
 }
 func (s Configuration_List) Len() int { return C.PointerList(s).Len() }
 func (s Configuration_List) At(i int) Configuration {

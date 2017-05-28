@@ -624,6 +624,10 @@ func (task *targetConfig) tick() error {
 			task.logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", task.config)
 			task.task = &installTargetNew{targetConfig: task}
 
+		} else if !task.active.NextConfiguration.QuietRMIds[task.connectionManager.RMId] {
+			task.logger.Log("msg", "Waiting for quiet.", "configuration", task.config)
+			task.task = &quiet{targetConfig: task}
+
 		} else if len(task.active.NextConfiguration.Pending) > 0 {
 			task.logger.Log("msg", "Attempting to perform object migration for topology target.", "configuration", task.config)
 			task.task = &migrate{targetConfig: task}
@@ -1330,21 +1334,25 @@ func (task *installTargetNew) tick() error {
 	return nil
 }
 
-// migrate
+// quiet
 
-type migrate struct {
+type quiet struct {
 	*targetConfig
 	varBarrierReached      *configuration.Configuration
 	proposerBarrierReached *configuration.Configuration
 	installing             *configuration.Configuration
-	emigrator              *emigrator
 }
 
-func (task *migrate) witness() topologyTask { return task.targetConfig.witness() }
+func (task *quiet) witness() topologyTask { return task.targetConfig.witness() }
 
-func (task *migrate) tick() error {
+func (task *quiet) tick() error {
+	// The purpose of getting the vars to go quiet isn't just for
+	// emigration; it's also to require that txn outcomes are decided
+	// (consensus reached) before any acceptors get booted out. So we
+	// go through all this even if len(pending) is 0.
 	next := task.active.NextConfiguration
-	if !(next != nil && next.Version == task.config.Version && len(next.Pending) > 0) {
+	if !(next != nil && next.Version == task.config.Version &&
+		!next.QuietRMIds[task.connectionManager.RMId]) {
 		return task.completed()
 	}
 
@@ -1357,7 +1365,7 @@ func (task *migrate) tick() error {
 
 	activeNextConfig := next.Configuration
 	if activeNextConfig != task.installing {
-		task.logger.Log("msg", "Migration: installing on to Proposers.")
+		task.logger.Log("msg", "Quiet: installing on to Proposers.")
 
 		task.installing = activeNextConfig
 		task.proposerBarrierReached = nil
@@ -1381,7 +1389,7 @@ func (task *migrate) tick() error {
 
 	} else if activeNextConfig == task.proposerBarrierReached &&
 		activeNextConfig != task.varBarrierReached {
-		task.logger.Log("msg", "Migration: installing on to Vars.")
+		task.logger.Log("msg", "Quiet: installing on to Vars.")
 
 		// 2. Install to the varManagers. They only confirm back to us
 		// once they've banned rolls, and ensured all active txns are
@@ -1401,49 +1409,8 @@ func (task *migrate) tick() error {
 
 	} else if activeNextConfig == task.proposerBarrierReached &&
 		activeNextConfig == task.varBarrierReached {
-		task.logger.Log("msg", "Migration: all quiet, ready to attempt migration.")
 
-		// 3. By this point, we know that our vars can be safely
-		// migrated. They can still learn from other txns going on, but,
-		// because any RM receiving immigration will get F+1 copies, we
-		// guarantee that they will get at least one most-up-to-date
-		// copy of each relevant var, so it does not cause any problems
-		// for us if we receive learnt outcomes during emigration.
-		if task.isInRMs(task.active.RMs) {
-			// don't attempt any emigration unless we were in the old
-			// topology
-			task.ensureEmigrator()
-		}
-
-		if _, found := next.Pending[task.connectionManager.RMId]; !found {
-			task.logger.Log("msg", "All migration into all this RM completed. Awaiting others.")
-			return nil
-		}
-
-		senders, found := task.migrations[next.Version]
-		if !found {
-			return nil
-		}
-		maxSuppliers := task.active.RMs.NonEmptyLen() - int(task.active.F)
-		if task.isInRMs(task.active.RMs) {
-			// We were part of the old topology, so we have already supplied ourselves!
-			maxSuppliers--
-		}
-		topology := task.active.Clone()
-		next = topology.NextConfiguration
-		changed := false
-		for sender, inprogressPtr := range senders {
-			if atomic.LoadInt32(inprogressPtr) == 0 {
-				// Because we wait for locallyComplete, we know they've gone to disk.
-				changed = next.Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
-			}
-		}
-		// We track progress by updating the topology to remove RMs who
-		// have completed sending to us.
-		if !changed {
-			return nil
-		}
-
+		// 3. Now run a txn to record this.
 		active, passive := task.partitionByActiveConnection(next.RMs)
 		if len(active) <= len(passive) {
 			task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
@@ -1458,8 +1425,11 @@ func (task *migrate) tick() error {
 
 		twoFInc := uint16(next.RMs.NonEmptyLen())
 
-		task.logger.Log("msg", "Recording local immigration progress.", "pending", next.Pending,
+		task.logger.Log("msg", "Quiet achieved, recording progress.", "pending", next.Pending,
 			"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
+
+		topology := task.active.Clone()
+		topology.NextConfiguration.QuietRMIds[task.connectionManager.RMId] = true
 
 		txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 		go func() {
@@ -1489,6 +1459,113 @@ func (task *migrate) tick() error {
 			}))
 		}()
 	}
+
+	task.shareGoalWithAll()
+	return nil
+}
+
+// migrate
+
+type migrate struct {
+	*targetConfig
+	emigrator *emigrator
+}
+
+func (task *migrate) witness() topologyTask { return task.targetConfig.witness() }
+
+func (task *migrate) tick() error {
+	next := task.active.NextConfiguration
+	if !(next != nil && next.Version == task.config.Version && len(next.Pending) > 0) {
+		return task.completed()
+	}
+
+	task.logger.Log("msg", "Migration: all quiet, ready to attempt migration.")
+
+	// By this point, we know that our vars can be safely
+	// migrated. They can still learn from other txns going on, but,
+	// because any RM receiving immigration will get F+1 copies, we
+	// guarantee that they will get at least one most-up-to-date copy
+	// of each relevant var, so it does not cause any problems for us
+	// if we receive learnt outcomes during emigration.
+	if task.isInRMs(task.active.RMs) {
+		// don't attempt any emigration unless we were in the old
+		// topology
+		task.ensureEmigrator()
+	}
+
+	if _, found := next.Pending[task.connectionManager.RMId]; !found {
+		task.logger.Log("msg", "All migration into all this RM completed. Awaiting others.")
+		return nil
+	}
+
+	senders, found := task.migrations[next.Version]
+	if !found {
+		return nil
+	}
+	maxSuppliers := task.active.RMs.NonEmptyLen() - int(task.active.F)
+	if task.isInRMs(task.active.RMs) {
+		// We were part of the old topology, so we have already supplied ourselves!
+		maxSuppliers--
+	}
+	topology := task.active.Clone()
+	next = topology.NextConfiguration
+	changed := false
+	for sender, inprogressPtr := range senders {
+		if atomic.LoadInt32(inprogressPtr) == 0 {
+			// Because we wait for locallyComplete, we know they've gone to disk.
+			changed = next.Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
+		}
+	}
+	// We track progress by updating the topology to remove RMs who
+	// have completed sending to us.
+	if !changed {
+		return nil
+	}
+
+	active, passive := task.partitionByActiveConnection(next.RMs)
+	if len(active) <= len(passive) {
+		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
+		return nil
+	}
+
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	active, passive = active[:fInc], append(active[fInc:], passive...)
+	// add on all to-be-removed nodes (if there are any) as passives
+	passive = append(passive, next.LostRMIds...)
+
+	twoFInc := uint16(next.RMs.NonEmptyLen())
+
+	task.logger.Log("msg", "Recording local immigration progress.", "pending", next.Pending,
+		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
+
+	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
+	go func() {
+		closer := task.maybeTick(task, task.targetConfig)
+		_, resubmit, err := task.rewriteTopology(txn, active, passive)
+		if !closer() {
+			return
+		}
+		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			switch {
+			case task.task != task:
+				return nil
+
+			case err != nil:
+				return task.fatal(err)
+
+			case resubmit:
+				task.createOrAdvanceBackoff()
+				task.enqueueTick(task, task.targetConfig)
+				return nil
+
+			default:
+				// Must be commit, or badread, which means again we should
+				// receive the updated topology through the subscriber.
+				return nil
+			}
+		}))
+	}()
 
 	task.shareGoalWithAll()
 	return nil
@@ -1533,6 +1610,18 @@ func (task *installCompletion) tick() error {
 	if _, found := next.RMsRemoved[task.connectionManager.RMId]; found {
 		task.logger.Log("msg", "We've been removed from cluster. Taking no further part.")
 		return nil
+	}
+
+	noisyLimit := int(task.active.F)
+	for _, rmId := range task.active.RMs {
+		if _, found := next.QuietRMIds[rmId]; !found {
+			noisyLimit--
+			if noisyLimit < 0 {
+				task.logger.Log("msg", "Awaiting more original RMIds to become quiet.",
+					"originals", fmt.Sprint(task.active.RMs))
+				return nil
+			}
+		}
 	}
 
 	localHost, err := task.firstLocalHost(task.active.Configuration)
