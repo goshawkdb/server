@@ -63,6 +63,17 @@ func (oa *OutcomeAccumulator) TopologyChanged(topology *configuration.Topology) 
 	// result in a loss of acceptors and proposers. It's the loss of
 	// acceptors that's the biggest problem because we have no way to
 	// replace them.
+	//
+	// Active voters will detect the loss of the submitter and will
+	// issue abort proposals. For real client txns, an active voter
+	// can't go quiet until the outcomes are known (i.e. consensus
+	// reached), and then the topology itself can't change until |All|
+	// - F RMs report they're quiet. Which means that for normal client
+	// txns we're safe - the loss of acceptors can't leave anything
+	// dangling. E.g. an active voter receives a client txn and then
+	// some acceptors die. If the active voter can't contact at least
+	// F+1 acceptors then the active voter can't go quiet so no
+	// topology change can take place.
 
 	for rmId := range topology.RMsRemoved {
 		if acceptorOutcome, found := oa.acceptorOutcomes[rmId]; found {
