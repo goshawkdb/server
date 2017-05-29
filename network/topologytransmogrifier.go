@@ -688,19 +688,30 @@ func (task *targetConfig) completed() error {
 }
 
 // NB filters out empty RMIds so no need to pre-filter.
-func (task *targetConfig) partitionByActiveConnection(rmIdLists ...common.RMIds) (active, passive common.RMIds) {
+func (task *targetConfig) formActivePassive(activeCandidates, extraPassives common.RMIds) (active, passive common.RMIds) {
 	active, passive = []common.RMId{}, []common.RMId{}
-	for _, rmIds := range rmIdLists {
-		for _, rmId := range rmIds {
-			if rmId == common.RMIdEmpty {
-				continue
-			} else if _, found := task.activeConnections[rmId]; found {
-				active = append(active, rmId)
-			} else {
-				passive = append(passive, rmId)
-			}
+	for _, rmId := range activeCandidates {
+		if rmId == common.RMIdEmpty {
+			continue
+		} else if _, found := task.activeConnections[rmId]; found {
+			active = append(active, rmId)
+		} else {
+			passive = append(passive, rmId)
 		}
 	}
+
+	if len(active) <= len(passive) {
+		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
+		return nil, nil
+	}
+	// Be careful with this maths. The topology object is on every
+	// node, so we must use a majority of nodes. So if we have 6 nodes,
+	// then we must use 4 as actives. So we're essentially treating
+	// this as if it's a cluster of 7 with one failure.
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	active, passive = active[:fInc], append(active[fInc:], passive...)
+	passive = append(passive, extraPassives...)
 	return active, passive
 }
 
@@ -937,20 +948,11 @@ func (task *installTargetOld) tick() error {
 	}
 
 	// Here, we just want to use the RMs in the old topology only.
-	active, passive := task.partitionByActiveConnection(task.active.RMs)
-	if len(active) <= len(passive) {
-		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
-			"failures", fmt.Sprint(passive))
+	// And add on all new (if there are any) as passives
+	active, passive := task.formActivePassive(task.active.RMs, targetTopology.NextConfiguration.NewRMIds)
+	if active == nil {
 		return nil
 	}
-	// Be careful with this maths. The topology object is on every
-	// node, so we must use a majority of nodes. So if we have 6 nodes,
-	// then we must use 4 as actives. So we're essentially treating
-	// this as if it's a cluster of 7 with one failure.
-	fInc := ((len(active) + len(passive)) >> 1) + 1
-	active, passive = active[:fInc], append(active[fInc:], passive...)
-	// add on all new (if there are any) as passives
-	passive = append(passive, targetTopology.NextConfiguration.NewRMIds...)
 
 	task.logger.Log("msg", "Calculated target topology.", "configuration", targetTopology.NextConfiguration,
 		"newRoots", rootsRequired, "active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
@@ -1255,18 +1257,11 @@ func (task *installTargetNew) tick() error {
 	// node-to-be-removed has rushed ahead and has shutdown. So we
 	// can't rely on any to-be-removed node. So that means we can only
 	// rely on the nodes in next.RMs, which means we need a majority of
-	// them to be alive.
-	active, passive := task.partitionByActiveConnection(next.RMs)
-	if len(active) <= len(passive) {
-		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
-			"failures", fmt.Sprint(passive))
+	// them to be alive; and we use the removed RMs as extra passives.
+	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
+	if active == nil {
 		return nil
 	}
-
-	fInc := ((len(active) + len(passive)) >> 1) + 1
-	active, passive = active[:fInc], append(active[fInc:], passive...)
-	// add on all to-be-removed nodes (if there are any) as passives
-	passive = append(passive, next.LostRMIds...)
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
@@ -1358,17 +1353,10 @@ func (task *quiet) tick() error {
 		activeNextConfig == task.varBarrierReached {
 
 		// 3. Now run a txn to record this.
-		active, passive := task.partitionByActiveConnection(next.RMs)
-		if len(active) <= len(passive) {
-			task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
-				"failures", fmt.Sprint(passive))
+		active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
+		if active == nil {
 			return nil
 		}
-
-		fInc := ((len(active) + len(passive)) >> 1) + 1
-		active, passive = active[:fInc], append(active[fInc:], passive...)
-		// add on all to-be-removed nodes (if there are any) as passives
-		passive = append(passive, next.LostRMIds...)
 
 		twoFInc := uint16(next.RMs.NonEmptyLen())
 
@@ -1444,17 +1432,10 @@ func (task *migrate) tick() error {
 		return nil
 	}
 
-	active, passive := task.partitionByActiveConnection(next.RMs)
-	if len(active) <= len(passive) {
-		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
-			"failures", fmt.Sprint(passive))
+	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
+	if active == nil {
 		return nil
 	}
-
-	fInc := ((len(active) + len(passive)) >> 1) + 1
-	active, passive = active[:fInc], append(active[fInc:], passive...)
-	// add on all to-be-removed nodes (if there are any) as passives
-	passive = append(passive, next.LostRMIds...)
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
@@ -1509,11 +1490,11 @@ func (task *installCompletion) tick() error {
 		return nil
 	}
 
-	noisyLimit := int(task.active.F)
+	noisyCount := 0
 	for _, rmId := range task.active.RMs {
 		if _, found := next.QuietRMIds[rmId]; !found {
-			noisyLimit--
-			if noisyLimit < 0 {
+			noisyCount++
+			if noisyCount > int(task.active.F) {
 				task.logger.Log("msg", "Awaiting more original RMIds to become quiet.",
 					"originals", fmt.Sprint(task.active.RMs))
 				return nil
@@ -1530,17 +1511,10 @@ func (task *installCompletion) tick() error {
 	task.installTopology(task.active, nil, localHost, remoteHosts)
 	task.shareGoalWithAll()
 
-	active, passive := task.partitionByActiveConnection(next.RMs)
-	if len(active) <= len(passive) {
-		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
-			"failures", fmt.Sprint(passive))
+	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
+	if active == nil {
 		return nil
 	}
-
-	fInc := ((len(active) + len(passive) - 1) >> 1) + 1
-	active, passive = active[:fInc], append(active[fInc:], passive...)
-	// add on all to-be-removed nodes (if there are any) as passives
-	passive = append(passive, next.LostRMIds...)
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
