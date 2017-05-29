@@ -996,36 +996,7 @@ func (task *installTargetOld) installTargetOld(targetTopology *configuration.Top
 	// we've checked once above.
 	twoFInc := uint16(task.active.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.active, targetTopology, twoFInc, active, passive)
-	go func() {
-		closer := task.maybeTick(task, task.targetConfig)
-		committed, resubmit, err := task.rewriteTopology(txn, active, passive)
-		if !closer() {
-			return
-		}
-		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			switch {
-			case task.task != task:
-				return nil
-
-			case err != nil:
-				return task.fatal(err)
-
-			case resubmit:
-				server.DebugLog(task.logger, "debug", "Installing to old requires resubmit.")
-				task.createOrAdvanceBackoff()
-				task.enqueueTick(task, task.targetConfig)
-				return nil
-
-			case committed:
-				return nil
-
-			default:
-				// Must be badread, which means again we should receive
-				// the updated topology through the subscriber.
-				return nil
-			}
-		}))
-	}()
+	go task.runTopologyTransaction(task, txn, active, passive)
 	return nil
 }
 
@@ -1306,31 +1277,7 @@ func (task *installTargetNew) tick() error {
 	topology.NextConfiguration.InstalledOnNew = true
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
-	go func() {
-		closer := task.maybeTick(task, task.targetConfig)
-		_, resubmit, err := task.rewriteTopology(txn, active, passive)
-		if !closer() {
-			return
-		}
-		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			switch {
-			case task.task != task:
-				return nil
-
-			case err != nil:
-				return task.fatal(err)
-
-			case resubmit:
-				server.DebugLog(task.logger, "debug", "Installing to new requires resubmit.")
-				task.createOrAdvanceBackoff()
-				task.enqueueTick(task, task.targetConfig)
-				return nil
-
-			default:
-				return nil
-			}
-		}))
-	}()
+	go task.runTopologyTransaction(task, txn, active, passive)
 	return nil
 }
 
@@ -1432,32 +1379,7 @@ func (task *quiet) tick() error {
 		topology.NextConfiguration.QuietRMIds[task.connectionManager.RMId] = true
 
 		txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
-		go func() {
-			closer := task.maybeTick(task, task.targetConfig)
-			_, resubmit, err := task.rewriteTopology(txn, active, passive)
-			if !closer() {
-				return
-			}
-			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-				switch {
-				case task.task != task:
-					return nil
-
-				case err != nil:
-					return task.fatal(err)
-
-				case resubmit:
-					task.createOrAdvanceBackoff()
-					task.enqueueTick(task, task.targetConfig)
-					return nil
-
-				default:
-					// Must be commit, or badread, which means again we should
-					// receive the updated topology through the subscriber.
-					return nil
-				}
-			}))
-		}()
+		go task.runTopologyTransaction(task, txn, active, passive)
 	}
 
 	task.shareGoalWithAll()
@@ -1540,32 +1462,7 @@ func (task *migrate) tick() error {
 		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
-	go func() {
-		closer := task.maybeTick(task, task.targetConfig)
-		_, resubmit, err := task.rewriteTopology(txn, active, passive)
-		if !closer() {
-			return
-		}
-		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			switch {
-			case task.task != task:
-				return nil
-
-			case err != nil:
-				return task.fatal(err)
-
-			case resubmit:
-				task.createOrAdvanceBackoff()
-				task.enqueueTick(task, task.targetConfig)
-				return nil
-
-			default:
-				// Must be commit, or badread, which means again we should
-				// receive the updated topology through the subscriber.
-				return nil
-			}
-		}))
-	}()
+	go task.runTopologyTransaction(task, txn, active, passive)
 
 	task.shareGoalWithAll()
 	return nil
@@ -1658,36 +1555,38 @@ func (task *installCompletion) tick() error {
 	topology.RootVarUUIds = newRoots
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
-	go func() {
-		closer := task.maybeTick(task, task.targetConfig)
-		_, resubmit, err := task.rewriteTopology(txn, active, passive)
-		if !closer() {
-			return
-		}
-		task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			switch {
-			case task.task != task:
-				return nil
-
-			case err != nil:
-				return task.fatal(err)
-
-			case resubmit:
-				task.createOrAdvanceBackoff()
-				task.enqueueTick(task, task.targetConfig)
-				return nil
-
-			default:
-				// Must be commit, or badread, which means again we should
-				// receive the updated topology through the subscriber.
-				return nil
-			}
-		}))
-	}()
+	go task.runTopologyTransaction(task, txn, active, passive)
 	return nil
 }
 
 // utils
+
+func (tc *targetConfig) runTopologyTransaction(task topologyTask, txn *msgs.Txn, active, passive common.RMIds) {
+	closer := tc.maybeTick(task, tc)
+	_, resubmit, err := tc.rewriteTopology(txn, active, passive)
+	if !closer() {
+		return
+	}
+	tc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+		switch {
+		case tc.task != task:
+			return nil
+
+		case err != nil:
+			return tc.fatal(err)
+
+		case resubmit:
+			tc.createOrAdvanceBackoff()
+			tc.enqueueTick(task, tc)
+			return nil
+
+		default:
+			// Must be commit, or badread, which means again we should
+			// receive the updated topology through the subscriber.
+			return nil
+		}
+	}))
+}
 
 func (task *targetConfig) createTopologyTransaction(read, write *configuration.Topology, twoFInc uint16, active, passive common.RMIds) *msgs.Txn {
 	if write == nil && read != nil {
