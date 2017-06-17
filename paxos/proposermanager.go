@@ -39,6 +39,7 @@ type ProposerManager struct {
 	proposals     map[instanceIdPrefix]*proposal
 	proposers     map[common.TxnId]*Proposer
 	topology      *configuration.Topology
+	onDisk        func(bool)
 	metrics       *ProposerMetrics
 }
 
@@ -81,25 +82,46 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 }
 
 func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan struct{})
+	finished := make(chan bool)
 	enqueued := pm.Exe.Enqueue(func() {
+		if od := pm.onDisk; od != nil {
+			pm.onDisk = nil
+			od(false)
+		}
 		pm.topology = topology
 		for _, proposer := range pm.proposers {
 			proposer.TopologyChanged(topology)
 		}
-		close(finished)
+		if topology.NextConfiguration == nil {
+			finished <- true
+		} else {
+			pm.onDisk = func(result bool) { finished <- result }
+			pm.checkAllDisk()
+		}
 	})
 	if enqueued {
 		go pm.Exe.WithTerminatedChan(func(terminated chan struct{}) {
 			select {
-			case <-finished:
-				done(true)
+			case success := <-finished:
+				done(success)
 			case <-terminated:
 				done(false)
 			}
 		})
 	} else {
 		done(false)
+	}
+}
+
+func (pm *ProposerManager) checkAllDisk() {
+	if od := pm.onDisk; od != nil {
+		for _, proposer := range pm.proposers {
+			if !proposer.TLCDone() {
+				return
+			}
+		}
+		pm.onDisk = nil
+		od(true)
 	}
 }
 
@@ -301,6 +323,11 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 	default:
 		panic(fmt.Sprintf("Unexpected 2BVotes type: %v", twoBTxnVotes.Which()))
 	}
+}
+
+// from proposer, callback
+func (pm *ProposerManager) TxnLocallyComplete(p *Proposer) {
+	pm.checkAllDisk()
 }
 
 // from network

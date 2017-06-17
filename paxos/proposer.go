@@ -190,6 +190,12 @@ func (p *Proposer) TopologyChanged(topology *configuration.Topology) {
 	}
 }
 
+func (p *Proposer) TLCDone() bool {
+	return p.currentState == &p.proposerReceiveGloballyComplete ||
+		p.currentState == &p.proposerAwaitFinished ||
+		p.currentState == nil
+}
+
 type proposerStateMachineComponent interface {
 	init(*Proposer)
 	start()
@@ -490,6 +496,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		prgc.tlcSender = NewRepeatingSender(tlcMsg, prgc.acceptors...)
 		server.DebugLog(prgc, "debug", "Adding TLC Sender.", "acceptors", prgc.acceptors)
 		prgc.proposerManager.AddServerConnectionSubscriber(prgc.tlcSender)
+		prgc.proposerManager.TxnLocallyComplete(prgc.Proposer)
 	}
 }
 

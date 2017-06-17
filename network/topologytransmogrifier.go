@@ -24,23 +24,22 @@ import (
 )
 
 type TopologyTransmogrifier struct {
-	logger               log.Logger
-	db                   *db.Databases
-	connectionManager    *ConnectionManager
-	localConnection      *client.LocalConnection
-	active               *configuration.Topology
-	installedOnProposers *configuration.Topology
-	hostToConnection     map[string]paxos.Connection
-	activeConnections    map[common.RMId]paxos.Connection
-	migrations           map[uint32]map[common.RMId]*int32
-	task                 topologyTask
-	cellTail             *cc.ChanCellTail
-	enqueueQueryInner    func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan            <-chan topologyTransmogrifierMsg
-	listenPort           uint16
-	rng                  *rand.Rand
-	shutdownSignaller    ShutdownSignaller
-	localEstablished     chan struct{}
+	logger            log.Logger
+	db                *db.Databases
+	connectionManager *ConnectionManager
+	localConnection   *client.LocalConnection
+	active            *configuration.Topology
+	hostToConnection  map[string]paxos.Connection
+	activeConnections map[common.RMId]paxos.Connection
+	migrations        map[uint32]map[common.RMId]*int32
+	task              topologyTask
+	cellTail          *cc.ChanCellTail
+	enqueueQueryInner func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
+	queryChan         <-chan topologyTransmogrifierMsg
+	listenPort        uint16
+	rng               *rand.Rand
+	shutdownSignaller ShutdownSignaller
+	localEstablished  chan struct{}
 }
 
 type topologyTransmogrifierMsg interface {
