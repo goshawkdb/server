@@ -199,9 +199,12 @@ func (oa *OutcomeAccumulator) IsAllAborts() (acceptors []common.RMId) {
 			if (*msgs.Outcome)(tOut.outcome).Which() == msgs.OUTCOME_ABORT {
 				// dups are impossible by construction
 				if acceptors == nil {
-					acceptors = make([]common.RMId, 0, len(oa.acceptors))
+					acceptors = tOut.acceptors.NonEmpty()
+				} else {
+					// we already found some other abort - so they're not
+					// all the same abort.
+					return nil
 				}
-				acceptors = append(acceptors, tOut.acceptors.NonEmpty()...)
 			} else { // if it's not abort, it must be commit
 				return nil
 			}

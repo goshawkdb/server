@@ -196,6 +196,18 @@ func (p *Proposer) TLCDone() bool {
 		p.currentState == nil
 }
 
+func (p *Proposer) IsTopologyTxn() bool {
+	if p.txn == nil {
+		return false
+	}
+	actions := p.txn.TxnReader.Actions(true).Actions()
+	if actions.Len() != 1 {
+		return false
+	}
+	vUUId := common.MakeVarUUId(actions.At(1).VarId())
+	return vUUId.Compare(configuration.TopologyVarUUId) == common.EQ
+}
+
 type proposerStateMachineComponent interface {
 	init(*Proposer)
 	start()
@@ -345,7 +357,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 		pro.allAcceptorsAgree()
 	}
 	if outcome == nil && pro.mode == ProposerPassiveLearner {
-		if knownAcceptors := pro.outcomeAccumulator.IsAllAborts(); knownAcceptors != nil {
+		if knownAcceptors := pro.outcomeAccumulator.IsAllAborts(); len(knownAcceptors) != 0 {
 			// As a passiveLearner, we started this proposer through
 			// receiving a commit outcome. However, that has changed, due
 			// to failures and every outcome we have is for the same
@@ -356,7 +368,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			pro.proposerManager.FinishProposals(pro.txnId)
 			pro.proposerManager.TxnFinished(pro.Proposer)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
-			// We are destroying out state here. Thus even if this msg
+			// We are destroying our state here. Thus even if this msg
 			// goes missing, if the acceptor sends us further 2Bs then
 			// we'll send back further TLCs from proposer manager. So the
 			// use of OSS here is correct.

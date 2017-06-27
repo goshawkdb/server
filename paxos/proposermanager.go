@@ -116,7 +116,7 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 func (pm *ProposerManager) checkAllDisk() {
 	if od := pm.onDisk; od != nil {
 		for _, proposer := range pm.proposers {
-			if !proposer.TLCDone() {
+			if !(proposer.TLCDone() || proposer.IsTopologyTxn()) {
 				return
 			}
 		}
@@ -266,6 +266,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 		if proposer, found := pm.proposers[*txnId]; found {
 			server.DebugLog(pm.logger, "debug", "2B outcome received. Known.", "TxnId", txnId, "sender", sender)
 			proposer.BallotOutcomeReceived(sender, &outcome)
+			pm.checkAllDisk()
 			return
 		}
 
@@ -298,6 +299,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 
 			proposer := pm.createProposerStart(txn, ProposerActiveLearner, pm.topology)
 			proposer.BallotOutcomeReceived(sender, &outcome)
+			pm.checkAllDisk()
 		} else {
 			// Not active, so we are a learner
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
@@ -305,6 +307,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// we must be a learner.
 				proposer := pm.createProposerStart(txn, ProposerPassiveLearner, pm.topology)
 				proposer.BallotOutcomeReceived(sender, &outcome)
+				pm.checkAllDisk()
 
 			} else {
 				// Whilst it's an abort now, at some point in the past it
