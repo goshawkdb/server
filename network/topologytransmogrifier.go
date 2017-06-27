@@ -1279,9 +1279,8 @@ func (task *installTargetNew) tick() error {
 
 type quiet struct {
 	*targetConfig
-	varBarrierReached      *configuration.Configuration
-	proposerBarrierReached *configuration.Configuration
-	installing             *configuration.Configuration
+	installing *configuration.Configuration
+	stage      uint8
 }
 
 func (task *quiet) witness() topologyTask { return task.targetConfig.witness() }
@@ -1306,19 +1305,25 @@ func (task *quiet) tick() error {
 
 	activeNextConfig := next.Configuration
 	if activeNextConfig != task.installing {
-		task.logger.Log("msg", "Quiet: installing on to Proposers.")
-
 		task.installing = activeNextConfig
-		task.proposerBarrierReached = nil
-		task.varBarrierReached = nil
+		task.stage = 0
+		task.logger.Log("msg", "Quiet: new target topology detected; restarting.")
+	}
 
-		// 1. Install to the proposerManagers. Once we know this is on
+	switch task.stage {
+	case 0, 2:
+		task.logger.Log("msg", fmt.Sprintf("Quiet: installing on to Proposers (%d of 3).", task.stage+1))
+		// 0: Install to the proposerManagers. Once we know this is on
 		// all our proposerManagers, we know that they will stop
 		// accepting client txns.
+		// 2: Install to the proposers again. This is to ensure that
+		// TLCs have been written to disk.
 		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
 			eng.ProposerSubscriber: func() error {
 				if activeNextConfig == task.installing {
-					task.proposerBarrierReached = activeNextConfig
+					if task.stage == 0 || task.stage == 2 {
+						task.stage++
+					}
 				}
 				if task.task == nil {
 					return nil
@@ -1328,17 +1333,15 @@ func (task *quiet) tick() error {
 			},
 		}, localHost, remoteHosts)
 
-	} else if activeNextConfig == task.proposerBarrierReached &&
-		activeNextConfig != task.varBarrierReached {
-		task.logger.Log("msg", "Quiet: installing on to Vars.")
-
-		// 2. Install to the varManagers. They only confirm back to us
+	case 1:
+		task.logger.Log("msg", "Quiet: installing on to Vars (2 of 3).")
+		// 1: Install to the varManagers. They only confirm back to us
 		// once they've banned rolls, and ensured all active txns are
-		// completed.
+		// completed (though the TLC may not have gone to disk yet).
 		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
 			eng.VarSubscriber: func() error {
-				if activeNextConfig == task.installing {
-					task.varBarrierReached = activeNextConfig
+				if activeNextConfig == task.installing && task.stage == 1 {
+					task.stage = 2
 				}
 				if task.task == nil {
 					return nil
@@ -1348,10 +1351,8 @@ func (task *quiet) tick() error {
 			},
 		}, localHost, remoteHosts)
 
-	} else if activeNextConfig == task.proposerBarrierReached &&
-		activeNextConfig == task.varBarrierReached {
-
-		// 3. Now run a txn to record this.
+	case 3:
+		// Now run a txn to record this.
 		active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 		if active == nil {
 			return nil
@@ -1367,6 +1368,9 @@ func (task *quiet) tick() error {
 
 		txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 		go task.runTopologyTransaction(task, txn, active, passive)
+
+	default:
+		panic(fmt.Sprintf("Unexpected stage: %d", task.stage))
 	}
 
 	task.shareGoalWithAll()
