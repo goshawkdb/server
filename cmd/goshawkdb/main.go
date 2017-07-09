@@ -431,6 +431,9 @@ func (s *server) signalHandler() {
 				// stdout has errored; probably whatever we were being
 				// piped to has died.
 				s.SignalShutdown()
+			} else if _, err := os.Stderr.WriteString("Socket has closed\n"); err != nil {
+				// ahh, it's stderr that has errored. Same reasoning as above.
+				s.SignalShutdown()
 			}
 		case syscall.SIGTERM, syscall.SIGINT:
 			s.SignalShutdown()
