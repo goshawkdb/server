@@ -116,7 +116,7 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 func (pm *ProposerManager) checkAllDisk() {
 	if od := pm.onDisk; od != nil {
 		for _, proposer := range pm.proposers {
-			if !(proposer.TLCDone() || proposer.IsTopologyTxn()) {
+			if !(proposer.TLCDone()) { // || proposer.IsTopologyTxn()) {
 				return
 			}
 		}

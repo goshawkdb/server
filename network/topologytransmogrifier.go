@@ -455,6 +455,7 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask, tc *targetConfig) {
 	if !tc.tickEnqueued {
 		tc.tickEnqueued = true
+		tc.createOrAdvanceBackoff()
 		tc.backoff.After(func() {
 			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
 				tc.tickEnqueued = false
@@ -972,7 +973,6 @@ func (task *installTargetOld) tick() error {
 					return task.fatal(err)
 
 				case resubmit:
-					task.createOrAdvanceBackoff()
 					task.enqueueTick(task, task.targetConfig)
 					return nil
 
@@ -1553,7 +1553,6 @@ func (tc *targetConfig) runTopologyTransaction(task topologyTask, txn *msgs.Txn,
 			return tc.fatal(err)
 
 		case resubmit:
-			tc.createOrAdvanceBackoff()
 			tc.enqueueTick(task, tc)
 			return nil
 
