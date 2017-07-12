@@ -175,7 +175,7 @@ func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) 
 	cp.backoff = nil
 	cp.json = nil
 
-	if topology.NextConfiguration != nil {
+	if topology == nil || topology.NextConfiguration != nil {
 		// it's not safe to publish during topology changes.
 		return nil
 	}

@@ -411,10 +411,6 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 		case goal.Version == tt.active.Version:
 			return fmt.Errorf("Illegal config change: Config has changed but Version has not been increased (%v). Ignoring.", goal.Version)
 		}
-
-		if activeClusterUUId != 0 {
-			goal.EnsureClusterUUId(activeClusterUUId)
-		}
 	}
 
 	if tt.task != nil {
@@ -989,9 +985,6 @@ func (task *installTargetOld) tick() error {
 }
 
 func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology, active, passive common.RMIds) error {
-	targetTopology.EnsureClusterUUId(task.active.ClusterUUId)
-	server.DebugLog(task.logger, "debug", "Set cluster uuid.", "uuid", targetTopology.ClusterUUId)
-
 	// We use all the nodes in the old cluster as potential
 	// acceptors. We will require a majority of them are alive, which
 	// we've checked once above.
@@ -1185,6 +1178,12 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		InstalledOnNew: len(rmIdsAdded) == 0,
 		Pending:        conds,
 	}
+	// This is the only time that we go from a topology with a nil
+	// next, to one with a non-nil next. Therefore, we must ensure the
+	// ClusterUUId is non-0 and consistent down the chain. Of course,
+	// the txn will ensure only one such rewrite will win.
+	targetTopology.EnsureClusterUUId(0)
+	server.DebugLog(task.logger, "debug", "Set cluster uuid.", "uuid", targetTopology.ClusterUUId)
 
 	return targetTopology, rootsRequired, nil
 }

@@ -394,6 +394,16 @@ func (config *Configuration) EnsureClusterUUId(uuid uint64) uint64 {
 			config.ClusterUUId = uuid
 		}
 	}
+
+	nc := config.NextConfiguration
+	for nc != nil {
+		if c := nc.Configuration; c == nil {
+			nc = nil
+		} else {
+			c.ClusterUUId = config.ClusterUUId
+			nc = c.NextConfiguration
+		}
+	}
 	return config.ClusterUUId
 }
 
