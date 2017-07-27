@@ -451,6 +451,7 @@ func (cr *connectionRun) start() (bool, error) {
 func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
 	switch {
 	case cr.Protocol != nil:
+		cr.topology = tc.topology
 		return cr.Protocol.TopologyChanged(tc)
 	default:
 		tc.maybeClose()

@@ -132,7 +132,7 @@ func (p *Proposer) Start() {
 	if p.topology != nil {
 		topology := p.topology
 		p.topology = nil
-		p.TopologyChange(topology)
+		p.TopologyChanged(topology)
 	}
 
 	p.currentState.start()
@@ -155,13 +155,13 @@ func (p *Proposer) Status(sc *server.StatusConsumer) {
 	sc.Join()
 }
 
-func (p *Proposer) TopologyChange(topology *configuration.Topology) {
+func (p *Proposer) TopologyChanged(topology *configuration.Topology) {
 	if topology == p.topology {
 		return
 	}
 	p.topology = topology
 	rmsRemoved := topology.RMsRemoved
-	server.DebugLog(p, "debug", "TopologyChange.",
+	server.DebugLog(p, "debug", "TopologyChanged.",
 		"currentState", p.currentState, "RMsRemoved", rmsRemoved)
 	if _, found := rmsRemoved[p.proposerManager.RMId]; found {
 		return
@@ -178,7 +178,7 @@ func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 
 	switch p.currentState {
 	case &p.proposerAwaitBallots, &p.proposerReceiveOutcomes, &p.proposerAwaitLocallyComplete:
-		if p.outcomeAccumulator.TopologyChange(topology) {
+		if p.outcomeAccumulator.TopologyChanged(topology) {
 			p.allAcceptorsAgree()
 		}
 	case &p.proposerReceiveGloballyComplete:
@@ -188,6 +188,24 @@ func (p *Proposer) TopologyChange(topology *configuration.Topology) {
 	case &p.proposerAwaitFinished:
 		// do nothing
 	}
+}
+
+func (p *Proposer) TLCDone() bool {
+	return p.currentState == &p.proposerReceiveGloballyComplete ||
+		p.currentState == &p.proposerAwaitFinished ||
+		p.currentState == nil
+}
+
+func (p *Proposer) IsTopologyTxn() bool {
+	if p.txn == nil {
+		return false
+	}
+	actions := p.txn.TxnReader.Actions(true).Actions()
+	if actions.Len() != 1 {
+		return false
+	}
+	vUUId := common.MakeVarUUId(actions.At(1).VarId())
+	return vUUId.Compare(configuration.TopologyVarUUId) == common.EQ
 }
 
 type proposerStateMachineComponent interface {
@@ -339,7 +357,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 		pro.allAcceptorsAgree()
 	}
 	if outcome == nil && pro.mode == ProposerPassiveLearner {
-		if knownAcceptors := pro.outcomeAccumulator.IsAllAborts(); knownAcceptors != nil {
+		if knownAcceptors := pro.outcomeAccumulator.IsAllAborts(); len(knownAcceptors) != 0 {
 			// As a passiveLearner, we started this proposer through
 			// receiving a commit outcome. However, that has changed, due
 			// to failures and every outcome we have is for the same
@@ -350,7 +368,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			pro.proposerManager.FinishProposals(pro.txnId)
 			pro.proposerManager.TxnFinished(pro.Proposer)
 			tlcMsg := MakeTxnLocallyCompleteMsg(pro.txnId)
-			// We are destroying out state here. Thus even if this msg
+			// We are destroying our state here. Thus even if this msg
 			// goes missing, if the acceptor sends us further 2Bs then
 			// we'll send back further TLCs from proposer manager. So the
 			// use of OSS here is correct.
@@ -451,7 +469,7 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 
 	data := server.SegToBytes(stateSeg)
 
-	future := palc.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+	future := palc.proposerManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Put(palc.proposerManager.DB.Proposers, palc.txnId[:], data, 0)
 		return true
 	})
@@ -490,6 +508,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		prgc.tlcSender = NewRepeatingSender(tlcMsg, prgc.acceptors...)
 		server.DebugLog(prgc, "debug", "Adding TLC Sender.", "acceptors", prgc.acceptors)
 		prgc.proposerManager.AddServerConnectionSubscriber(prgc.tlcSender)
+		prgc.proposerManager.TxnLocallyComplete(prgc.Proposer)
 	}
 }
 
@@ -540,7 +559,7 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 	server.DebugLog(paf, "debug", "Txn Finished Callback.")
 	if paf.currentState == paf {
 		paf.nextState()
-		future := paf.proposerManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+		future := paf.proposerManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 			rwtxn.Del(paf.proposerManager.DB.Proposers, paf.txnId[:], nil)
 			return true
 		})

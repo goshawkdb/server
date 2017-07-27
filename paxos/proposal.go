@@ -494,7 +494,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			// have made contact with at least F+1 acceptors and got
 			// answers back from them, in which case we know that all the
 			// active voters have also contacted acceptors (if they have
-			// not, we would definitely note have F+1 results), which
+			// not, we would definitely not have F+1 results), which
 			// means they have all received the txn itself. In the second
 			// case, we know there are going to be future proposal
 			// stages, so we will pick up any failures at that time. So

@@ -45,7 +45,7 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 	}
 	exe.Enqueue(func() {
 		vm.Topology = tp.AddTopologySubscriber(VarSubscriber, vm)
-		vm.RollAllowed = vm.Topology == nil || !vm.Topology.NextConfiguration.BarrierReached1For(rmId)
+		vm.RollAllowed = vm.Topology != nil && vm.Topology.NextConfiguration == nil
 	})
 	return vm
 }
@@ -58,22 +58,15 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 			od(false)
 		}
 		vm.Topology = topology
-		oldRollAllowed := vm.RollAllowed
-		if !oldRollAllowed {
-			vm.RollAllowed = topology == nil || !topology.NextConfiguration.BarrierReached1For(vm.RMId)
-		}
-		server.DebugLog(vm.logger, "debug", "TopologyChanged.",
-			"rollAllowedOld", oldRollAllowed, "rollAllowedNew", vm.RollAllowed, "topology", topology)
+		server.DebugLog(vm.logger, "debug", "TopologyChanged.", "topology", topology)
 
-		goingToDisk := topology != nil && topology.NextConfiguration.BarrierReached1For(vm.RMId) && !topology.NextConfiguration.BarrierReached2For(vm.RMId)
-
-		doneWrapped := func(result bool) { finished <- result }
-		if goingToDisk {
-			vm.onDisk = doneWrapped
-			vm.checkAllDisk()
-		} else {
+		if topology.NextConfiguration == nil {
+			vm.RollAllowed = true
 			server.DebugLog(vm.logger, "debug", "TopologyChanged. Calling done.", "topology", topology)
-			doneWrapped(true)
+			finished <- true
+		} else {
+			vm.onDisk = func(result bool) { finished <- result }
+			vm.checkAllDisk()
 		}
 	})
 	if enqueued {
@@ -112,15 +105,12 @@ func (vm *VarManager) checkAllDisk() {
 	if od := vm.onDisk; od != nil {
 		for _, v := range vm.active {
 			if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ && !v.isOnDisk(true) {
-				if !vm.RollAllowed {
-					panic(fmt.Sprintf("Rolls are banned, but have var %v not on disk!", v.UUId))
-				}
 				return
 			}
 		}
 		vm.onDisk = nil
 		vm.RollAllowed = false
-		server.DebugLog(vm.logger, "debug", "Rolls banned. Calling done.")
+		server.DebugLog(vm.logger, "debug", "Rolls now banned. Calling done.", "topology", vm.Topology)
 		od(true)
 	}
 }

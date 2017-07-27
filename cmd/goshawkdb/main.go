@@ -198,7 +198,7 @@ func (s *server) start() {
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
 
-	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 0, 500*time.Microsecond, db.DB, s.logger)
+	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 500*time.Microsecond, db.DB, s.logger)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
@@ -206,9 +206,9 @@ func (s *server) start() {
 	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
-	s.addOnShutdown(cm.Shutdown)
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.Shutdown)
+	s.addOnShutdown(cm.Shutdown)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
@@ -430,6 +430,9 @@ func (s *server) signalHandler() {
 			if _, err := os.Stdout.WriteString("Socket has closed\n"); err != nil {
 				// stdout has errored; probably whatever we were being
 				// piped to has died.
+				s.SignalShutdown()
+			} else if _, err := os.Stderr.WriteString("Socket has closed\n"); err != nil {
+				// ahh, it's stderr that has errored. Same reasoning as above.
 				s.SignalShutdown()
 			}
 		case syscall.SIGTERM, syscall.SIGINT:

@@ -185,11 +185,11 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine, useNextVersion bool, vc *versionCache) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *server.BinaryBackoffEngine, isTopologyTxn bool, vc *versionCache) error {
 	// Frames could attempt rolls before we have a topology.
-	if sts.topology.IsBlank() || (sts.topology.NextConfiguration != nil && (!useNextVersion || !sts.topology.NextConfiguration.BarrierReached1For(sts.rmId))) {
+	if sts.topology.IsBlank() {
 		fun := func() error {
-			return sts.SubmitClientTransaction(translationCallback, ctxnCap, txnId, continuation, delay, useNextVersion, vc)
+			return sts.SubmitClientTransaction(translationCallback, ctxnCap, txnId, continuation, delay, isTopologyTxn, vc)
 		}
 		if sts.bufferedSubmissions == nil {
 			sts.bufferedSubmissions = []func() error{fun}
@@ -198,11 +198,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.T
 		}
 		return nil
 	}
-	version := sts.topology.Version
-	if next := sts.topology.NextConfiguration; next != nil && useNextVersion {
-		version = next.Version
-	}
-	txnCap, activeRMs, _, err := sts.clientToServerTxn(translationCallback, ctxnCap, version, vc)
+	txnCap, activeRMs, _, err := sts.clientToServerTxn(translationCallback, ctxnCap, sts.topology.Version, isTopologyTxn, vc)
 	if err != nil {
 		return continuation(nil, nil, err)
 	}
@@ -276,12 +272,13 @@ func (sts *SimpleTxnSubmitter) Shutdown(onIdle func()) {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, vc *versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, isTopologyTxn bool, vc *versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
 	txnCap.SetId(clientTxnCap.Id())
 	txnCap.SetRetry(clientTxnCap.Retry())
+	txnCap.SetIsTopology(isTopologyTxn)
 	txnCap.SetTwoFInc(sts.topology.TwoFInc)
 	txnCap.SetTopologyVersion(topologyVersion)
 

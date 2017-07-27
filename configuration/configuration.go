@@ -394,6 +394,16 @@ func (config *Configuration) EnsureClusterUUId(uuid uint64) uint64 {
 			config.ClusterUUId = uuid
 		}
 	}
+
+	nc := config.NextConfiguration
+	for nc != nil {
+		if c := nc.Configuration; c == nil {
+			nc = nil
+		} else {
+			c.ClusterUUId = config.ClusterUUId
+			nc = c.NextConfiguration
+		}
+	}
 	return config.ClusterUUId
 }
 
@@ -549,34 +559,26 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		}
 
 		rootIndices := next.RootIndices().ToArray()
-
 		installedOnNew := next.InstalledOnNew()
 
-		barrierReached1Cap := next.BarrierReached1()
-		barrierReached1 := make([]common.RMId, barrierReached1Cap.Len())
-		for idx := range barrierReached1 {
-			barrierReached1[idx] = common.RMId(barrierReached1Cap.At(idx))
-		}
-
-		barrierReached2Cap := next.BarrierReached2()
-		barrierReached2 := make([]common.RMId, barrierReached2Cap.Len())
-		for idx := range barrierReached2 {
-			barrierReached2[idx] = common.RMId(barrierReached2Cap.At(idx))
+		quietRMIdsCap := next.QuietRMIds()
+		quietRMIds := make(map[common.RMId]bool, quietRMIdsCap.Len())
+		for idx, l := 0, quietRMIdsCap.Len(); idx < l; idx++ {
+			quietRMIds[common.RMId(quietRMIdsCap.At(idx))] = true
 		}
 
 		pending := next.Pending()
 
 		c.NextConfiguration = &NextConfiguration{
-			Configuration:   ConfigurationFromCap(&nextConfig),
-			AllHosts:        allHosts,
-			NewRMIds:        newRMIds,
-			SurvivingRMIds:  survivingRMIds,
-			LostRMIds:       lostRMIds,
-			RootIndices:     rootIndices,
-			InstalledOnNew:  installedOnNew,
-			BarrierReached1: barrierReached1,
-			BarrierReached2: barrierReached2,
-			Pending:         ConditionsFromCap(&pending),
+			Configuration:  ConfigurationFromCap(&nextConfig),
+			AllHosts:       allHosts,
+			NewRMIds:       newRMIds,
+			SurvivingRMIds: survivingRMIds,
+			LostRMIds:      lostRMIds,
+			RootIndices:    rootIndices,
+			InstalledOnNew: installedOnNew,
+			QuietRMIds:     quietRMIds,
+			Pending:        ConditionsFromCap(&pending),
 		}
 	}
 
@@ -679,17 +681,13 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 
 		nextCap.SetInstalledOnNew(nextConfig.InstalledOnNew)
 
-		barrierReached1Cap := seg.NewUInt32List(len(nextConfig.BarrierReached1))
-		for idx, rmId := range nextConfig.BarrierReached1 {
-			barrierReached1Cap.Set(idx, uint32(rmId))
+		quietRMIdsCap := seg.NewUInt32List(len(nextConfig.QuietRMIds))
+		idx := 0
+		for rmId := range nextConfig.QuietRMIds {
+			quietRMIdsCap.Set(idx, uint32(rmId))
+			idx++
 		}
-		nextCap.SetBarrierReached1(barrierReached1Cap)
-
-		barrierReached2Cap := seg.NewUInt32List(len(nextConfig.BarrierReached2))
-		for idx, rmId := range nextConfig.BarrierReached2 {
-			barrierReached2Cap.Set(idx, uint32(rmId))
-		}
-		nextCap.SetBarrierReached2(barrierReached2Cap)
+		nextCap.SetQuietRMIds(quietRMIdsCap)
 
 		nextCap.SetPending(nextConfig.Pending.AddToSeg(seg))
 	}
@@ -700,20 +698,19 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 
 type NextConfiguration struct {
 	*Configuration
-	AllHosts        []string
-	NewRMIds        common.RMIds
-	SurvivingRMIds  common.RMIds
-	LostRMIds       common.RMIds
-	RootIndices     []uint32
-	InstalledOnNew  bool
-	BarrierReached1 common.RMIds
-	BarrierReached2 common.RMIds
-	Pending         Conds
+	AllHosts       []string
+	NewRMIds       common.RMIds
+	SurvivingRMIds common.RMIds
+	LostRMIds      common.RMIds
+	RootIndices    []uint32
+	InstalledOnNew bool
+	QuietRMIds     map[common.RMId]bool
+	Pending        Conds
 }
 
 func (next *NextConfiguration) String() string {
-	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n RootIndices: %v;\n InstalledOnNew: %v;\n BarrierReached1: %v;\n BarrierReached2: %v;\n Pending:%v;\n Configuration: %v",
-		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.RootIndices, next.InstalledOnNew, next.BarrierReached1, next.BarrierReached2, next.Pending, next.Configuration)
+	return fmt.Sprintf("Next Configuration:\n AllHosts: %v;\n NewRMIds: %v;\n SurvivingRMIds: %v;\n LostRMIds: %v;\n RootIndices: %v;\n InstalledOnNew: %v;\n QuietRMIds: %v;\n Pending: %v;\n Configuration: %v",
+		next.AllHosts, next.NewRMIds, next.SurvivingRMIds, next.LostRMIds, next.RootIndices, next.InstalledOnNew, next.QuietRMIds, next.Pending, next.Configuration)
 }
 
 func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
@@ -738,12 +735,19 @@ func (a *NextConfiguration) Equal(b *NextConfiguration) bool {
 	} else {
 		return false
 	}
+	if len(a.QuietRMIds) == len(b.QuietRMIds) {
+		for rmId := range a.QuietRMIds {
+			if _, found := b.QuietRMIds[rmId]; !found {
+				return false
+			}
+		}
+	} else {
+		return false
+	}
 	return a.NewRMIds.Equal(b.NewRMIds) &&
 		a.SurvivingRMIds.Equal(b.SurvivingRMIds) &&
 		a.LostRMIds.Equal(b.LostRMIds) &&
 		a.InstalledOnNew == b.InstalledOnNew &&
-		a.BarrierReached1.Equal(b.BarrierReached1) &&
-		a.BarrierReached2.Equal(b.BarrierReached2) &&
 		a.Pending.Equal(b.Pending) &&
 		a.Configuration.Equal(b.Configuration)
 }
@@ -768,11 +772,10 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	rootIndices := make([]uint32, len(next.RootIndices))
 	copy(rootIndices, next.RootIndices)
 
-	barrierReached1 := make([]common.RMId, len(next.BarrierReached1))
-	copy(barrierReached1, next.BarrierReached1)
-
-	barrierReached2 := make([]common.RMId, len(next.BarrierReached2))
-	copy(barrierReached2, next.BarrierReached2)
+	quietRMIds := make(map[common.RMId]bool, len(next.QuietRMIds))
+	for rmId := range next.QuietRMIds {
+		quietRMIds[rmId] = true
+	}
 
 	// Assumption is that conditions are immutable. So the only thing
 	// we'll want to do is shrink the suppliers, so we do a copy of the
@@ -788,39 +791,16 @@ func (next *NextConfiguration) Clone() *NextConfiguration {
 	}
 
 	return &NextConfiguration{
-		Configuration:   next.Configuration.Clone(),
-		AllHosts:        allHosts,
-		NewRMIds:        newRMIds,
-		SurvivingRMIds:  survivingRMIds,
-		LostRMIds:       lostRMIds,
-		RootIndices:     rootIndices,
-		InstalledOnNew:  next.InstalledOnNew,
-		BarrierReached1: barrierReached1,
-		BarrierReached2: barrierReached2,
-		Pending:         pending,
+		Configuration:  next.Configuration.Clone(),
+		AllHosts:       allHosts,
+		NewRMIds:       newRMIds,
+		SurvivingRMIds: survivingRMIds,
+		LostRMIds:      lostRMIds,
+		RootIndices:    rootIndices,
+		InstalledOnNew: next.InstalledOnNew,
+		QuietRMIds:     quietRMIds,
+		Pending:        pending,
 	}
-}
-
-func (next *NextConfiguration) BarrierReached1For(rmId common.RMId) bool {
-	if next != nil {
-		for _, r := range next.BarrierReached1 {
-			if r == rmId {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (next *NextConfiguration) BarrierReached2For(rmId common.RMId) bool {
-	if next != nil {
-		for _, r := range next.BarrierReached2 {
-			if r == rmId {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 type Conds map[common.RMId]*CondSuppliers

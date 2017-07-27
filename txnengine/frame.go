@@ -177,7 +177,6 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 }
 
 func (fo *frameOpen) AddRead(action *localAction) {
-	fo.v.poisson.AddNow()
 	txn := action.Txn
 	server.DebugLog(fo.v.vm.logger, "debug", "AddRead", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
 	switch {
@@ -239,7 +238,6 @@ func (fo *frameOpen) ReadCommitted(action *localAction) {
 }
 
 func (fo *frameOpen) AddWrite(action *localAction) {
-	fo.v.poisson.AddNow()
 	txn := action.Txn
 	server.DebugLog(fo.v.vm.logger, "debug", "AddWrite", "frame", fo.frame, "TxnId", txn.Id)
 	cid := txn.Id.ClientId()
@@ -309,7 +307,6 @@ func (fo *frameOpen) WriteCommitted(action *localAction) {
 }
 
 func (fo *frameOpen) AddReadWrite(action *localAction) {
-	fo.v.poisson.AddNow()
 	txn := action.Txn
 	server.DebugLog(fo.v.vm.logger, "debug", "AddReadWrite", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
 	switch {
@@ -516,12 +513,10 @@ func (fo *frameOpen) maybeStartWrites() {
 		fo.maybeCreateChild()
 	} else {
 		fo.calculateWriteVoteClock()
-		now := time.Now()
 		for node := fo.writes.First(); node != nil; {
 			next := node.Next()
 			if node.Value == postponed {
 				node.Value = uncommitted
-				fo.v.poisson.AddThen(now)
 				if action := node.Key.(*localAction); !action.VoteCommit(fo.writeVoteClock) {
 					if action.IsRead() {
 						fo.ReadWriteAborted(action, false)
@@ -758,6 +753,7 @@ func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
 		} else {
 			elapsed = now.Sub(*fo.rollScheduled)
 		}
+		// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleBackoff.Cur)
 		if fo.v.vm.RollAllowed && (probOfZero > server.VarRollPRequirement || (elapsed > server.VarRollDelayMax)) {
 			// fmt.Printf("%v r%v %v\n", now, fo.v.UUId, elapsed)
 			fo.startRoll(rollCallback{
@@ -774,7 +770,6 @@ func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
 
 func (fo *frameOpen) scheduleRoll() {
 	server.DebugLog(fo.v.vm.logger, "debug", "Roll callback scheduled.", "frame", fo.frame)
-	// fmt.Printf("s%v(%v|%v)\n", fo.v.UUId, probOfZero, fo.scheduleBackoff.Cur)
 	fo.v.vm.ScheduleCallback(fo.scheduleBackoff.Advance(), func(*time.Time) {
 		fo.v.applyToVar(func() {
 			fo.maybeStartRollFrom(true)
@@ -788,7 +783,9 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	ctxn, varPosMap := fo.createRollClientTxn()
 	server.DebugLog(fo.v.vm.logger, "debug", "Starting roll.", "frame", fo.frame)
 	go func() {
-		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, varPosMap, rollCB.rollTranslationCallback)
+		// Yes, we really must mark these as topology txns so that they
+		// are allowed through during topology changes.
+		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, true, varPosMap, rollCB.rollTranslationCallback)
 		ow := ""
 		if outcome != nil {
 			ow = fmt.Sprint(outcome.Which())

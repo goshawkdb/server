@@ -260,7 +260,7 @@ func (awtd *acceptorWriteToDisk) start() {
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	server.DebugLog(awtd, "debug", "Writing 2B to disk...")
-	future := awtd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+	future := awtd.acceptorManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Put(awtd.acceptorManager.DB.BallotOutcomes, awtd.txnId[:], data, 0)
 		return true
 	})
@@ -433,7 +433,7 @@ func (adfd *acceptorDeleteFromDisk) start() {
 		adfd.twoBSender = nil
 	}
 	server.DebugLog(adfd, "debug", "Deleting 2B from disk...")
-	future := adfd.acceptorManager.DB.ReadWriteTransaction(false, func(rwtxn *mdbs.RWTxn) interface{} {
+	future := adfd.acceptorManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Del(adfd.acceptorManager.DB.BallotOutcomes, adfd.txnId[:], nil)
 		return true
 	})

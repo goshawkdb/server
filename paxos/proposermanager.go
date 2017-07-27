@@ -39,12 +39,13 @@ type ProposerManager struct {
 	proposals     map[instanceIdPrefix]*proposal
 	proposers     map[common.TxnId]*Proposer
 	topology      *configuration.Topology
+	onDisk        func(bool)
 	metrics       *ProposerMetrics
 }
 
 type ProposerMetrics struct {
 	Gauge    prometheus.Gauge
-	Lifespan prometheus.Histogram
+	Lifespan prometheus.Observer
 }
 
 func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {
@@ -81,25 +82,46 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 }
 
 func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan struct{})
+	finished := make(chan bool)
 	enqueued := pm.Exe.Enqueue(func() {
+		if od := pm.onDisk; od != nil {
+			pm.onDisk = nil
+			od(false)
+		}
 		pm.topology = topology
 		for _, proposer := range pm.proposers {
-			proposer.TopologyChange(topology)
+			proposer.TopologyChanged(topology)
 		}
-		close(finished)
+		if topology.NextConfiguration == nil {
+			finished <- true
+		} else {
+			pm.onDisk = func(result bool) { finished <- result }
+			pm.checkAllDisk()
+		}
 	})
 	if enqueued {
 		go pm.Exe.WithTerminatedChan(func(terminated chan struct{}) {
 			select {
-			case <-finished:
-				done(true)
+			case success := <-finished:
+				done(success)
 			case <-terminated:
 				done(false)
 			}
 		})
 	} else {
 		done(false)
+	}
+}
+
+func (pm *ProposerManager) checkAllDisk() {
+	if od := pm.onDisk; od != nil {
+		for _, proposer := range pm.proposers {
+			if !(proposer.TLCDone() || proposer.IsTopologyTxn()) {
+				return
+			}
+		}
+		pm.onDisk = nil
+		od(true)
 	}
 }
 
@@ -130,14 +152,10 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 		server.DebugLog(pm.logger, "debug", "Received.", "TxnId", txnId)
 		accept := true
 		if pm.topology != nil {
-			accept = (pm.topology.NextConfiguration == nil && pm.topology.Version == txnCap.TopologyVersion()) ||
-				// Could also do pm.topology.BarrierReached1(sender), but
-				// would need to specialise that to rolls rather than
-				// topology txns, and it's enforced on the sending side
-				// anyway. Once the sender has received the next topology,
-				// it'll do the right thing and locally block until it's
-				// in barrier1.
-				(pm.topology.NextConfiguration != nil && pm.topology.NextConfiguration.Version == txnCap.TopologyVersion())
+			accept = pm.topology.Version == txnCap.TopologyVersion()
+			if accept && pm.topology.NextConfiguration != nil {
+				accept = txnCap.IsTopology()
+			}
 			if accept {
 				_, found := pm.topology.RMsRemoved[sender]
 				accept = !found
@@ -158,11 +176,11 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 					}
 				} else {
 					server.DebugLog(pm.logger, "debug", "Aborting received txn as sender has been removed from topology.",
-						"TxnId", txnId, "sender", sender)
+						"TxnId", txnId, "sender", sender, "topology", pm.topology)
 				}
 			} else {
 				server.DebugLog(pm.logger, "debug", "Aborting received txn due to non-matching topology.",
-					"TxnId", txnId, "topologyVersion", txnCap.TopologyVersion())
+					"TxnId", txnId, "topologyVersion", txnCap.TopologyVersion(), "isTopologyTxn", txnCap.IsTopology(), "topology", pm.topology)
 			}
 		}
 		if accept {
@@ -248,6 +266,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 		if proposer, found := pm.proposers[*txnId]; found {
 			server.DebugLog(pm.logger, "debug", "2B outcome received. Known.", "TxnId", txnId, "sender", sender)
 			proposer.BallotOutcomeReceived(sender, &outcome)
+			pm.checkAllDisk()
 			return
 		}
 
@@ -280,6 +299,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 
 			proposer := pm.createProposerStart(txn, ProposerActiveLearner, pm.topology)
 			proposer.BallotOutcomeReceived(sender, &outcome)
+			pm.checkAllDisk()
 		} else {
 			// Not active, so we are a learner
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
@@ -287,6 +307,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// we must be a learner.
 				proposer := pm.createProposerStart(txn, ProposerPassiveLearner, pm.topology)
 				proposer.BallotOutcomeReceived(sender, &outcome)
+				pm.checkAllDisk()
 
 			} else {
 				// Whilst it's an abort now, at some point in the past it
@@ -305,6 +326,11 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 	default:
 		panic(fmt.Sprintf("Unexpected 2BVotes type: %v", twoBTxnVotes.Which()))
 	}
+}
+
+// from proposer, callback
+func (pm *ProposerManager) TxnLocallyComplete(p *Proposer) {
+	pm.checkAllDisk()
 }
 
 // from network
