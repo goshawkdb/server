@@ -66,6 +66,7 @@ func (cme connectionMsgExec) witness() connectionMsg { return cme }
 func (conn *Connection) Shutdown() {
 	conn.enqueueQuery(connectionMsgStartShutdown{})
 }
+
 func (conn *Connection) shutdownComplete() {
 	conn.enqueueQuery(connectionMsgShutdownComplete{})
 }
@@ -103,6 +104,14 @@ func (conn *Connection) WithTerminatedChan(fun func(chan struct{})) {
 	fun(conn.cellTail.Terminated)
 }
 
+type connectionMsgExecError func() error
+
+func (cmee connectionMsgExecError) witness() connectionMsg { return cmee }
+
+func (conn *Connection) EnqueueError(fun func() error) bool {
+	return conn.enqueueQuery(connectionMsgExecError(fun))
+}
+
 type connectionQueryCapture struct {
 	conn *Connection
 	msg  connectionMsg
@@ -119,13 +128,13 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 
 func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
 	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
-	dialer := NewTCPDialerForTLSCapnp(remoteHost, cm, logger)
+	dialer := NewTCPDialerForTLSCapnp(remoteHost, NewTLSCapnpHandshakerServerBuilder(cm, 0, remoteHost, logger), logger)
 	return NewConnectionWithDialer(dialer, cm, logger)
 }
 
 func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) *Connection {
 	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
-	yesman := NewTLSCapnpHandshaker(nil, socket, cm, count, "", logger)
+	yesman := NewTLSCapnpHandshakerServer(nil, socket, cm, count, "", logger)
 	return NewConnectionWithHandshaker(yesman, cm, logger)
 }
 
@@ -242,8 +251,6 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate, terminated bool
 		terminated = true
 	case *connectionDelay:
 		msgT.received()
-	case connectionReadError:
-		err = msgT.error
 	case connectionMsgExec:
 		msgT()
 	case connectionMsgExecError:
@@ -458,14 +465,3 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 		return nil
 	}
 }
-
-// Reader
-
-type connectionReadError struct {
-	connectionMsgBasic
-	error
-}
-
-type connectionMsgExecError func() error
-
-func (cmee connectionMsgExecError) witness() connectionMsg { return cmee }

@@ -219,7 +219,7 @@ func (cm *ConnectionManager) Shutdown() {
 
 func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func()) {
 	cm.enqueueQuery(&connectionManagerMsgServerEstablished{
-		Connection:    tcs.Connection,
+		Connection:    tcs.conn,
 		send:          tcs.Send,
 		host:          host,
 		rmId:          rmId,
@@ -232,7 +232,7 @@ func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string,
 
 func (cm *ConnectionManager) ServerLost(tcs *TLSCapnpServer, host string, rmId common.RMId, restarting bool) {
 	cm.enqueueQuery(connectionManagerMsgServerLost{
-		Connection: tcs.Connection,
+		Connection: tcs.conn,
 		host:       host,
 		rmId:       rmId,
 		restarting: restarting,

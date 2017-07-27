@@ -245,11 +245,11 @@ type wssMsgPackClient struct {
 	connectionManager *ConnectionManager
 	topology          *configuration.Topology
 	submitter         *client.ClientTxnSubmitter
-	reader            *socketReader
+	reader            *SocketReader
 	beater            *wssBeater
 }
 
-func (wmpc *wssMsgPackClient) send(msg msgp.Encodable) error {
+func (wmpc *wssMsgPackClient) Send(msg msgp.Encodable) error {
 	wc, err := wmpc.socket.NextWriter(websocket.BinaryMessage)
 	if err != nil {
 		return err
@@ -260,7 +260,7 @@ func (wmpc *wssMsgPackClient) send(msg msgp.Encodable) error {
 	return wc.Close()
 }
 
-func (wmpc *wssMsgPackClient) readOne(msg msgp.Decodable) error {
+func (wmpc *wssMsgPackClient) ReadOne(msg msgp.Decodable) error {
 	msgType, reader, err := wmpc.socket.NextReader()
 	switch {
 	case err != nil:
@@ -279,11 +279,11 @@ func (wmpc *wssMsgPackClient) PerformHandshake(topology *configuration.Topology)
 		Product: common.ProductName,
 		Version: common.ProductVersion,
 	}
-	if err := wmpc.send(hello); err != nil {
+	if err := wmpc.Send(hello); err != nil {
 		return nil, err
 	}
 	hello = &cmsgs.Hello{}
-	if err := wmpc.readOne(hello); err == nil {
+	if err := wmpc.ReadOne(hello); err == nil {
 		if wmpc.verifyHello(hello) {
 
 			if wmpc.topology.ClusterUUId == 0 {
@@ -292,7 +292,7 @@ func (wmpc *wssMsgPackClient) PerformHandshake(topology *configuration.Topology)
 				return nil, errors.New("No roots: cluster not yet formed")
 			}
 
-			return wmpc, wmpc.send(wmpc.makeHelloClient())
+			return wmpc, wmpc.Send(wmpc.makeHelloClient())
 		} else {
 			product := hello.Product
 			if l := len(common.ProductName); len(product) > l {
@@ -407,12 +407,12 @@ func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) 
 
 func (wmpc *wssMsgPackClient) InternalShutdown() {
 	if wmpc.reader != nil {
-		wmpc.reader.stop()
+		wmpc.reader.Stop()
 		wmpc.reader = nil
 	}
 	cont := func() {
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
-		wmpc.Connection.shutdownComplete()
+		wmpc.shutdownComplete()
 	}
 	if wmpc.submitter == nil {
 		cont()
@@ -420,7 +420,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 		wmpc.submitter.Shutdown(cont)
 	}
 	if wmpc.beater != nil {
-		wmpc.beater.stop()
+		wmpc.beater.Stop()
 		wmpc.beater = nil
 	}
 	if wmpc.socket != nil {
@@ -430,9 +430,9 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 }
 
 func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	wmpc.enqueueQuery(connectionMsgExecError(func() error {
+	wmpc.EnqueueError(func() error {
 		return wmpc.outcomeReceived(sender, txn, outcome)
-	}))
+	})
 }
 
 func (wmpc *wssMsgPackClient) outcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
@@ -440,38 +440,38 @@ func (wmpc *wssMsgPackClient) outcomeReceived(sender common.RMId, txn *eng.TxnRe
 }
 
 func (wmpc *wssMsgPackClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	wmpc.enqueueQuery(connectionMsgExecError(func() error {
+	wmpc.EnqueueError(func() error {
 		return wmpc.serverConnectionsChanged(servers)
-	}))
+	})
 }
 func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	wmpc.enqueueQuery(connectionMsgExecError(func() error {
+	wmpc.EnqueueError(func() error {
 		return wmpc.serverConnectionsChanged(servers)
-	}))
+	})
 }
 func (wmpc *wssMsgPackClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	wmpc.enqueueQuery(connectionMsgExecError(func() error {
+	wmpc.EnqueueError(func() error {
 		if done != nil {
 			defer done()
 		}
 		return wmpc.serverConnectionsChanged(servers)
-	}))
+	})
 }
 
 func (wmpc *wssMsgPackClient) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
 	return wmpc.submitter.ServerConnectionsChanged(servers)
 }
 
-func (wmpc *wssMsgPackClient) readAndHandleOneMsg() error {
+func (wmpc *wssMsgPackClient) ReadAndHandleOneMsg() error {
 	msg := &cmsgs.ClientMessage{}
-	if err := wmpc.readOne(msg); err != nil {
+	if err := wmpc.ReadOne(msg); err != nil {
 		return err
 	}
 	switch {
 	case msg.ClientTxnSubmission != nil:
-		wmpc.enqueueQuery(connectionMsgExecError(func() error {
+		wmpc.EnqueueError(func() error {
 			return wmpc.submitTransaction(msg.ClientTxnSubmission)
-		}))
+		})
 		return nil
 	default:
 		return errors.New("Unexpected message type received from client.")
@@ -483,18 +483,18 @@ func (wmpc *wssMsgPackClient) submitTransaction(ctxn *cmsgs.ClientTxn) error {
 	seg := capn.NewBuffer(nil)
 	ctxnCapn, err := ctxn.ToCapnp(seg)
 	if err != nil { // error is non-fatal to connection
-		return wmpc.beater.sendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
+		return wmpc.beater.SendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
 	}
 	return wmpc.submitter.SubmitClientTransaction(ctxnCapn, func(clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
 		switch {
 		case err != nil:
-			return wmpc.beater.sendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
+			return wmpc.beater.SendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
 		case clientOutcome == nil: // shutdown
 			return nil
 		default:
 			msg := &cmsgs.ClientMessage{ClientTxnOutcome: &cmsgs.ClientTxnOutcome{}}
 			msg.ClientTxnOutcome.FromCapnp(*clientOutcome)
-			return wmpc.send(msg)
+			return wmpc.Send(msg)
 		}
 	})
 }
@@ -512,27 +512,15 @@ func (wmpc *wssMsgPackClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, o
 
 func (wmpc *wssMsgPackClient) createReader() {
 	if wmpc.reader == nil {
-		wmpc.reader = &socketReader{
-			conn:             wmpc.Connection,
-			socketMsgHandler: wmpc,
-			terminate:        make(chan struct{}),
-			terminated:       make(chan struct{}),
-		}
-		wmpc.reader.start()
+		wmpc.reader = NewSocketReader(wmpc.Connection, wmpc)
+		wmpc.reader.Start()
 	}
 }
 
 func (wmpc *wssMsgPackClient) createBeater() {
 	if wmpc.beater == nil {
-		beater := &wssBeater{
-			wssMsgPackClient: wmpc,
-			conn:             wmpc.Connection,
-			terminate:        make(chan struct{}),
-			terminated:       make(chan struct{}),
-			ticker:           time.NewTicker(common.HeartbeatInterval),
-		}
-		beater.start()
-		wmpc.beater = beater
+		wmpc.beater = NewWssBeater(wmpc, wmpc.Connection)
+		wmpc.beater.Start()
 	}
 }
 
@@ -540,20 +528,30 @@ func (wmpc *wssMsgPackClient) createBeater() {
 
 type wssBeater struct {
 	*wssMsgPackClient
-	conn         *Connection
+	conn         ConnectionActor
 	terminate    chan struct{}
 	terminated   chan struct{}
 	ticker       *time.Ticker
 	mustSendBeat bool
 }
 
-func (b *wssBeater) start() {
+func NewWssBeater(wmpc *wssMsgPackClient, conn ConnectionActor) *wssBeater {
+	return &wssBeater{
+		wssMsgPackClient: wmpc,
+		conn:             conn,
+		terminate:        make(chan struct{}),
+		terminated:       make(chan struct{}),
+		ticker:           time.NewTicker(common.HeartbeatInterval),
+	}
+}
+
+func (b *wssBeater) Start() {
 	if b != nil {
 		go b.tick()
 	}
 }
 
-func (b *wssBeater) stop() {
+func (b *wssBeater) Stop() {
 	if b != nil {
 		b.wssMsgPackClient = nil
 		select {
@@ -576,7 +574,7 @@ func (b *wssBeater) tick() {
 		case <-b.terminate:
 			return
 		case <-b.ticker.C:
-			if !b.conn.enqueueQuery(connectionMsgExecError(b.beat)) {
+			if !b.conn.EnqueueError(b.beat) {
 				return
 			}
 		}
@@ -595,10 +593,10 @@ func (b *wssBeater) beat() error {
 	return nil
 }
 
-func (b *wssBeater) sendMessage(msg msgp.Encodable) error {
+func (b *wssBeater) SendMessage(msg msgp.Encodable) error {
 	if b != nil {
 		b.mustSendBeat = false
-		return b.send(msg)
+		return b.Send(msg)
 	}
 	return nil
 }
