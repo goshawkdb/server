@@ -225,7 +225,7 @@ func wsHandler(cm *ConnectionManager, connNumber uint32, w http.ResponseWriter, 
 			roots:             roots,
 			connectionManager: cm,
 		}
-		NewConnectionWithHandshaker(yesman, cm, logger)
+		NewConnection(yesman, cm, logger)
 
 	} else {
 		logger.Log("msg", "WSS upgrade failure.", "remoteHost", r.RemoteAddr, "error", err)
@@ -245,7 +245,7 @@ type wssMsgPackClient struct {
 	connectionManager *ConnectionManager
 	topology          *configuration.Topology
 	submitter         *client.ClientTxnSubmitter
-	reader            *SocketReader
+	reader            *common.SocketReader
 	beater            *wssBeater
 }
 
@@ -270,6 +270,10 @@ func (wmpc *wssMsgPackClient) ReadOne(msg msgp.Decodable) error {
 	default:
 		return msgp.Decode(reader, msg)
 	}
+}
+
+func (wmpc *wssMsgPackClient) Dial() error {
+	return nil
 }
 
 func (wmpc *wssMsgPackClient) PerformHandshake(topology *configuration.Topology) (Protocol, error) {
@@ -345,8 +349,8 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	}
 }
 
-func (wmpc *wssMsgPackClient) RestartDialer() Dialer {
-	return nil // client connections are never restarted
+func (wmpc *wssMsgPackClient) RestartDialer() bool {
+	return false // client connections are never restarted
 }
 
 func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
@@ -512,7 +516,7 @@ func (wmpc *wssMsgPackClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, o
 
 func (wmpc *wssMsgPackClient) createReader() {
 	if wmpc.reader == nil {
-		wmpc.reader = NewSocketReader(wmpc.Connection, wmpc)
+		wmpc.reader = common.NewSocketReader(wmpc.Connection, wmpc)
 		wmpc.reader.Start()
 	}
 }
@@ -528,14 +532,14 @@ func (wmpc *wssMsgPackClient) createBeater() {
 
 type wssBeater struct {
 	*wssMsgPackClient
-	conn         ConnectionActor
+	conn         common.ConnectionActor
 	terminate    chan struct{}
 	terminated   chan struct{}
 	ticker       *time.Ticker
 	mustSendBeat bool
 }
 
-func NewWssBeater(wmpc *wssMsgPackClient, conn ConnectionActor) *wssBeater {
+func NewWssBeater(wmpc *wssMsgPackClient, conn common.ConnectionActor) *wssBeater {
 	return &wssBeater{
 		wssMsgPackClient: wmpc,
 		conn:             conn,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/go-kit/kit/log"
 	cc "github.com/msackman/chancell"
+	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
@@ -19,6 +20,8 @@ type Connection struct {
 	cellTail          *cc.ChanCellTail
 	enqueueQueryInner func(connectionMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
 	queryChan         <-chan connectionMsg
+	shutdownStarted   bool
+	handshaker        Handshaker
 	rng               *rand.Rand
 	currentState      connectionStateMachineComponent
 	connectionDelay
@@ -126,36 +129,29 @@ func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 	return conn.cellTail.WithCell(cqc.ccc)
 }
 
+// we are dialing out to someone else
 func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
 	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
-	dialer := NewTCPDialerForTLSCapnp(remoteHost, NewTLSCapnpHandshakerServerBuilder(cm, 0, remoteHost, logger), logger)
-	return NewConnectionWithDialer(dialer, cm, logger)
+	phone := common.NewTCPDialer(nil, remoteHost, logger)
+	yesman := NewTLSCapnpHandshaker(phone, logger, 0, cm)
+	return NewConnection(yesman, cm, logger)
 }
 
-func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) *Connection {
+// the socket is already established - we got it from the TCP listener
+func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) {
 	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
-	yesman := NewTLSCapnpHandshakerServer(nil, socket, cm, count, "", logger)
-	return NewConnectionWithHandshaker(yesman, cm, logger)
+	phone := common.NewTCPDialer(socket, "", logger)
+	yesman := NewTLSCapnpHandshaker(phone, logger, count, cm)
+	NewConnection(yesman, cm, logger)
 }
 
-func NewConnectionWithHandshaker(yesman Handshaker, cm *ConnectionManager, logger log.Logger) *Connection {
+func NewConnection(yesman Handshaker, cm *ConnectionManager, logger log.Logger) *Connection {
 	conn := &Connection{
 		logger:            logger,
 		connectionManager: cm,
+		handshaker:        yesman,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	conn.Handshaker = yesman
-	conn.start()
-	return conn
-}
-
-func NewConnectionWithDialer(phone Dialer, cm *ConnectionManager, logger log.Logger) *Connection {
-	conn := &Connection{
-		logger:            logger,
-		connectionManager: cm,
-		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
-	}
-	conn.Dialer = phone
 	conn.start()
 	return conn
 }
@@ -186,11 +182,7 @@ func (conn *Connection) start() {
 	conn.connectionHandshake.init(conn)
 	conn.connectionRun.init(conn)
 
-	if conn.Dialer != nil {
-		conn.currentState = &conn.connectionDial
-	} else if conn.Handshaker != nil {
-		conn.currentState = &conn.connectionHandshake
-	}
+	conn.currentState = &conn.connectionDial
 
 	go conn.actorLoop(head)
 }
@@ -220,21 +212,19 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	}
 
 	terminated := err != nil // have we stopped?
-	shuttingDown := false    // are we shutting down?
-	terminate := false       // what should we do next?
+	terminating := false     // what should we do next?
 	for !terminated {
 		if oldState != conn.currentState {
 			oldState = conn.currentState
-			terminate, err = conn.currentState.start()
+			terminating, err = conn.currentState.start()
 		} else if msg, ok := <-queryChan; ok {
-			terminate, terminated, err = conn.handleMsg(msg)
+			terminating, terminated, err = conn.handleMsg(msg)
 		} else {
 			head.Next(queryCell, chanFun)
 		}
-		terminate = terminate || err != nil
-		if terminate {
-			conn.startShutdown(shuttingDown, err)
-			shuttingDown = true
+		terminating = terminating || err != nil
+		if terminating {
+			conn.startShutdown(err)
 			err = nil
 		}
 	}
@@ -243,10 +233,10 @@ func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
 	conn.logger.Log("msg", "Terminated.")
 }
 
-func (conn *Connection) handleMsg(msg connectionMsg) (terminate, terminated bool, err error) {
+func (conn *Connection) handleMsg(msg connectionMsg) (terminating, terminated bool, err error) {
 	switch msgT := msg.(type) {
 	case connectionMsgStartShutdown:
-		terminate = true
+		terminating = true
 	case connectionMsgShutdownComplete:
 		terminated = true
 	case *connectionDelay:
@@ -262,37 +252,38 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminate, terminated bool
 	default:
 		err = fmt.Errorf("Fatal to Connection: Received unexpected message: %#v", msgT)
 	}
-	if err != nil && !terminate {
+	if err != nil && !terminating {
 		err = conn.maybeRestartConnection(err)
 	}
 	return
 }
 
 func (conn *Connection) maybeRestartConnection(err error) error {
-	if conn.Handshaker != nil {
-		conn.Dialer = conn.Handshaker.RestartDialer()
-	} else if conn.Protocol != nil {
-		conn.Dialer = conn.Protocol.RestartDialer()
+	restartable := false
+	if conn.protocol != nil {
+		restartable = conn.protocol.RestartDialer()
+	} else if conn.handshaker != nil {
+		restartable = conn.handshaker.RestartDialer()
 	}
 
-	if conn.Dialer == nil {
-		return err // it's fatal; actor loop will shutdown Protocol or Handshaker
-	} else {
+	if restartable {
 		conn.logger.Log("msg", "Restarting.", "error", err)
 		conn.nextState(&conn.connectionDelay)
 		return nil
+	} else {
+		return err // it's fatal; actor loop will shutdown Protocol or Handshaker
 	}
 }
 
-func (conn *Connection) startShutdown(shutdownStarted bool, err error) {
+func (conn *Connection) startShutdown(err error) {
 	if err != nil {
 		conn.logger.Log("error", err)
 	}
-	if !shutdownStarted {
-		if conn.Protocol != nil {
-			conn.Protocol.InternalShutdown()
-			conn.Protocol = nil
-			conn.Handshaker = nil
+	if !conn.shutdownStarted {
+		conn.shutdownStarted = true
+		if conn.protocol != nil {
+			conn.protocol.InternalShutdown()
+			conn.protocol = nil
 		} else {
 			conn.shutdownComplete()
 		}
@@ -303,15 +294,14 @@ func (conn *Connection) handleShutdown(err error) {
 	if err != nil {
 		conn.logger.Log("error", err)
 	}
-	if conn.Protocol != nil {
-		conn.Protocol.InternalShutdown()
-	} else if conn.Handshaker != nil {
-		conn.Handshaker.InternalShutdown()
+	if conn.protocol != nil {
+		conn.protocol.InternalShutdown()
+	} else if conn.handshaker != nil {
+		conn.handshaker.InternalShutdown()
 	}
 	conn.currentState = nil
-	conn.Protocol = nil
-	conn.Handshaker = nil
-	conn.Dialer = nil
+	conn.protocol = nil
+	conn.handshaker = nil
 }
 
 // state machine
@@ -340,12 +330,10 @@ func (conn *Connection) nextState(requestedState connectionStateMachineComponent
 }
 
 func (conn *Connection) status(sc *server.StatusConsumer) {
-	if conn.Protocol != nil {
-		sc.Emit(fmt.Sprintf("Connection %v", conn.Protocol))
-	} else if conn.Handshaker != nil {
-		sc.Emit(fmt.Sprintf("Connection %v", conn.Handshaker))
-	} else if conn.Dialer != nil {
-		sc.Emit(fmt.Sprintf("Connection %v", conn.Dialer))
+	if conn.protocol != nil {
+		sc.Emit(fmt.Sprintf("Connection %v", conn.protocol))
+	} else if conn.handshaker != nil {
+		sc.Emit(fmt.Sprintf("Connection %v", conn.handshaker))
 	}
 	sc.Join()
 }
@@ -366,8 +354,7 @@ func (cd *connectionDelay) init(conn *Connection) {
 }
 
 func (cd *connectionDelay) start() (bool, error) {
-	cd.Handshaker = nil
-	cd.Protocol = nil
+	cd.protocol = nil
 	if cd.delay == nil {
 		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
 		cd.delay = time.AfterFunc(delay, func() {
@@ -388,7 +375,6 @@ func (cd *connectionDelay) received() {
 
 type connectionDial struct {
 	*Connection
-	Dialer
 }
 
 func (cc *connectionDial) connectionStateMachineComponentWitness() {}
@@ -399,9 +385,8 @@ func (cc *connectionDial) init(conn *Connection) {
 }
 
 func (cc *connectionDial) start() (bool, error) {
-	yesman, err := cc.Dial()
+	err := cc.handshaker.Dial()
 	if err == nil {
-		cc.Handshaker = yesman
 		cc.nextState(nil)
 	} else {
 		cc.logger.Log("msg", "Error when dialing.", "error", err)
@@ -415,7 +400,6 @@ func (cc *connectionDial) start() (bool, error) {
 type connectionHandshake struct {
 	*Connection
 	topology *configuration.Topology
-	Handshaker
 }
 
 func (cah *connectionHandshake) connectionStateMachineComponentWitness() {}
@@ -426,9 +410,9 @@ func (cah *connectionHandshake) init(conn *Connection) {
 }
 
 func (cah *connectionHandshake) start() (bool, error) {
-	protocol, err := cah.PerformHandshake(cah.topology)
+	protocol, err := cah.handshaker.PerformHandshake(cah.topology)
 	if err == nil {
-		cah.Protocol = protocol
+		cah.protocol = protocol
 		cah.nextState(nil)
 		return false, nil
 	} else {
@@ -440,7 +424,7 @@ func (cah *connectionHandshake) start() (bool, error) {
 
 type connectionRun struct {
 	*Connection
-	Protocol
+	protocol Protocol
 }
 
 func (cr *connectionRun) connectionStateMachineComponentWitness() {}
@@ -451,15 +435,14 @@ func (cr *connectionRun) init(conn *Connection) {
 }
 
 func (cr *connectionRun) start() (bool, error) {
-	cr.Handshaker = nil
-	return false, cr.Run(cr.Connection)
+	return false, cr.protocol.Run(cr.Connection)
 }
 
 func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
 	switch {
-	case cr.Protocol != nil:
+	case cr.protocol != nil:
 		cr.topology = tc.topology
-		return cr.Protocol.TopologyChanged(tc)
+		return cr.protocol.TopologyChanged(tc)
 	default:
 		tc.maybeClose()
 		return nil
