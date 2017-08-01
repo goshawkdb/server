@@ -99,10 +99,10 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	}
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
-	msg.SetTxnSubmission(server.SegToBytes(txnCap.Segment))
+	msg.SetTxnSubmission(common.SegToBytes(txnCap.Segment))
 
 	server.DebugLog(sts.logger, "debug", "Submitting txn.", "TxnId", txnId, "active", activeRMs)
-	txnSender := paxos.NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
+	txnSender := paxos.NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
 	removeNeeded := uint32(0)
 	sleeping := delay != nil && delay.Cur > 0
 	if sleeping {
@@ -294,7 +294,7 @@ func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.Transla
 		return nil, nil, nil, err
 	}
 
-	txnCap.SetActions(server.SegToBytes(actionsListSeg))
+	txnCap.SetActions(common.SegToBytes(actionsListSeg))
 	// NB: we're guaranteed that activeRMs and passiveRMs are
 	// disjoint. Thus there is no RM that has some active and some
 	// passive actions.

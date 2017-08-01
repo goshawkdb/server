@@ -508,7 +508,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 			}
 			clock.SetVarIdMax(bra.vUUId, bra.clockElem)
 		}
-		update.SetActions(server.SegToBytes(actionsListSeg))
+		update.SetActions(common.SegToBytes(actionsListSeg))
 		update.SetClock(clock.AsData())
 	}
 

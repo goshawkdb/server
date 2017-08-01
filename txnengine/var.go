@@ -255,7 +255,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	varCap.SetWriteTxnId(f.frameTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
-	varData := server.SegToBytes(varSeg)
+	varData := common.SegToBytes(varSeg)
 
 	txnBytes := action.TxnReader.Data
 

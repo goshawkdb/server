@@ -431,7 +431,7 @@ func MakeTxnLocallyCompleteMsg(txnId *common.TxnId) []byte {
 	tlc := msgs.NewTxnLocallyComplete(seg)
 	msg.SetTxnLocallyComplete(tlc)
 	tlc.SetTxnId(txnId[:])
-	return server.SegToBytes(seg)
+	return common.SegToBytes(seg)
 }
 
 func MakeTxnSubmissionCompleteMsg(txnId *common.TxnId) []byte {
@@ -440,7 +440,7 @@ func MakeTxnSubmissionCompleteMsg(txnId *common.TxnId) []byte {
 	tsc := msgs.NewTxnSubmissionComplete(seg)
 	msg.SetSubmissionComplete(tsc)
 	tsc.SetTxnId(txnId[:])
-	return server.SegToBytes(seg)
+	return common.SegToBytes(seg)
 }
 
 func MakeTxnSubmissionAbortMsg(txnId *common.TxnId) []byte {
@@ -449,7 +449,7 @@ func MakeTxnSubmissionAbortMsg(txnId *common.TxnId) []byte {
 	tsa := msgs.NewTxnSubmissionAbort(seg)
 	msg.SetSubmissionAbort(tsa)
 	tsa.SetTxnId(txnId[:])
-	return server.SegToBytes(seg)
+	return common.SegToBytes(seg)
 }
 
 func AllocForRMId(txn msgs.Txn, rmId common.RMId) *msgs.Allocation {

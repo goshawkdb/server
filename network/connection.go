@@ -261,9 +261,9 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminating, terminated bo
 func (conn *Connection) maybeRestartConnection(err error) error {
 	restartable := false
 	if conn.protocol != nil {
-		restartable = conn.protocol.RestartDialer()
+		restartable = conn.protocol.Restart()
 	} else if conn.handshaker != nil {
-		restartable = conn.handshaker.RestartDialer()
+		restartable = conn.handshaker.Restart()
 	}
 
 	if restartable {

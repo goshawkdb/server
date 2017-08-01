@@ -222,7 +222,7 @@ func (arb *acceptorReceiveBallots) createTxnSender() {
 			}
 		}
 		server.DebugLog(arb, "debug", "Starting extra txn sender.", "actives", activeRMs)
-		arb.txnSender = NewRepeatingSender(server.SegToBytes(seg), activeRMs...)
+		arb.txnSender = NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
 		arb.acceptorManager.AddServerConnectionSubscriber(arb.txnSender)
 	}
 }
@@ -255,7 +255,7 @@ func (awtd *acceptorWriteToDisk) start() {
 	state.SetSendToAll(awtd.sendToAll)
 	state.SetInstances(awtd.ballotAccumulator.AddInstancesToSeg(stateSeg))
 
-	data := server.SegToBytes(stateSeg)
+	data := common.SegToBytes(stateSeg)
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
@@ -465,7 +465,7 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() {
 		server.DebugLog(adfd, "debug", "Sending TGC.", "destination", adfd.tgcRecipients)
 		// If this gets lost it doesn't matter - the TLC will eventually
 		// get resent and we'll then send out another TGC.
-		NewOneShotSender(adfd.logger, server.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
+		NewOneShotSender(adfd.logger, common.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
 	}
 }
 
@@ -497,9 +497,9 @@ func newTwoBTxnVotesSender(logger log.Logger, outcome *msgs.Outcome, txnId *comm
 	server.DebugLog(logger, "debug", "Sending 2B.", "recipients", recipients, "submitter", submitter)
 
 	return &twoBTxnVotesSender{
-		msg:          server.SegToBytes(seg),
+		msg:          common.SegToBytes(seg),
 		recipients:   recipients,
-		submitterMsg: server.SegToBytes(submitterSeg),
+		submitterMsg: common.SegToBytes(submitterSeg),
 		submitter:    submitter,
 	}
 }

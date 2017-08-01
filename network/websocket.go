@@ -349,7 +349,7 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	}
 }
 
-func (wmpc *wssMsgPackClient) RestartDialer() bool {
+func (wmpc *wssMsgPackClient) Restart() bool {
 	return false // client connections are never restarted
 }
 

@@ -24,14 +24,14 @@ import (
 type Handshaker interface {
 	Dial() error
 	PerformHandshake(*configuration.Topology) (Protocol, error)
-	RestartDialer() bool
+	Restart() bool
 	InternalShutdown()
 }
 
 type Protocol interface {
 	Run(*Connection) error
 	TopologyChanged(*connectionMsgTopologyChanged) error
-	RestartDialer() bool
+	Restart() bool
 	InternalShutdown()
 }
 
@@ -60,7 +60,7 @@ func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology
 	tch.topology = topology
 
 	helloSeg := tch.makeHello()
-	if err := tch.Send(server.SegToBytes(helloSeg)); err != nil {
+	if err := tch.Send(common.SegToBytes(helloSeg)); err != nil {
 		return nil, err
 	}
 
@@ -93,7 +93,7 @@ func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology
 	}
 }
 
-func (tch *TLSCapnpHandshaker) RestartDialer() bool {
+func (tch *TLSCapnpHandshaker) Restart() bool {
 	tch.InternalShutdown()
 	return tch.restartable
 }
@@ -167,7 +167,7 @@ func (tch *TLSCapnpHandshaker) serverError(err error) error {
 	msg.SetConnectionError(err.Error())
 	// ignoring the possible error from tch.send - it's a best effort
 	// basis at this point.
-	tch.Send(server.SegToBytes(seg))
+	tch.Send(common.SegToBytes(seg))
 	return err
 }
 
@@ -243,7 +243,7 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 	tcs.logger.Log("authentication", "success")
 
 	hello := tcs.makeHelloServer()
-	if err := tcs.TLSCapnpHandshaker.Send(server.SegToBytes(hello)); err != nil {
+	if err := tcs.TLSCapnpHandshaker.Send(common.SegToBytes(hello)); err != nil {
 		return err
 	}
 
@@ -297,13 +297,13 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	seg := capn.NewBuffer(nil)
 	message := msgs.NewRootMessage(seg)
 	message.SetHeartbeat()
-	tcs.CreateBeater(conn, server.SegToBytes(seg))
+	tcs.CreateBeater(conn, common.SegToBytes(seg))
 	tcs.createReader()
 
 	flushSeg := capn.NewBuffer(nil)
 	flushMsg := msgs.NewRootMessage(flushSeg)
 	flushMsg.SetFlushed()
-	flushBytes := server.SegToBytes(flushSeg)
+	flushBytes := common.SegToBytes(flushSeg)
 	tcs.connectionManager.ServerEstablished(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteClusterUUId, func() { tcs.Send(flushBytes) })
 
 	return nil
@@ -329,11 +329,11 @@ func (tcs *TLSCapnpServer) Send(msg []byte) {
 	tcs.conn.EnqueueError(func() error { return tcs.SendMessage(msg) })
 }
 
-func (tcs *TLSCapnpServer) RestartDialer() bool {
+func (tcs *TLSCapnpServer) Restart() bool {
 	tcs.internalShutdown()
 	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.restartable)
 
-	return tcs.TLSCapnpHandshaker.RestartDialer()
+	return tcs.TLSCapnpHandshaker.Restart()
 }
 
 func (tcs *TLSCapnpServer) InternalShutdown() {
@@ -413,6 +413,9 @@ func (tcc *TLSCapnpClient) finishHandshake() error {
 	}
 	config.ClientAuth = tls.RequireAnyClientCert
 	socket := tls.Server(tcc.Socket(), config)
+	if err := socket.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
 	tcc.Dialer = common.NewTCPDialer(socket, tcc.Dialer.RemoteHost(), tcc.logger)
 	if err := socket.Handshake(); err != nil {
 		return err
@@ -430,7 +433,7 @@ func (tcc *TLSCapnpClient) finishHandshake() error {
 		tcc.roots = roots
 		tcc.logger.Log("authentication", "success", "fingerprint", hex.EncodeToString(hashsum[:]))
 		helloFromServer := tcc.makeHelloClient()
-		if err := tcc.Send(server.SegToBytes(helloFromServer)); err != nil {
+		if err := tcc.Send(common.SegToBytes(helloFromServer)); err != nil {
 			return err
 		}
 		tcc.remoteHost = tcc.Socket().RemoteAddr().String()
@@ -481,7 +484,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		seg := capn.NewBuffer(nil)
 		message := cmsgs.NewRootClientMessage(seg)
 		message.SetHeartbeat()
-		tcc.CreateBeater(conn, server.SegToBytes(seg))
+		tcc.CreateBeater(conn, common.SegToBytes(seg))
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
@@ -528,7 +531,7 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) err
 	return nil
 }
 
-func (tcc *TLSCapnpClient) RestartDialer() bool {
+func (tcc *TLSCapnpClient) Restart() bool {
 	return false // client connections are never restarted
 }
 
@@ -600,7 +603,11 @@ func (tcc *TLSCapnpClient) serverConnectionsChanged(servers map[common.RMId]paxo
 func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
 	seg, err := tcc.ReadOne()
 	if err != nil {
-		return err
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return fmt.Errorf("Missed too many connection heartbeats. (%v)", netErr)
+		} else {
+			return err
+		}
 	}
 	msg := cmsgs.ReadRootClientMessage(seg)
 	switch which := msg.Which(); which {
@@ -629,7 +636,7 @@ func (tcc *TLSCapnpClient) submitTransaction(ctxn cmsgs.ClientTxn) error {
 			seg := capn.NewBuffer(nil)
 			msg := cmsgs.NewRootClientMessage(seg)
 			msg.SetClientTxnOutcome(*clientOutcome)
-			return tcc.SendMessage(server.SegToBytes(msg.Segment))
+			return tcc.SendMessage(common.SegToBytes(msg.Segment))
 		}
 	})
 }
@@ -642,7 +649,7 @@ func (tcc *TLSCapnpClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, orig
 	outcome.SetId(origTxnId[:])
 	outcome.SetFinalId(ctxn.Id())
 	outcome.SetError(err.Error())
-	return server.SegToBytes(seg)
+	return common.SegToBytes(seg)
 }
 
 func (tcc *TLSCapnpClient) createReader() {

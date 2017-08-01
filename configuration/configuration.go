@@ -588,7 +588,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 func (config *Configuration) Serialize() []byte {
 	seg := capn.NewBuffer(nil)
 	config.AddToSegAutoRoot(seg)
-	return server.SegToBytes(seg)
+	return common.SegToBytes(seg)
 }
 
 func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configuration {

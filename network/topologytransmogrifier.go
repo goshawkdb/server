@@ -647,7 +647,7 @@ func (task *targetConfig) shareGoalWithAll() {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTopologyChangeRequest(task.config.AddToSegAutoRoot(seg))
-	task.sender = paxos.NewRepeatingAllSender(server.SegToBytes(seg))
+	task.sender = paxos.NewRepeatingAllSender(common.SegToBytes(seg))
 	task.connectionManager.AddServerConnectionSubscriber(task.sender)
 }
 
@@ -1614,7 +1614,7 @@ func (task *targetConfig) createTopologyTransaction(read, write *configuration.T
 		}
 		rw.SetReferences(refs)
 	}
-	txn.SetActions(server.SegToBytes(actionsSeg))
+	txn.SetActions(common.SegToBytes(actionsSeg))
 
 	allocs := msgs.NewAllocationList(seg, len(active)+len(passive))
 	txn.SetAllocations(allocs)
@@ -2039,7 +2039,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 	mc := msgs.NewMigrationComplete(seg)
 	mc.SetVersion(it.configuration.NextConfiguration.Version)
 	msg.SetMigrationComplete(mc)
-	bites := server.SegToBytes(seg)
+	bites := common.SegToBytes(seg)
 
 	for _, sb := range it.batch {
 		if conn, found := conns[sb.conn.RMId()]; found && sb.conn == conn {
@@ -2104,7 +2104,7 @@ func (sb *sendBatch) flush() {
 	}
 	migration.SetElems(elems)
 	msg.SetMigration(migration)
-	bites := server.SegToBytes(seg)
+	bites := common.SegToBytes(seg)
 	server.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId())
 	sb.conn.Send(bites)
 	sb.elems = sb.elems[:0]
