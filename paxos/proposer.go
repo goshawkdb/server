@@ -467,7 +467,7 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 		acceptorsCap.Set(idx, uint32(rmId))
 	}
 
-	data := server.SegToBytes(stateSeg)
+	data := common.SegToBytes(stateSeg)
 
 	future := palc.proposerManager.DB.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
 		rwtxn.Put(palc.proposerManager.DB.Proposers, palc.txnId[:], data, 0)

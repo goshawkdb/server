@@ -110,7 +110,7 @@ func (p *proposal) maybeSendOneA() {
 		proposal := proposals.At(idx)
 		pi.addOneAToProposal(&proposal, sender)
 	}
-	sender.msg = server.SegToBytes(seg)
+	sender.msg = common.SegToBytes(seg)
 	server.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 1A.", "TxnId", txnId)
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
@@ -150,7 +150,7 @@ func (p *proposal) maybeSendTwoA() {
 		pi.addTwoAToAcceptRequest(seg, &acceptRequest, sender)
 	}
 	twoACap.SetTxn(p.txn.Data)
-	sender.msg = server.SegToBytes(seg)
+	sender.msg = common.SegToBytes(seg)
 	server.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 2A.", "TxnId", p.txn.Id)
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }

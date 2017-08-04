@@ -4,7 +4,6 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 )
 
@@ -108,7 +107,7 @@ func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *T
 	badReadCap.SetTxnId(txnId[:])
 	badReadCap.SetTxnActions(actions.Data)
 	ballotCap.SetVote(voteCap)
-	ballot.Data = server.SegToBytes(seg)
+	ballot.Data = common.SegToBytes(seg)
 	return ballot.Ballot
 }
 
@@ -129,6 +128,6 @@ func (ballot *BallotBuilder) ToBallot() *Ballot {
 	}
 
 	ballotCap.SetVote(*ballot.VoteCap)
-	ballot.Data = server.SegToBytes(seg)
+	ballot.Data = common.SegToBytes(seg)
 	return ballot.Ballot
 }

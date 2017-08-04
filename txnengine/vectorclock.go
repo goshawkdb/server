@@ -4,7 +4,6 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 )
 
@@ -443,7 +442,7 @@ func (vc *VectorClockMutable) AsData() []byte {
 				idx++
 				return true
 			})
-			vc.data = server.SegToBytes(seg)
+			vc.data = common.SegToBytes(seg)
 		}
 	}
 

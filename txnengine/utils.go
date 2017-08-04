@@ -4,7 +4,6 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 )
 
@@ -86,7 +85,7 @@ func (tr *TxnReader) AsDeflated() *TxnReader {
 			tr.deflated = &TxnReader{
 				Id:      tr.Id,
 				actions: actions,
-				Data:    server.SegToBytes(seg),
+				Data:    common.SegToBytes(seg),
 				Txn:     root,
 			}
 		}
@@ -146,7 +145,7 @@ func (actions *TxnActions) AsDeflated() *TxnActions {
 	}
 
 	return &TxnActions{
-		Data:       server.SegToBytes(seg),
+		Data:       common.SegToBytes(seg),
 		deflated:   true,
 		decoded:    true,
 		actionsCap: list,

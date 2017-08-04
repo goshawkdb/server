@@ -232,7 +232,7 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 	}
 
 	// The proposal senders are repeating, so this use of OSS is fine.
-	NewOneShotSender(am.logger, server.SegToBytes(replySeg), am, sender)
+	NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
 }
 
 func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.TxnReader, twoATxnVotes *msgs.TwoATxnVotes) {
@@ -283,7 +283,7 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.Txn
 		}
 		server.DebugLog(am.logger, "debug", "Sending 2B failures.", "TxnId", txnId, "recipient", sender, "instance", instanceRMId)
 		// The proposal senders are repeating, so this use of OSS is fine.
-		NewOneShotSender(am.logger, server.SegToBytes(replySeg), am, sender)
+		NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
 	}
 }
 
@@ -306,7 +306,7 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		server.DebugLog(am.logger, "debug", "Sending single TGC.", "TxnId", txnId, "recipient", sender)
 		// Use of OSS here is ok because this is the default action on
 		// not finding state.
-		NewOneShotSender(am.logger, server.SegToBytes(seg), am, sender)
+		NewOneShotSender(am.logger, common.SegToBytes(seg), am, sender)
 	}
 }
 
