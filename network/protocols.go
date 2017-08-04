@@ -310,7 +310,7 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 }
 
 func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) error {
-	defer tc.maybeClose()
+	defer tc.Close()
 
 	topology := tc.topology
 	tcs.topology = topology
@@ -326,7 +326,7 @@ func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) err
 }
 
 func (tcs *TLSCapnpServer) Send(msg []byte) {
-	tcs.conn.EnqueueError(func() error { return tcs.SendMessage(msg) })
+	tcs.conn.EnqueueFuncError(func() error { return tcs.SendMessage(msg) })
 }
 
 func (tcs *TLSCapnpServer) Restart() bool {
@@ -498,6 +498,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 }
 
 func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+	defer tc.Close()
 	topology := tc.topology
 	tcc.topology = topology
 
@@ -506,28 +507,22 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) err
 	if topology != nil {
 		if authenticated, _, roots := tcc.topology.VerifyPeerCerts(tcc.peerCerts); !authenticated {
 			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
-			tc.maybeClose()
 			return errors.New("Client connection closed: No client certificate known")
 		} else if len(roots) == len(tcc.roots) {
 			for name, capsOld := range tcc.roots {
 				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
 					server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
-					tc.maybeClose()
 					return errors.New("Client connection closed: roots have changed")
 				}
 			}
 		} else {
 			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
-			tc.maybeClose()
 			return errors.New("Client connection closed: roots have changed")
 		}
 	}
 	if err := tcc.submitter.TopologyChanged(topology); err != nil {
-		tc.maybeClose()
 		return err
 	}
-	tc.maybeClose()
-
 	return nil
 }
 
@@ -557,7 +552,7 @@ func (tcc *TLSCapnpClient) String() string {
 }
 
 func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	tcc.EnqueueError(func() error {
+	tcc.EnqueueFuncError(func() error {
 		return tcc.outcomeReceived(sender, txn, outcome)
 	})
 }
@@ -567,18 +562,18 @@ func (tcc *TLSCapnpClient) outcomeReceived(sender common.RMId, txn *eng.TxnReade
 }
 
 func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	tcc.EnqueueError(func() error {
+	tcc.EnqueueFuncError(func() error {
 		return tcc.serverConnectionsChanged(servers)
 	})
 }
 func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	tcc.EnqueueError(func() error {
+	tcc.EnqueueFuncError(func() error {
 		return tcc.serverConnectionsChanged(servers)
 	})
 }
 func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
 	finished := make(chan struct{})
-	enqueued := tcc.EnqueueError(func() error {
+	enqueued := tcc.EnqueueFuncError(func() error {
 		defer close(finished)
 		return tcc.serverConnectionsChanged(servers)
 	})
@@ -615,7 +610,7 @@ func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
 		return nil // do nothing
 	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		// submitter is accessed from the connection go routine, so we must relay this
-		tcc.EnqueueError(func() error {
+		tcc.EnqueueFuncError(func() error {
 			return tcc.submitTransaction(msg.ClientTxnSubmission())
 		})
 		return nil

@@ -38,53 +38,30 @@ type WebsocketListener struct {
 	topologyLock      *sync.RWMutex
 }
 
-type websocketListenerMsg interface {
-	websocketListenerMsgWitness()
-}
+type websocketListenerMsg interface{}
 
 type websocketListenerMsgShutdown struct{}
 
-func (lms *websocketListenerMsgShutdown) websocketListenerMsgWitness() {}
-
-var websocketListenerMsgShutdownInst = &websocketListenerMsgShutdown{}
-
 func (l *WebsocketListener) Shutdown() {
-	if l.enqueueQuery(websocketListenerMsgShutdownInst) {
+	if l.enqueueQuery(websocketListenerMsgShutdown{}) {
 		l.cellTail.Wait()
 	}
 }
 
-type websocketListenerMsgTopologyChanged struct {
-	topology   *configuration.Topology
-	resultChan chan struct{}
+type websocketListenerMsgSync interface {
+	websocketListenerMsg
+	common.MsgSync
 }
 
-func (lmtc *websocketListenerMsgTopologyChanged) websocketListenerMsgWitness() {}
-
-func (lmtc *websocketListenerMsgTopologyChanged) maybeClose() {
-	select {
-	case <-lmtc.resultChan:
-	default:
-		close(lmtc.resultChan)
-	}
+type websocketListenerMsgTopologyChanged struct {
+	common.MsgSyncQuery
+	topology *configuration.Topology
 }
 
 func (l *WebsocketListener) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	msg := &websocketListenerMsgTopologyChanged{
-		resultChan: make(chan struct{}),
-		topology:   topology,
-	}
-	if l.enqueueQuery(msg) {
-		go func() {
-			select {
-			case <-msg.resultChan:
-			case <-l.cellTail.Terminated:
-			}
-			done(true)
-		}()
-	} else {
-		done(true)
-	}
+	msg := &websocketListenerMsgTopologyChanged{topology: topology}
+	l.enqueueQuerySync(msg)
+	done(true)
 }
 
 type websocketListenerQueryCapture struct {
@@ -99,6 +76,20 @@ func (wlqc *websocketListenerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurC
 func (l *WebsocketListener) enqueueQuery(msg websocketListenerMsg) bool {
 	wlqc := &websocketListenerQueryCapture{wl: l, msg: msg}
 	return l.cellTail.WithCell(wlqc.ccc)
+}
+
+func (l *WebsocketListener) enqueueQuerySync(msg websocketListenerMsgSync) bool {
+	resultChan := msg.Init()
+	if l.enqueueQuery(msg) {
+		select {
+		case <-resultChan:
+			return true
+		case <-l.cellTail.Terminated:
+			return false
+		}
+	} else {
+		return false
+	}
 }
 
 func NewWebsocketListener(mux *HttpListenerWithMux, cm *ConnectionManager, logger log.Logger) *WebsocketListener {
@@ -149,13 +140,7 @@ func (l *WebsocketListener) actorLoop(head *cc.ChanCellHead) {
 	terminate := false
 	for !terminate {
 		if msg, ok := <-queryChan; ok {
-			switch msgT := msg.(type) {
-			case *websocketListenerMsgShutdown:
-				terminate = true
-			case *websocketListenerMsgTopologyChanged:
-				l.putTopology(msgT.topology)
-				msgT.maybeClose()
-			}
+			terminate, err = l.handleMsg(msg)
 			terminate = terminate || err != nil
 		} else {
 			head.Next(queryCell, chanFun)
@@ -165,6 +150,19 @@ func (l *WebsocketListener) actorLoop(head *cc.ChanCellHead) {
 		l.logger.Log("msg", "Fatal error.", "error", err)
 	}
 	l.cellTail.Terminate()
+}
+
+func (l *WebsocketListener) handleMsg(msg websocketListenerMsg) (terminate bool, err error) {
+	switch msgT := msg.(type) {
+	case websocketListenerMsgShutdown:
+		terminate = true
+	case *websocketListenerMsgTopologyChanged:
+		l.putTopology(msgT.topology)
+		msgT.Close()
+	default:
+		panic(fmt.Sprintf("Received unexpected message: %#v", msgT))
+	}
+	return
 }
 
 func (l *WebsocketListener) putTopology(topology *configuration.Topology) {
@@ -376,6 +374,7 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 }
 
 func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+	defer tc.Close()
 	topology := tc.topology
 	wmpc.topology = topology
 
@@ -384,28 +383,22 @@ func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) 
 	if topology != nil {
 		if authenticated, _, roots := wmpc.topology.VerifyPeerCerts(wmpc.peerCerts); !authenticated {
 			server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
-			tc.maybeClose()
 			return errors.New("WSS Client connection closed: No client certificate known")
 		} else if len(roots) == len(wmpc.roots) {
 			for name, capsOld := range wmpc.roots {
 				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
 					server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
-					tc.maybeClose()
 					return errors.New("WSS Client connection closed: roots have changed")
 				}
 			}
 		} else {
 			server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
-			tc.maybeClose()
 			return errors.New("WSS Client connection closed: roots have changed")
 		}
 	}
 	if err := wmpc.submitter.TopologyChanged(topology); err != nil {
-		tc.maybeClose()
 		return err
 	}
-	tc.maybeClose()
-
 	return nil
 }
 
@@ -434,7 +427,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 }
 
 func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	wmpc.EnqueueError(func() error {
+	wmpc.EnqueueFuncError(func() error {
 		return wmpc.outcomeReceived(sender, txn, outcome)
 	})
 }
@@ -444,17 +437,17 @@ func (wmpc *wssMsgPackClient) outcomeReceived(sender common.RMId, txn *eng.TxnRe
 }
 
 func (wmpc *wssMsgPackClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	wmpc.EnqueueError(func() error {
+	wmpc.EnqueueFuncError(func() error {
 		return wmpc.serverConnectionsChanged(servers)
 	})
 }
 func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	wmpc.EnqueueError(func() error {
+	wmpc.EnqueueFuncError(func() error {
 		return wmpc.serverConnectionsChanged(servers)
 	})
 }
 func (wmpc *wssMsgPackClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	wmpc.EnqueueError(func() error {
+	wmpc.EnqueueFuncError(func() error {
 		if done != nil {
 			defer done()
 		}
@@ -473,7 +466,7 @@ func (wmpc *wssMsgPackClient) ReadAndHandleOneMsg() error {
 	}
 	switch {
 	case msg.ClientTxnSubmission != nil:
-		wmpc.EnqueueError(func() error {
+		wmpc.EnqueueFuncError(func() error {
 			return wmpc.submitTransaction(msg.ClientTxnSubmission)
 		})
 		return nil
@@ -578,7 +571,7 @@ func (b *wssBeater) tick() {
 		case <-b.terminate:
 			return
 		case <-b.ticker.C:
-			if !b.conn.EnqueueError(b.beat) {
+			if !b.conn.EnqueueFuncError(b.beat) {
 				return
 			}
 		}

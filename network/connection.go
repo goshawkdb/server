@@ -30,40 +30,27 @@ type Connection struct {
 	connectionRun
 }
 
-type connectionMsg interface {
-	witness() connectionMsg
+type connectionMsg interface{}
+
+type connectionMsgSync interface {
+	connectionMsg
+	common.MsgSync
 }
 
-type connectionMsgBasic struct{}
-
-func (cmb connectionMsgBasic) witness() connectionMsg { return cmb }
-
-type connectionMsgStartShutdown struct{ connectionMsgBasic }
-type connectionMsgShutdownComplete struct{ connectionMsgBasic }
+type connectionMsgStartShutdown struct{}
+type connectionMsgShutdownComplete struct{}
 
 type connectionMsgTopologyChanged struct {
-	connectionMsgBasic
-	topology   *configuration.Topology
-	resultChan chan struct{}
-}
-
-func (cmtc *connectionMsgTopologyChanged) maybeClose() {
-	select {
-	case <-cmtc.resultChan:
-	default:
-		close(cmtc.resultChan)
-	}
+	common.MsgSyncQuery
+	topology *configuration.Topology
 }
 
 type connectionMsgStatus struct {
-	connectionMsgBasic
 	*server.StatusConsumer
 }
 
 // for paxos.Actorish
 type connectionMsgExec func()
-
-func (cme connectionMsgExec) witness() connectionMsg { return cme }
 
 // is async
 func (conn *Connection) Shutdown() {
@@ -75,22 +62,9 @@ func (conn *Connection) shutdownComplete() {
 }
 
 func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan struct{})
-	msg := &connectionMsgTopologyChanged{
-		resultChan: finished,
-		topology:   topology,
-	}
-	if conn.enqueueQuery(msg) {
-		go func() {
-			select {
-			case <-finished:
-			case <-conn.cellTail.Terminated:
-			}
-			done(true) // connection drop is not a problem
-		}()
-	} else {
-		done(true)
-	}
+	msg := &connectionMsgTopologyChanged{topology: topology}
+	conn.enqueueQuerySync(msg)
+	done(true)
 }
 
 func (conn *Connection) Status(sc *server.StatusConsumer) {
@@ -107,12 +81,10 @@ func (conn *Connection) WithTerminatedChan(fun func(chan struct{})) {
 	fun(conn.cellTail.Terminated)
 }
 
-type connectionMsgExecError func() error
+type connectionMsgExecFuncError func() error
 
-func (cmee connectionMsgExecError) witness() connectionMsg { return cmee }
-
-func (conn *Connection) EnqueueError(fun func() error) bool {
-	return conn.enqueueQuery(connectionMsgExecError(fun))
+func (conn *Connection) EnqueueFuncError(fun func() error) bool {
+	return conn.enqueueQuery(connectionMsgExecFuncError(fun))
 }
 
 type connectionQueryCapture struct {
@@ -127,6 +99,20 @@ func (cqc *connectionQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsu
 func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
 	cqc := &connectionQueryCapture{conn: conn, msg: msg}
 	return conn.cellTail.WithCell(cqc.ccc)
+}
+
+func (conn *Connection) enqueueQuerySync(msg connectionMsgSync) bool {
+	resultChan := msg.Init()
+	if conn.enqueueQuery(msg) {
+		select {
+		case <-resultChan:
+			return true
+		case <-conn.cellTail.Terminated:
+			return false
+		}
+	} else {
+		return false
+	}
 }
 
 // we are dialing out to someone else
@@ -239,18 +225,16 @@ func (conn *Connection) handleMsg(msg connectionMsg) (terminating, terminated bo
 		terminating = true
 	case connectionMsgShutdownComplete:
 		terminated = true
-	case *connectionDelay:
-		msgT.received()
 	case connectionMsgExec:
 		msgT()
-	case connectionMsgExecError:
+	case connectionMsgExecFuncError:
 		err = msgT()
 	case *connectionMsgTopologyChanged:
 		err = conn.topologyChanged(msgT)
 	case connectionMsgStatus:
 		conn.status(msgT.StatusConsumer)
 	default:
-		err = fmt.Errorf("Fatal to Connection: Received unexpected message: %#v", msgT)
+		panic(fmt.Sprintf("Received unexpected message: %#v", msgT))
 	}
 	if err != nil && !terminating {
 		err = conn.maybeRestartConnection(err)
@@ -341,7 +325,6 @@ func (conn *Connection) status(sc *server.StatusConsumer) {
 // Delay
 
 type connectionDelay struct {
-	connectionMsgBasic
 	*Connection
 	delay *time.Timer
 }
@@ -358,7 +341,7 @@ func (cd *connectionDelay) start() (bool, error) {
 	if cd.delay == nil {
 		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
 		cd.delay = time.AfterFunc(delay, func() {
-			cd.enqueueQuery(cd)
+			cd.Enqueue(cd.received)
 		})
 	}
 	return false, nil
@@ -444,7 +427,7 @@ func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error
 		cr.topology = tc.topology
 		return cr.protocol.TopologyChanged(tc)
 	default:
-		tc.maybeClose()
+		tc.Close()
 		return nil
 	}
 }
