@@ -10,6 +10,7 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
@@ -50,7 +51,10 @@ func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm Connectio
 		instances: make(map[instanceId]*instance),
 		acceptors: make(map[common.TxnId]*acceptorInstances),
 	}
-	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(eng.AcceptorSubscriber, am) })
+	exe.EnqueueFuncAsync(func() (bool, error) {
+		am.Topology = cm.AddTopologySubscriber(eng.AcceptorSubscriber, am)
+		return false, nil
+	})
 	return am
 }
 
@@ -163,26 +167,32 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan struct{})
-	enqueued := am.Exe.Enqueue(func() {
-		am.Topology = topology
-		for _, ai := range am.acceptors {
-			if ai.acceptor != nil {
-				ai.acceptor.TopologyChanged(topology)
-			}
+type amTopologyChanged struct {
+	actor.MsgSyncQuery
+	am       *AcceptorManager
+	topology *configuration.Topology
+}
+
+func (tc *amTopologyChanged) Exec() (bool, error) {
+	defer tc.MustClose()
+	tc.am.Topology = tc.topology
+	for _, ai := range tc.am.acceptors {
+		if ai.acceptor != nil {
+			ai.acceptor.TopologyChanged(tc.topology)
 		}
-		close(finished)
-	})
-	if enqueued {
-		go am.Exe.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case <-finished:
-				done(true)
-			case <-terminated:
-				done(false)
-			}
-		})
+	}
+
+	return false, nil
+}
+
+func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	tc := &amTopologyChanged{
+		am:       am,
+		topology: topology,
+	}
+	tc.InitMsg(am.Exe.Mailbox)
+	if am.Exe.Mailbox.EnqueueMsg(tc) {
+		go done(tc.Wait())
 	} else {
 		done(false)
 	}

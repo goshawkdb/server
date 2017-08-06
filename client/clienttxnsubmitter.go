@@ -24,7 +24,7 @@ type ClientTxnSubmitter struct {
 	metrics      *paxos.ClientTxnMetrics
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger, metrics *paxos.ClientTxnMetrics) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.EnqueueActor, logger log.Logger, metrics *paxos.ClientTxnMetrics) *ClientTxnSubmitter {
 	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, logger)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,

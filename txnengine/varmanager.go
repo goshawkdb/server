@@ -7,6 +7,7 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	tw "github.com/msackman/gotimerwheel"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
@@ -43,41 +44,53 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 		tw:              tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
 		exe:             exe,
 	}
-	exe.Enqueue(func() {
+	exe.EnqueueFuncAsync(func() (bool, error) {
 		vm.Topology = tp.AddTopologySubscriber(VarSubscriber, vm)
 		vm.RollAllowed = vm.Topology != nil && vm.Topology.NextConfiguration == nil
+		return false, nil
 	})
 	return vm
 }
 
-func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan bool)
-	enqueued := vm.exe.Enqueue(func() {
-		if od := vm.onDisk; od != nil {
-			vm.onDisk = nil
-			od(false)
-		}
-		vm.Topology = topology
-		server.DebugLog(vm.logger, "debug", "TopologyChanged.", "topology", topology)
+type vmTopologyChanged struct {
+	actor.MsgSyncQuery
+	vm       *VarManager
+	topology *configuration.Topology
+	outcome  bool
+}
 
-		if topology.NextConfiguration == nil {
-			vm.RollAllowed = true
-			server.DebugLog(vm.logger, "debug", "TopologyChanged. Calling done.", "topology", topology)
-			finished <- true
-		} else {
-			vm.onDisk = func(result bool) { finished <- result }
-			vm.checkAllDisk()
-		}
-	})
-	if enqueued {
-		go vm.exe.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case success := <-finished:
-				done(success)
-			case <-terminated:
-				done(false)
-			}
-		})
+func (tc *vmTopologyChanged) Exec() (bool, error) {
+	if od := tc.vm.onDisk; od != nil {
+		tc.vm.onDisk = nil
+		od(false)
+	}
+	tc.vm.Topology = tc.topology
+	server.DebugLog(tc.vm.logger, "debug", "TopologyChanged.", "topology", tc.topology)
+
+	if tc.topology.NextConfiguration == nil {
+		tc.vm.RollAllowed = true
+		server.DebugLog(tc.vm.logger, "debug", "TopologyChanged. Calling done.", "topology", tc.topology)
+		tc.done(true)
+	} else {
+		tc.vm.onDisk = tc.done
+		tc.vm.checkAllDisk()
+	}
+	return false, nil
+}
+
+func (tc *vmTopologyChanged) done(result bool) {
+	tc.outcome = result
+	tc.MustClose()
+}
+
+func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	tc := &vmTopologyChanged{
+		vm:       vm,
+		topology: topology,
+	}
+	tc.InitMsg(vm.exe.Mailbox)
+	if vm.exe.Mailbox.EnqueueMsg(tc) {
+		go done(tc.Wait() && tc.outcome)
 	} else {
 		done(false)
 	}
@@ -192,13 +205,14 @@ func (vm *VarManager) ScheduleCallback(interval time.Duration, fun tw.Event) {
 	}
 }
 
-func (vm *VarManager) beat() {
+func (vm *VarManager) beat() (bool, error) {
 	vm.tw.AdvanceTo(time.Now(), 32)
 	// fmt.Println("done:", )
 	if vm.tw.IsEmpty() && vm.beaterTerminator != nil {
 		close(vm.beaterTerminator)
 		vm.beaterTerminator = nil
 	}
+	return false, nil
 }
 
 func (vm *VarManager) beater(terminate chan struct{}) {
@@ -209,7 +223,7 @@ func (vm *VarManager) beater(terminate chan struct{}) {
 		case <-terminate:
 			return
 		default:
-			vm.exe.Enqueue(vm.beat)
+			vm.exe.EnqueueFuncAsync(vm.beat)
 		}
 	}
 }

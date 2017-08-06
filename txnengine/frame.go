@@ -771,7 +771,7 @@ func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
 func (fo *frameOpen) scheduleRoll() {
 	server.DebugLog(fo.v.vm.logger, "debug", "Roll callback scheduled.", "frame", fo.frame)
 	fo.v.vm.ScheduleCallback(fo.scheduleBackoff.Advance(), func(*time.Time) {
-		fo.v.applyToVar(func() {
+		fo.v.applyToSelf(func() {
 			fo.maybeStartRollFrom(true)
 		})
 	})
@@ -794,7 +794,7 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 			}
 		}
 		// fmt.Printf("%v r%v (%v)\n", fo.v.UUId, ow, err == AbortRollNotFirst)
-		fo.v.applyToVar(func() {
+		fo.v.applyToSelf(func() {
 			server.DebugLog(fo.v.vm.logger, "debug", "Roll finished.", "frame", fo.frame, "outcome", ow, "error", err)
 			if fo.v.curFrame != fo.frame {
 				return

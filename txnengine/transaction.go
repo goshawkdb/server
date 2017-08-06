@@ -420,20 +420,22 @@ func (talb *txnAwaitLocalBallots) start() {}
 
 func (talb *txnAwaitLocalBallots) voteCast(ballot *Ballot, abort bool) bool {
 	if talb.Retry {
-		talb.exe.Enqueue(func() { talb.retryTxnBallotComplete(ballot) })
+		talb.exe.EnqueueFuncAsync(func() (bool, error) {
+			return talb.retryTxnBallotComplete(ballot)
+		})
 		return true
 	}
 	if abort && atomic.CompareAndSwapInt32(&talb.preAborted, 0, 1) {
-		talb.exe.Enqueue(talb.preAbort)
+		talb.exe.EnqueueFuncAsync(talb.preAbort)
 	}
 	abort = abort || atomic.LoadInt32(&talb.preAborted) == 1
 	if atomic.AddInt32(&talb.pendingVote, -1) == 0 {
-		talb.exe.Enqueue(talb.allTxnBallotsComplete)
+		talb.exe.EnqueueFuncAsync(talb.allTxnBallotsComplete)
 	}
 	return abort
 }
 
-func (talb *txnAwaitLocalBallots) preAbort() {
+func (talb *txnAwaitLocalBallots) preAbort() (bool, error) {
 	if talb.currentState == talb && !talb.preAbortedBool {
 		talb.preAbortedBool = true
 		for idx := 0; idx < len(talb.localActions); idx++ {
@@ -464,9 +466,10 @@ func (talb *txnAwaitLocalBallots) preAbort() {
 	} else {
 		panic(fmt.Sprintf("%v error: preAbort with txn in wrong state (or preAbort called multiple times: %v): %v\n", talb.Id, talb.currentState, talb.preAbortedBool))
 	}
+	return false, nil
 }
 
-func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() {
+func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() (bool, error) {
 	if talb.currentState == talb {
 		talb.nextState() // advance state FIRST!
 		ballots := make([]*Ballot, len(talb.localActions))
@@ -478,9 +481,10 @@ func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() {
 	} else {
 		panic(fmt.Sprintf("%v error: Ballots completed with txn in wrong state: %v\n", talb.Id, talb.currentState))
 	}
+	return false, nil
 }
 
-func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) {
+func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) (bool, error) {
 	if talb.currentState == talb {
 		talb.nextState()
 	}
@@ -489,6 +493,7 @@ func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) {
 	if talb.currentState == &talb.txnReceiveOutcome {
 		talb.stateChange.TxnBallotsComplete(ballot)
 	}
+	return false, nil
 }
 
 // Receive Outcome
@@ -578,17 +583,18 @@ func (talc *txnAwaitLocallyComplete) LocallyComplete() {
 	result := atomic.AddInt32(&talc.activeFramesCount, -1)
 	server.DebugLog(talc.logger, "debug", "LocallyComplete", "TxnId", talc.Id, "pendingFrameCount", result)
 	if result == 0 {
-		talc.exe.Enqueue(talc.locallyComplete)
+		talc.exe.EnqueueFuncAsync(talc.locallyComplete)
 	} else if result < 0 {
 		panic(fmt.Sprintf("%v activeFramesCount went -1!", talc.Id))
 	}
 }
 
-func (talc *txnAwaitLocallyComplete) locallyComplete() {
+func (talc *txnAwaitLocallyComplete) locallyComplete() (bool, error) {
 	if talc.currentState == talc {
 		talc.nextState() // do state first!
 		talc.stateChange.TxnLocallyComplete(talc.Txn)
 	}
+	return false, nil
 }
 
 // Receive Completion

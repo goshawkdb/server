@@ -203,12 +203,12 @@ func (s *server) start() {
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
+	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, uint8(procs), db, s.certificate, s.port, s, commandLineConfig, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.Shutdown)
-	s.addOnShutdown(cm.Shutdown)
+	s.addOnShutdown(cm.ShutdownSync)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier
 
@@ -216,7 +216,7 @@ func (s *server) start() {
 
 	listener, err := network.NewListener(s.port, cm, s.logger)
 	s.maybeShutdown(err)
-	s.addOnShutdown(listener.Shutdown)
+	s.addOnShutdown(listener.ShutdownSync)
 
 	var wssMux, promMux *network.HttpListenerWithMux
 	var wssWG, promWG *sync.WaitGroup
@@ -230,7 +230,7 @@ func (s *server) start() {
 		wssMux, err = network.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 		s.maybeShutdown(err)
 		wssListener := network.NewWebsocketListener(wssMux, cm, s.logger)
-		s.addOnShutdown(wssListener.Shutdown)
+		s.addOnShutdown(wssListener.ShutdownSync)
 	}
 
 	if s.promPort != 0 {

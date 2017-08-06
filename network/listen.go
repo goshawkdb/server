@@ -3,138 +3,79 @@ package network
 import (
 	"fmt"
 	"github.com/go-kit/kit/log"
-	cc "github.com/msackman/chancell"
+	"goshawkdb.io/common/actor"
 	"net"
 )
 
 type Listener struct {
-	logger            log.Logger
+	*actor.BasicServerOuter
+}
+
+type listenerInner struct {
+	*Listener
+	*actor.Mailbox
+	*actor.BasicServerInner
 	parentLogger      log.Logger
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(listenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan listenerMsg
 	connectionManager *ConnectionManager
+	listenPort        uint16
 	listener          *net.TCPListener
 }
 
-type listenerMsg interface {
-	listenerMsgWitness()
-}
-
-type listenerConnMsg net.TCPConn
-
-func (lcm *listenerConnMsg) listenerMsgWitness() {}
-
-type listenerAcceptError struct{ error }
-
-func (lae listenerAcceptError) listenerMsgWitness() {}
-
-type listenerMsgShutdown struct{}
-
-func (lms *listenerMsgShutdown) listenerMsgWitness() {}
-
-var listenerMsgShutdownInst = &listenerMsgShutdown{}
-
-func (l *Listener) Shutdown() {
-	if l.enqueueQuery(listenerMsgShutdownInst) {
-		l.cellTail.Wait()
-	}
-}
-
-type listenerQueryCapture struct {
-	l   *Listener
-	msg listenerMsg
-}
-
-func (lqc *listenerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-	return lqc.l.enqueueQueryInner(lqc.msg, cell, lqc.ccc)
-}
-
-func (l *Listener) enqueueQuery(msg listenerMsg) bool {
-	lqc := &listenerQueryCapture{l: l, msg: msg}
-	return l.cellTail.WithCell(lqc.ccc)
-}
-
 func NewListener(listenPort uint16, cm *ConnectionManager, logger log.Logger) (*Listener, error) {
-	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", listenPort))
-	if err != nil {
-		return nil, err
-	}
-	ln, err := net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
-		return nil, err
-	}
-	l := &Listener{
-		logger:            log.With(logger, "subsystem", "tcpListener"),
+	l := &Listener{}
+
+	li := &listenerInner{
+		Listener:          l,
+		BasicServerInner:  actor.NewBasicServerInner(log.With(logger, "subsystem", "tcpListener")),
 		parentLogger:      logger,
 		connectionManager: cm,
-		listener:          ln,
+		listenPort:        listenPort,
 	}
-	var head *cc.ChanCellHead
-	head, l.cellTail = cc.NewChanCellTail(
-		func(n int, cell *cc.ChanCell) {
-			queryChan := make(chan listenerMsg, n)
-			cell.Open = func() { l.queryChan = queryChan }
-			cell.Close = func() { close(queryChan) }
-			l.enqueueQueryInner = func(msg listenerMsg, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
-				if curCell == cell {
-					select {
-					case queryChan <- msg:
-						return true, nil
-					default:
-						return false, nil
-					}
-				} else {
-					return false, cont
-				}
-			}
-		})
 
-	go l.acceptLoop()
-	go l.actorLoop(head)
+	mailbox, err := actor.Spawn(li)
+	if err != nil {
+		return nil, err
+	}
+
+	l.BasicServerOuter = actor.NewBasicServerOuter(mailbox)
+
 	return l, nil
 }
 
-func (l *Listener) acceptLoop() {
-	for {
-		conn, err := l.listener.AcceptTCP()
-		if err != nil {
-			l.enqueueQuery(listenerAcceptError{error: err})
-			return
-		}
-		l.enqueueQuery((*listenerConnMsg)(conn))
+func (l *listenerInner) Init(self *actor.Actor) (bool, error) {
+	l.Mailbox = self.Mailbox
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", l.listenPort))
+	if err != nil {
+		return false, err
 	}
+	ln, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		return false, err
+	}
+
+	l.listener = ln
+
+	l.BasicServerInner.Init(self)
+	go l.acceptLoop()
+	return false, nil
 }
 
-func (l *Listener) actorLoop(head *cc.ChanCellHead) {
+func (l *listenerInner) acceptLoop() {
 	connectionCount := uint32(0)
-	var (
-		err       error
-		queryChan <-chan listenerMsg
-		queryCell *cc.ChanCell
-	)
-	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = l.queryChan, cell }
-	head.WithCell(chanFun)
-	terminate := false
-	for !terminate {
-		if msg, ok := <-queryChan; ok {
-			switch msgT := msg.(type) {
-			case *listenerMsgShutdown:
-				terminate = true
-			case listenerAcceptError:
-				err = msgT
-			case *listenerConnMsg:
-				connectionCount++
-				NewConnectionTCPTLSCapnpHandshaker((*net.TCPConn)(msgT), l.connectionManager, connectionCount*2, l.parentLogger)
-			}
-			terminate = terminate || err != nil
+	for {
+		conn, err := l.listener.AcceptTCP()
+		if err == nil {
+			connectionCount++
+			cc := connectionCount * 2
+			l.EnqueueFuncAsync(func() (bool, error) {
+				NewConnectionTCPTLSCapnpHandshaker(conn, l.connectionManager, cc, l.parentLogger)
+				return false, nil
+			})
+
 		} else {
-			head.Next(queryCell, chanFun)
+			l.EnqueueFuncAsync(func() (bool, error) { return false, err })
+			return
 		}
 	}
-	if err != nil {
-		l.logger.Log("msg", "Fatal error.", "error", err)
-	}
-	l.cellTail.Terminate()
-	l.listener.Close()
 }

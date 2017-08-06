@@ -9,6 +9,7 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
@@ -61,7 +62,10 @@ func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount ui
 		DB:            db,
 		topology:      nil,
 	}
-	exe.Enqueue(func() { pm.topology = cm.AddTopologySubscriber(eng.ProposerSubscriber, pm) })
+	exe.EnqueueFuncAsync(func() (bool, error) {
+		pm.topology = cm.AddTopologySubscriber(eng.ProposerSubscriber, pm)
+		return false, nil
+	})
 	return pm
 }
 
@@ -81,33 +85,45 @@ func (pm *ProposerManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
+type pmTopologyChanged struct {
+	actor.MsgSyncQuery
+	pm       *ProposerManager
+	topology *configuration.Topology
+	outcome  bool
+}
+
+func (tc *pmTopologyChanged) Exec() (bool, error) {
+	if od := tc.pm.onDisk; od != nil {
+		tc.pm.onDisk = nil
+		od(false)
+	}
+	tc.pm.topology = tc.topology
+	for _, proposer := range tc.pm.proposers {
+		proposer.TopologyChanged(tc.topology)
+	}
+
+	if tc.topology.NextConfiguration == nil {
+		tc.done(true)
+	} else {
+		tc.pm.onDisk = tc.done
+		tc.pm.checkAllDisk()
+	}
+	return false, nil
+}
+
+func (tc *pmTopologyChanged) done(result bool) {
+	tc.outcome = result
+	tc.MustClose()
+}
+
 func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan bool)
-	enqueued := pm.Exe.Enqueue(func() {
-		if od := pm.onDisk; od != nil {
-			pm.onDisk = nil
-			od(false)
-		}
-		pm.topology = topology
-		for _, proposer := range pm.proposers {
-			proposer.TopologyChanged(topology)
-		}
-		if topology.NextConfiguration == nil {
-			finished <- true
-		} else {
-			pm.onDisk = func(result bool) { finished <- result }
-			pm.checkAllDisk()
-		}
-	})
-	if enqueued {
-		go pm.Exe.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case success := <-finished:
-				done(success)
-			case <-terminated:
-				done(false)
-			}
-		})
+	tc := &pmTopologyChanged{
+		pm:       pm,
+		topology: topology,
+	}
+	tc.InitMsg(pm.Exe.Mailbox)
+	if pm.Exe.Mailbox.EnqueueMsg(tc) {
+		go done(tc.Wait() && tc.outcome)
 	} else {
 		done(false)
 	}

@@ -277,7 +277,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 			panic(fmt.Sprintf("Var error when writing to disk: %v\n", err))
 		} else if ran != nil {
 			// Switch back to the right go-routine
-			v.applyToVar(func() {
+			v.applyToSelf(func() {
 				server.DebugLog(v.vm.logger, "debug", "Written to disk.", "VarUUId", v.UUId, "TxnId", f.frameTxnId)
 				v.curFrameOnDisk = f
 				for ancestor := f.parent; ancestor != nil && ancestor.DescendentOnDisk(); ancestor = ancestor.parent {
@@ -323,8 +323,8 @@ func (v *Var) isOnDisk(cancelSubs bool) bool {
 	return false
 }
 
-func (v *Var) applyToVar(fun func()) {
-	v.exe.Enqueue(func() {
+func (v *Var) applyToSelf(fun func()) {
+	v.exe.EnqueueFuncAsync(func() (bool, error) {
 		v.vm.ApplyToVar(func(v1 *Var) {
 			switch {
 			case v1 == nil:
@@ -336,6 +336,7 @@ func (v *Var) applyToVar(fun func()) {
 				fun()
 			}
 		}, false, v.UUId)
+		return false, nil
 	})
 }
 

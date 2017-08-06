@@ -58,20 +58,26 @@ func (vd *VarDispatcher) ApplyToVar(fun func(*Var), createIfMissing bool, vUUId 
 
 func (vd *VarDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Vars")
-	for idx, executor := range vd.Executors {
+	for idx, exe := range vd.Executors {
 		s := sc.Fork()
 		s.Emit(fmt.Sprintf("Var Manager %v", idx))
 		manager := vd.varmanagers[idx]
-		executor.Enqueue(func() { manager.Status(s) })
+		exe.EnqueueFuncAsync(func() (bool, error) {
+			manager.Status(s)
+			return false, nil
+		})
 	}
 	sc.Join()
 }
 
 func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarManager)) bool {
 	idx := uint8(vUUId[server.MostRandomByteIndex]) % vd.ExecutorCount
-	executor := vd.Executors[idx]
+	exe := vd.Executors[idx]
 	manager := vd.varmanagers[idx]
-	return executor.Enqueue(func() { fun(manager) })
+	return exe.EnqueueFuncAsync(func() (bool, error) {
+		fun(manager)
+		return false, nil
+	})
 }
 
 type TranslationCallback func(*cmsgs.ClientAction, *msgs.Action, []common.RMId, map[common.RMId]bool) error

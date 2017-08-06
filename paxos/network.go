@@ -4,6 +4,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
@@ -51,23 +52,23 @@ type ClientConnection interface {
 }
 
 type Shutdownable interface {
-	Shutdown()
+	ShutdownSync()
 }
 
-type Actorish interface {
-	Enqueue(func()) bool
-	WithTerminatedChan(func(chan struct{}))
+type EnqueueActor interface {
+	actor.EnqueueMsgActor
+	actor.EnqueueFuncActor
 }
 
 type serverConnectionPublisherProxy struct {
 	logger   log.Logger
-	exe      Actorish
+	exe      EnqueueActor
 	upstream ServerConnectionPublisher
 	servers  map[common.RMId]Connection
 	subs     map[ServerConnectionSubscriber]server.EmptyStruct
 }
 
-func NewServerConnectionPublisherProxy(exe Actorish, upstream ServerConnectionPublisher, logger log.Logger) ServerConnectionPublisher {
+func NewServerConnectionPublisherProxy(exe EnqueueActor, upstream ServerConnectionPublisher, logger log.Logger) ServerConnectionPublisher {
 	pub := &serverConnectionPublisherProxy{
 		logger:   logger,
 		exe:      exe,
@@ -90,54 +91,62 @@ func (pub *serverConnectionPublisherProxy) RemoveServerConnectionSubscriber(obs 
 }
 
 func (pub *serverConnectionPublisherProxy) ConnectedRMs(servers map[common.RMId]Connection) {
-	pub.exe.Enqueue(func() {
+	pub.exe.EnqueueFuncAsync(func() (bool, error) {
 		pub.servers = servers
 		for sub := range pub.subs {
 			sub.ConnectedRMs(servers)
 		}
+		return false, nil
 	})
 }
 
 func (pub *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, servers map[common.RMId]Connection) {
-	pub.exe.Enqueue(func() {
+	pub.exe.EnqueueFuncAsync(func() (bool, error) {
 		pub.servers = servers
 		for sub := range pub.subs {
 			sub.ConnectionLost(lost, servers)
 		}
+		return false, nil
 	})
 }
 
-func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn Connection, servers map[common.RMId]Connection, callback func()) {
-	finished := make(chan struct{})
-	enqueued := pub.exe.Enqueue(func() {
-		pub.servers = servers
-		resultChan := make(chan server.EmptyStruct, len(pub.subs))
-		done := func() { resultChan <- server.EmptyStructVal }
-		expected := 0
-		for sub := range pub.subs {
-			expected++
-			sub.ConnectionEstablished(gained, conn, servers, done)
-		}
-		go func() {
-			server.DebugLog(pub.logger, "debug", "ServerConnEstablished Proxy expecting callbacks.", "count", expected)
-			for expected > 0 {
-				<-resultChan
-				expected--
-			}
-			close(finished)
-		}()
-	})
+type scppConnectionEstablished struct {
+	pub     *serverConnectionPublisherProxy
+	gained  common.RMId
+	conn    Connection
+	servers map[common.RMId]Connection
+	wg      *common.ChannelWaitGroup
+}
 
-	if enqueued {
-		go pub.exe.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case <-finished:
-			case <-terminated:
-			}
-			callback()
-		})
+func (ce *scppConnectionEstablished) Exec() (bool, error) {
+	ce.pub.servers = ce.servers
+	for sub := range ce.pub.subs {
+		ce.wg.Add(1)
+		sub.ConnectionEstablished(ce.gained, ce.conn, ce.servers, ce.wg.Done)
+	}
+	server.DebugLog(ce.pub.logger, "debug", "ServerConnEstablished Proxy expecting callbacks.")
+	ce.wg.Done()
+	return false, nil
+}
+
+func (pub *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn Connection, servers map[common.RMId]Connection, onDone func()) {
+	ce := &scppConnectionEstablished{
+		pub:     pub,
+		gained:  gained,
+		conn:    conn,
+		servers: servers,
+		wg:      common.NewChannelWaitGroup(),
+	}
+	// we do this because wg is edge triggered, so if pub.subs is
+	// empty, we have to have something that goes from 1 to 0
+	ce.wg.Add(1)
+	if pub.exe.EnqueueMsg(ce) { // just because it was enqueued doesn't mean it'll be exec'd
+		go func() {
+			ce.wg.WaitUntilEither(ce.pub.exe.TerminatedChan())
+			onDone()
+		}()
 	} else {
-		callback()
+		onDone()
 	}
 }
 

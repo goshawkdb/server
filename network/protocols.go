@@ -10,6 +10,7 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -29,7 +30,7 @@ type Handshaker interface {
 }
 
 type Protocol interface {
-	Run(*Connection) error
+	Run(*connectionInner) error
 	TopologyChanged(*connectionMsgTopologyChanged) error
 	Restart() bool
 	InternalShutdown()
@@ -176,7 +177,7 @@ func (tch *TLSCapnpHandshaker) serverError(err error) error {
 type TLSCapnpServer struct {
 	*TLSCapnpHandshaker
 	logger            log.Logger
-	conn              *Connection
+	conn              *connectionInner
 	remoteHost        string
 	remoteRMId        common.RMId
 	remoteClusterUUId uint64
@@ -290,7 +291,7 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 	return false
 }
 
-func (tcs *TLSCapnpServer) Run(conn *Connection) error {
+func (tcs *TLSCapnpServer) Run(conn *connectionInner) error {
 	tcs.conn = conn
 	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remoteHost, "remoteRMId", tcs.remoteRMId)
 
@@ -310,7 +311,7 @@ func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 }
 
 func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) error {
-	defer tc.Close()
+	defer tc.MustClose()
 
 	topology := tc.topology
 	tcs.topology = topology
@@ -326,7 +327,7 @@ func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) err
 }
 
 func (tcs *TLSCapnpServer) Send(msg []byte) {
-	tcs.conn.EnqueueFuncError(func() error { return tcs.SendMessage(msg) })
+	tcs.conn.EnqueueFuncAsync(func() (bool, error) { return false, tcs.SendMessage(msg) })
 }
 
 func (tcs *TLSCapnpServer) Restart() bool {
@@ -340,7 +341,7 @@ func (tcs *TLSCapnpServer) InternalShutdown() {
 	tcs.internalShutdown()
 	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
-	tcs.conn.shutdownComplete()
+	tcs.conn.shutdownCompleted()
 }
 
 func (tcs *TLSCapnpServer) internalShutdown() {
@@ -365,11 +366,6 @@ func (tcs *TLSCapnpServer) ReadAndHandleOneMsg() error {
 		return nil // do nothing
 	case msgs.MESSAGE_CONNECTIONERROR:
 		return fmt.Errorf("Error received from %v: \"%s\"", tcs.remoteRMId, msg.ConnectionError())
-	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
-		configCap := msg.TopologyChangeRequest()
-		config := configuration.ConfigurationFromCap(&configCap)
-		tcs.connectionManager.RequestConfigurationChange(config)
-		return nil
 	default:
 		tcs.connectionManager.DispatchMessage(tcs.remoteRMId, which, msg)
 		return nil
@@ -395,7 +391,7 @@ func (tcs *TLSCapnpServer) createReader() {
 
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
-	*Connection
+	*connectionInner
 	remoteHost string
 	logger     log.Logger
 	peerCerts  []*x509.Certificate
@@ -472,8 +468,8 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	return seg
 }
 
-func (tcc *TLSCapnpClient) Run(conn *Connection) error {
-	tcc.Connection = conn
+func (tcc *TLSCapnpClient) Run(conn *connectionInner) error {
+	tcc.connectionInner = conn
 	servers, metrics := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
@@ -489,16 +485,20 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
 		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace,
-			paxos.NewServerConnectionPublisherProxy(tcc.Connection, cm, tcc.logger), tcc.Connection,
-			tcc.logger, metrics)
-		tcc.submitter.TopologyChanged(tcc.topology)
-		tcc.submitter.ServerConnectionsChanged(servers)
+			cm, tcc.Connection, tcc.logger, metrics)
+		if err := tcc.submitter.TopologyChanged(tcc.topology); err != nil {
+			return err
+		}
+		if err := tcc.submitter.ServerConnectionsChanged(servers); err != nil {
+			return err
+		}
+		cm.AddServerConnectionSubscriber(tcc)
 		return nil
 	}
 }
 
 func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
-	defer tc.Close()
+	defer tc.MustClose()
 	topology := tc.topology
 	tcc.topology = topology
 
@@ -537,7 +537,7 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 	}
 	cont := func() {
 		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
-		tcc.shutdownComplete()
+		tcc.shutdownCompleted()
 	}
 	if tcc.submitter == nil {
 		cont()
@@ -552,47 +552,45 @@ func (tcc *TLSCapnpClient) String() string {
 }
 
 func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	tcc.EnqueueFuncError(func() error {
-		return tcc.outcomeReceived(sender, txn, outcome)
+	tcc.EnqueueFuncAsync(func() (bool, error) {
+		return false, tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 	})
 }
 
-func (tcc *TLSCapnpClient) outcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
-	return tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
+type serverConnectionsChanged struct {
+	actor.MsgSyncQuery
+	submitter *client.ClientTxnSubmitter
+	servers   map[common.RMId]paxos.Connection
+}
+
+func (msg *serverConnectionsChanged) Exec() (bool, error) {
+	defer msg.MustClose()
+	return false, msg.submitter.ServerConnectionsChanged(msg.servers)
 }
 
 func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	tcc.EnqueueFuncError(func() error {
-		return tcc.serverConnectionsChanged(servers)
-	})
+	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
+	msg.InitMsg(tcc)
+	tcc.EnqueueMsg(msg)
 }
-func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	tcc.EnqueueFuncError(func() error {
-		return tcc.serverConnectionsChanged(servers)
-	})
-}
-func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	finished := make(chan struct{})
-	enqueued := tcc.EnqueueFuncError(func() error {
-		defer close(finished)
-		return tcc.serverConnectionsChanged(servers)
-	})
 
-	if enqueued {
-		go tcc.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case <-finished:
-			case <-terminated:
-			}
+func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
+	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
+	msg.InitMsg(tcc)
+	tcc.EnqueueMsg(msg)
+}
+
+func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
+	msg.InitMsg(tcc)
+	if tcc.EnqueueMsg(msg) {
+		go func() {
+			msg.Wait()
 			done()
-		})
+		}()
 	} else {
 		done()
 	}
-}
-
-func (tcc *TLSCapnpClient) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
-	return tcc.submitter.ServerConnectionsChanged(servers)
 }
 
 func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
@@ -610,8 +608,8 @@ func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
 		return nil // do nothing
 	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		// submitter is accessed from the connection go routine, so we must relay this
-		tcc.EnqueueFuncError(func() error {
-			return tcc.submitTransaction(msg.ClientTxnSubmission())
+		tcc.EnqueueFuncAsync(func() (bool, error) {
+			return false, tcc.submitTransaction(msg.ClientTxnSubmission())
 		})
 		return nil
 	default:

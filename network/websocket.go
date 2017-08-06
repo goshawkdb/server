@@ -9,9 +9,9 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
 	"github.com/gorilla/websocket"
-	cc "github.com/msackman/chancell"
 	"github.com/tinylib/msgp/msgp"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	capcmsgs "goshawkdb.io/common/capnp"
 	cmsgs "goshawkdb.io/common/msgpack"
 	"goshawkdb.io/server"
@@ -27,157 +27,94 @@ import (
 )
 
 type WebsocketListener struct {
-	logger            log.Logger
+	*actor.Mailbox
+	*actor.BasicServerOuter
+	inner *websocketListenerInner
+}
+
+type websocketListenerInner struct {
+	*WebsocketListener
+	*actor.BasicServerInner
 	parentLogger      log.Logger
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(websocketListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan websocketListenerMsg
 	connectionManager *ConnectionManager
 	mux               *HttpListenerWithMux
 	topology          *configuration.Topology
-	topologyLock      *sync.RWMutex
-}
-
-type websocketListenerMsg interface{}
-
-type websocketListenerMsgShutdown struct{}
-
-func (l *WebsocketListener) Shutdown() {
-	if l.enqueueQuery(websocketListenerMsgShutdown{}) {
-		l.cellTail.Wait()
-	}
-}
-
-type websocketListenerMsgSync interface {
-	websocketListenerMsg
-	common.MsgSync
+	topologyLock      sync.RWMutex
 }
 
 type websocketListenerMsgTopologyChanged struct {
-	common.MsgSyncQuery
+	actor.MsgSyncQuery
+	*websocketListenerInner
 	topology *configuration.Topology
 }
 
+func (msg websocketListenerMsgTopologyChanged) Exec() (bool, error) {
+	msg.putTopology(msg.topology)
+	msg.MustClose()
+	return false, nil
+}
+
 func (l *WebsocketListener) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	msg := &websocketListenerMsgTopologyChanged{topology: topology}
-	l.enqueueQuerySync(msg)
-	done(true)
-}
-
-type websocketListenerQueryCapture struct {
-	wl  *WebsocketListener
-	msg websocketListenerMsg
-}
-
-func (wlqc *websocketListenerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-	return wlqc.wl.enqueueQueryInner(wlqc.msg, cell, wlqc.ccc)
-}
-
-func (l *WebsocketListener) enqueueQuery(msg websocketListenerMsg) bool {
-	wlqc := &websocketListenerQueryCapture{wl: l, msg: msg}
-	return l.cellTail.WithCell(wlqc.ccc)
-}
-
-func (l *WebsocketListener) enqueueQuerySync(msg websocketListenerMsgSync) bool {
-	resultChan := msg.Init()
-	if l.enqueueQuery(msg) {
-		select {
-		case <-resultChan:
-			return true
-		case <-l.cellTail.Terminated:
-			return false
-		}
+	msg := &websocketListenerMsgTopologyChanged{websocketListenerInner: l.inner, topology: topology}
+	msg.InitMsg(l)
+	if l.EnqueueMsg(msg) {
+		go func() {
+			msg.Wait()
+			done(true) // connection drop is not a problem
+		}()
 	} else {
-		return false
+		done(true) // connection drop is not a problem
 	}
 }
 
 func NewWebsocketListener(mux *HttpListenerWithMux, cm *ConnectionManager, logger log.Logger) *WebsocketListener {
-	l := &WebsocketListener{
-		logger:            log.With(logger, "subsystem", "websocketListener"),
+	l := &WebsocketListener{}
+
+	li := &websocketListenerInner{
+		WebsocketListener: l,
+		BasicServerInner:  actor.NewBasicServerInner(log.With(logger, "subsystem", "websocketListener")),
 		parentLogger:      logger,
 		connectionManager: cm,
 		mux:               mux,
-		topologyLock:      new(sync.RWMutex),
 	}
-	var head *cc.ChanCellHead
-	head, l.cellTail = cc.NewChanCellTail(
-		func(n int, cell *cc.ChanCell) {
-			queryChan := make(chan websocketListenerMsg, n)
-			cell.Open = func() { l.queryChan = queryChan }
-			cell.Close = func() { close(queryChan) }
-			l.enqueueQueryInner = func(msg websocketListenerMsg, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
-				if curCell == cell {
-					select {
-					case queryChan <- msg:
-						return true, nil
-					default:
-						return false, nil
-					}
-				} else {
-					return false, cont
-				}
-			}
-		})
 
-	go l.actorLoop(head)
+	mailbox, err := actor.Spawn(li)
+	if err != nil {
+		panic(err) // "impossible"
+	}
+
+	l.Mailbox = mailbox
+	l.BasicServerOuter = actor.NewBasicServerOuter(mailbox)
+	l.inner = li
+
 	return l
 }
 
-func (l *WebsocketListener) actorLoop(head *cc.ChanCellHead) {
+func (l *websocketListenerInner) Init(self *actor.Actor) (bool, error) {
 	topology := l.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, l)
-	defer l.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, l)
 	l.putTopology(topology)
 	l.configureMux()
-
-	var (
-		err       error
-		queryChan <-chan websocketListenerMsg
-		queryCell *cc.ChanCell
-	)
-	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = l.queryChan, cell }
-	head.WithCell(chanFun)
-	terminate := false
-	for !terminate {
-		if msg, ok := <-queryChan; ok {
-			terminate, err = l.handleMsg(msg)
-			terminate = terminate || err != nil
-		} else {
-			head.Next(queryCell, chanFun)
-		}
-	}
-	if err != nil {
-		l.logger.Log("msg", "Fatal error.", "error", err)
-	}
-	l.cellTail.Terminate()
+	return l.BasicServerInner.Init(self)
 }
 
-func (l *WebsocketListener) handleMsg(msg websocketListenerMsg) (terminate bool, err error) {
-	switch msgT := msg.(type) {
-	case websocketListenerMsgShutdown:
-		terminate = true
-	case *websocketListenerMsgTopologyChanged:
-		l.putTopology(msgT.topology)
-		msgT.Close()
-	default:
-		panic(fmt.Sprintf("Received unexpected message: %#v", msgT))
-	}
-	return
+func (l *websocketListenerInner) HandleShutdown(err error) bool {
+	l.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, l)
+	return l.BasicServerInner.HandleShutdown(err)
 }
 
-func (l *WebsocketListener) putTopology(topology *configuration.Topology) {
+func (l *websocketListenerInner) putTopology(topology *configuration.Topology) {
 	l.topologyLock.Lock()
 	defer l.topologyLock.Unlock()
 	l.topology = topology
 }
 
-func (l *WebsocketListener) getTopology() *configuration.Topology {
+func (l *websocketListenerInner) getTopology() *configuration.Topology {
 	l.topologyLock.RLock()
 	defer l.topologyLock.RUnlock()
 	return l.topology
 }
 
-func (l *WebsocketListener) configureMux() {
+func (l *websocketListenerInner) configureMux() {
 	connCount := uint32(0)
 
 	l.mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
@@ -186,7 +123,7 @@ func (l *WebsocketListener) configureMux() {
 			w.Header().Set("Content-Type", "text/plain")
 			w.Write([]byte(fmt.Sprintf("GoshawkDB Server version %v. Websocket available at /ws", server.ServerVersion)))
 		} else {
-			l.logger.Log("type", "client", "authentication", "failure")
+			l.Logger.Log("type", "client", "authentication", "failure")
 			w.WriteHeader(http.StatusForbidden)
 		}
 	})
@@ -194,10 +131,10 @@ func (l *WebsocketListener) configureMux() {
 		peerCerts := req.TLS.PeerCertificates
 		if authenticated, hashsum, roots := l.getTopology().VerifyPeerCerts(peerCerts); authenticated {
 			connNumber := 2*atomic.AddUint32(&connCount, 1) + 1
-			l.logger.Log("type", "client", "authentication", "success", "fingerprint", hex.EncodeToString(hashsum[:]), "connNumber", connNumber)
+			l.Logger.Log("type", "client", "authentication", "success", "fingerprint", hex.EncodeToString(hashsum[:]), "connNumber", connNumber)
 			wsHandler(l.connectionManager, connNumber, w, req, peerCerts, roots, l.parentLogger)
 		} else {
-			l.logger.Log("type", "client", "authentication", "failure")
+			l.Logger.Log("type", "client", "authentication", "failure")
 			w.WriteHeader(http.StatusForbidden)
 		}
 	})
@@ -231,7 +168,7 @@ func wsHandler(cm *ConnectionManager, connNumber uint32, w http.ResponseWriter, 
 }
 
 type wssMsgPackClient struct {
-	*Connection
+	*connectionInner
 	logger            log.Logger
 	remoteHost        string
 	connectionNumber  uint32
@@ -351,8 +288,8 @@ func (wmpc *wssMsgPackClient) Restart() bool {
 	return false // client connections are never restarted
 }
 
-func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
-	wmpc.Connection = conn
+func (wmpc *wssMsgPackClient) Run(conn *connectionInner) error {
+	wmpc.connectionInner = conn
 	servers, metrics := wmpc.connectionManager.ClientEstablished(wmpc.connectionNumber, wmpc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
@@ -365,10 +302,14 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 
 		cm := wmpc.connectionManager
 		wmpc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, wmpc.rootsVar, wmpc.namespace,
-			paxos.NewServerConnectionPublisherProxy(wmpc.Connection, cm, wmpc.logger), wmpc.Connection,
-			wmpc.logger, metrics)
-		wmpc.submitter.TopologyChanged(wmpc.topology)
-		wmpc.submitter.ServerConnectionsChanged(servers)
+			cm, wmpc.Connection, wmpc.logger, metrics)
+		if err := wmpc.submitter.TopologyChanged(wmpc.topology); err != nil {
+			return err
+		}
+		if err := wmpc.submitter.ServerConnectionsChanged(servers); err != nil {
+			return err
+		}
+		cm.AddServerConnectionSubscriber(wmpc)
 		return nil
 	}
 }
@@ -409,7 +350,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	}
 	cont := func() {
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
-		wmpc.shutdownComplete()
+		wmpc.shutdownCompleted()
 	}
 	if wmpc.submitter == nil {
 		cont()
@@ -427,36 +368,34 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 }
 
 func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
-	wmpc.EnqueueFuncError(func() error {
-		return wmpc.outcomeReceived(sender, txn, outcome)
+	wmpc.EnqueueFuncAsync(func() (bool, error) {
+		return false, wmpc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 	})
-}
-
-func (wmpc *wssMsgPackClient) outcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) error {
-	return wmpc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 }
 
 func (wmpc *wssMsgPackClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
-	wmpc.EnqueueFuncError(func() error {
-		return wmpc.serverConnectionsChanged(servers)
-	})
-}
-func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
-	wmpc.EnqueueFuncError(func() error {
-		return wmpc.serverConnectionsChanged(servers)
-	})
-}
-func (wmpc *wssMsgPackClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
-	wmpc.EnqueueFuncError(func() error {
-		if done != nil {
-			defer done()
-		}
-		return wmpc.serverConnectionsChanged(servers)
-	})
+	msg := &serverConnectionsChanged{submitter: wmpc.submitter, servers: servers}
+	msg.InitMsg(wmpc)
+	wmpc.EnqueueMsg(msg)
 }
 
-func (wmpc *wssMsgPackClient) serverConnectionsChanged(servers map[common.RMId]paxos.Connection) error {
-	return wmpc.submitter.ServerConnectionsChanged(servers)
+func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
+	msg := &serverConnectionsChanged{submitter: wmpc.submitter, servers: servers}
+	msg.InitMsg(wmpc)
+	wmpc.EnqueueMsg(msg)
+}
+
+func (wmpc *wssMsgPackClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+	msg := &serverConnectionsChanged{submitter: wmpc.submitter, servers: servers}
+	msg.InitMsg(wmpc)
+	if wmpc.EnqueueMsg(msg) {
+		go func() {
+			msg.Wait()
+			done()
+		}()
+	} else {
+		done()
+	}
 }
 
 func (wmpc *wssMsgPackClient) ReadAndHandleOneMsg() error {
@@ -466,8 +405,8 @@ func (wmpc *wssMsgPackClient) ReadAndHandleOneMsg() error {
 	}
 	switch {
 	case msg.ClientTxnSubmission != nil:
-		wmpc.EnqueueFuncError(func() error {
-			return wmpc.submitTransaction(msg.ClientTxnSubmission)
+		wmpc.EnqueueFuncAsync(func() (bool, error) {
+			return false, wmpc.submitTransaction(msg.ClientTxnSubmission)
 		})
 		return nil
 	default:
@@ -525,14 +464,14 @@ func (wmpc *wssMsgPackClient) createBeater() {
 
 type wssBeater struct {
 	*wssMsgPackClient
-	conn         common.ConnectionActor
+	conn         actor.EnqueueMsgActor
 	terminate    chan struct{}
 	terminated   chan struct{}
 	ticker       *time.Ticker
 	mustSendBeat bool
 }
 
-func NewWssBeater(wmpc *wssMsgPackClient, conn common.ConnectionActor) *wssBeater {
+func NewWssBeater(wmpc *wssMsgPackClient, conn actor.EnqueueMsgActor) *wssBeater {
 	return &wssBeater{
 		wssMsgPackClient: wmpc,
 		conn:             conn,
@@ -571,23 +510,23 @@ func (b *wssBeater) tick() {
 		case <-b.terminate:
 			return
 		case <-b.ticker.C:
-			if !b.conn.EnqueueFuncError(b.beat) {
+			if !b.conn.EnqueueMsg(b) {
 				return
 			}
 		}
 	}
 }
 
-func (b *wssBeater) beat() error {
+func (b *wssBeater) Exec() (bool, error) {
 	if b != nil && b.wssMsgPackClient != nil {
 		if b.mustSendBeat {
 			// do not set it back to false here!
-			return b.socket.WriteControl(websocket.PingMessage, nil, time.Time{})
+			return false, b.socket.WriteControl(websocket.PingMessage, nil, time.Time{})
 		} else {
 			b.mustSendBeat = true
 		}
 	}
-	return nil
+	return false, nil
 }
 
 func (b *wssBeater) SendMessage(msg msgp.Encodable) error {

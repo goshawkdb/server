@@ -82,19 +82,25 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, sta
 }
 
 func (pd *ProposerDispatcher) SetMetrics(metrics *ProposerMetrics) {
-	for idx, executor := range pd.Executors {
+	for idx, exe := range pd.Executors {
 		manager := pd.proposermanagers[idx]
-		executor.Enqueue(func() { manager.SetMetrics(metrics) })
+		exe.EnqueueFuncAsync(func() (bool, error) {
+			manager.SetMetrics(metrics)
+			return false, nil
+		})
 	}
 }
 
 func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
 	sc.Emit("Proposers")
-	for idx, executor := range pd.Executors {
+	for idx, exe := range pd.Executors {
 		s := sc.Fork()
 		s.Emit(fmt.Sprintf("Proposer Manager %v", idx))
 		manager := pd.proposermanagers[idx]
-		executor.Enqueue(func() { manager.Status(s) })
+		exe.EnqueueFuncAsync(func() (bool, error) {
+			manager.Status(s)
+			return false, nil
+		})
 	}
 	sc.Join()
 }
@@ -140,7 +146,10 @@ func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
 
 func (pd *ProposerDispatcher) withProposerManager(txnId *common.TxnId, fun func(*ProposerManager)) bool {
 	idx := uint8(txnId[server.MostRandomByteIndex]) % pd.ExecutorCount
-	executor := pd.Executors[idx]
+	exe := pd.Executors[idx]
 	manager := pd.proposermanagers[idx]
-	return executor.Enqueue(func() { fun(manager) })
+	return exe.EnqueueFuncAsync(func() (bool, error) {
+		fun(manager)
+		return false, nil
+	})
 }

@@ -281,7 +281,7 @@ func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 	}
 }
 
-func (pab *proposerAwaitBallots) Abort() {
+func (pab *proposerAwaitBallots) Abort() (bool, error) {
 	if pab.currentState == pab && !pab.allAcceptorsAgreed {
 		server.DebugLog(pab, "debug", "Proposer Aborting.")
 		txn := pab.txn.TxnReader
@@ -289,6 +289,7 @@ func (pab *proposerAwaitBallots) Abort() {
 		ballots := MakeAbortBallots(txn, alloc)
 		pab.TxnBallotsComplete(ballots...)
 	}
+	return false, nil
 }
 
 func (pab *proposerAwaitBallots) ConnectedRMs(conns map[common.RMId]Connection) {
@@ -309,7 +310,7 @@ func (pab *proposerAwaitBallots) ConnectionEstablished(rmId common.RMId, conn Co
 }
 
 func (pab *proposerAwaitBallots) maybeAbortRetry() {
-	pab.proposerManager.Exe.Enqueue(pab.Abort)
+	pab.proposerManager.Exe.EnqueueFuncAsync(pab.Abort)
 }
 
 // receive outcomes
@@ -477,15 +478,16 @@ func (palc *proposerAwaitLocallyComplete) maybeWriteToDisk() {
 		if ran, err := future.ResultError(); err != nil {
 			panic(fmt.Sprintf("Error: %v when writing proposer to disk: %v\n", palc.txnId, err))
 		} else if ran != nil {
-			palc.proposerManager.Exe.Enqueue(palc.writeDone)
+			palc.proposerManager.Exe.EnqueueFuncAsync(palc.writeDone)
 		}
 	}()
 }
 
-func (palc *proposerAwaitLocallyComplete) writeDone() {
+func (palc *proposerAwaitLocallyComplete) writeDone() (bool, error) {
 	if palc.currentState == palc {
 		palc.nextState()
 	}
+	return false, nil
 }
 
 // receive globally complete
@@ -567,10 +569,11 @@ func (paf *proposerAwaitFinished) TxnFinished(*eng.Txn) {
 			if ran, err := future.ResultError(); err != nil {
 				panic(fmt.Sprintf("Error: %v when deleting proposer from disk: %v\n", paf.txnId, err))
 			} else if ran != nil {
-				paf.proposerManager.Exe.Enqueue(func() {
+				paf.proposerManager.Exe.EnqueueFuncAsync(func() (bool, error) {
 					paf.proposerManager.RemoveServerConnectionSubscriber(paf.tlcSender)
 					paf.tlcSender = nil
 					paf.proposerManager.TxnFinished(paf.Proposer)
+					return false, nil
 				})
 			}
 		}()

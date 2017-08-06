@@ -485,7 +485,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 	if lost == s.proposal.submitter {
 		// There's a chance that only we received this txn, so we need
 		// to abort for all other active RMs.
-		s.proposal.proposerManager.Exe.Enqueue(func() {
+		s.proposal.proposerManager.Exe.EnqueueFuncAsync(func() (terminate bool, err error) {
 			// Only start a new proposal if we're not finished. If we are
 			// finished, we're either fully finished (i.e. all acceptors
 			// agree on the outcome and there's no more proposal work to
@@ -540,6 +540,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 						s.txn, s.twoFInc, ballots, s.proposal.acceptors, rmId, false)
 				}
 			}
+			return
 		})
 		return
 	}
@@ -548,7 +549,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 	if alloc == nil || alloc.Active() == 0 {
 		return
 	}
-	s.proposal.proposerManager.Exe.Enqueue(func() {
+	s.proposal.proposerManager.Exe.EnqueueFuncAsync(func() (terminate bool, err error) {
 		if s.proposal.finished { // see above equiv
 			return
 		}
@@ -563,6 +564,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
 		s.proposal.proposerManager.NewPaxosProposals(
 			s.txn, s.twoFInc, ballots, s.proposal.acceptors, lost, false)
+		return
 	})
 }
 

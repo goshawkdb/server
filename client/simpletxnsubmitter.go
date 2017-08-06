@@ -34,13 +34,13 @@ type SimpleTxnSubmitter struct {
 	topology            *configuration.Topology
 	rng                 *rand.Rand
 	bufferedSubmissions []func() error
-	actor               paxos.Actorish
+	actor               paxos.EnqueueActor
 }
 
 type txnOutcomeConsumer func(common.RMId, *eng.TxnReader, *msgs.Outcome) error
 type TxnCompletionConsumer func(*eng.TxnReader, *msgs.Outcome, error) error
 
-func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger) *SimpleTxnSubmitter {
+func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub paxos.ServerConnectionPublisher, actor paxos.EnqueueActor, logger log.Logger) *SimpleTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	cache := ch.NewCache(nil, rng)
 
@@ -108,11 +108,12 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	if sleeping {
 		// fmt.Printf("%v ", delay.Cur)
 		delay.After(func() {
-			sts.actor.Enqueue(func() {
+			sts.actor.EnqueueFuncAsync(func() (bool, error) {
 				if atomic.CompareAndSwapUint32(&removeNeeded, 0, 1) {
 					// we swapped ok, so we got here first, so we do work
 					sts.connPub.AddServerConnectionSubscriber(txnSender)
 				}
+				return false, nil
 			})
 		})
 	} else {
@@ -220,6 +221,7 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 			sts.hashCache.AddPosition(root.VarUUId, root.Positions)
 		}
 	}
+	// TODO push this topology through to the OutcomeAccumulators
 	return sts.calculateDisabledHashcodes()
 }
 

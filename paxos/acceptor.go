@@ -202,10 +202,10 @@ func (arb *acceptorReceiveBallots) ConnectionEstablished(rmId common.RMId, conn 
 }
 
 func (arb *acceptorReceiveBallots) enqueueCreateTxnSender() {
-	arb.acceptorManager.Exe.Enqueue(arb.createTxnSender)
+	arb.acceptorManager.Exe.EnqueueFuncAsync(arb.createTxnSender)
 }
 
-func (arb *acceptorReceiveBallots) createTxnSender() {
+func (arb *acceptorReceiveBallots) createTxnSender() (bool, error) {
 	if arb.currentState == arb && arb.txnSender == nil {
 		arb.acceptorManager.RemoveServerConnectionSubscriber(arb)
 		seg := capn.NewBuffer(nil)
@@ -225,6 +225,7 @@ func (arb *acceptorReceiveBallots) createTxnSender() {
 		arb.txnSender = NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
 		arb.acceptorManager.AddServerConnectionSubscriber(arb.txnSender)
 	}
+	return false, nil
 }
 
 // write to disk
@@ -270,7 +271,10 @@ func (awtd *acceptorWriteToDisk) start() {
 			panic(fmt.Sprintf("Error: %v Acceptor Write error: %v", awtd.txnId, err))
 		} else if ran != nil {
 			server.DebugLog(awtd, "debug", "Writing 2B to disk...done.")
-			awtd.acceptorManager.Exe.Enqueue(func() { awtd.writeDone(outcome, sendToAll) })
+			awtd.acceptorManager.Exe.EnqueueFuncAsync(func() (bool, error) {
+				awtd.writeDone(outcome, sendToAll)
+				return false, nil
+			})
 		}
 	}()
 }
@@ -442,7 +446,7 @@ func (adfd *acceptorDeleteFromDisk) start() {
 			panic(fmt.Sprintf("Error: %v Acceptor Deletion error: %v", adfd.txnId, err))
 		} else if ran != nil {
 			server.DebugLog(adfd, "debug", "Deleting 2B from disk...done.")
-			adfd.acceptorManager.Exe.Enqueue(adfd.deletionDone)
+			adfd.acceptorManager.Exe.EnqueueFuncAsync(adfd.deletionDone)
 		}
 	}()
 }
@@ -452,7 +456,7 @@ func (adfd *acceptorDeleteFromDisk) String() string {
 	return "acceptorDeleteFromDisk"
 }
 
-func (adfd *acceptorDeleteFromDisk) deletionDone() {
+func (adfd *acceptorDeleteFromDisk) deletionDone() (bool, error) {
 	if adfd.currentState == adfd {
 		adfd.nextState(nil)
 		adfd.acceptorManager.AcceptorFinished(adfd.txnId)
@@ -467,6 +471,7 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() {
 		// get resent and we'll then send out another TGC.
 		NewOneShotSender(adfd.logger, common.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
 	}
+	return false, nil
 }
 
 // 2B Sender
@@ -518,6 +523,7 @@ func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]Connection) {
 func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]Connection) {}
 
 func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
+	defer done()
 	for _, recipient := range s.recipients {
 		if recipient == rmId {
 			conn.Send(s.msg)
@@ -527,5 +533,4 @@ func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn Connec
 	if s.submitter == rmId {
 		conn.Send(s.submitterMsg)
 	}
-	done()
 }
