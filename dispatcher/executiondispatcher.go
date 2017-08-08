@@ -28,7 +28,6 @@ func (dis *Dispatcher) ShutdownSync() {
 type Executor struct {
 	*actor.BasicServerOuter
 	*actor.Mailbox
-	log.Logger
 }
 
 func newExecutor(logger log.Logger) *Executor {
@@ -41,7 +40,6 @@ func newExecutor(logger log.Logger) *Executor {
 	exe := &Executor{
 		BasicServerOuter: actor.NewBasicServerOuter(mailbox),
 		Mailbox:          mailbox,
-		Logger:           logger,
 	}
 	return exe
 }

@@ -29,22 +29,55 @@ import (
 type WebsocketListener struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
-	inner *websocketListenerInner
-}
 
-type websocketListenerInner struct {
-	*WebsocketListener
-	*actor.BasicServerInner
 	parentLogger      log.Logger
 	connectionManager *ConnectionManager
 	mux               *HttpListenerWithMux
 	topology          *configuration.Topology
 	topologyLock      sync.RWMutex
+
+	inner websocketListenerInner
+}
+
+type websocketListenerInner struct {
+	*WebsocketListener
+	*actor.BasicServerInner
+}
+
+func NewWebsocketListener(mux *HttpListenerWithMux, cm *ConnectionManager, logger log.Logger) *WebsocketListener {
+	l := &WebsocketListener{
+		parentLogger:      logger,
+		connectionManager: cm,
+		mux:               mux,
+	}
+
+	li := &l.inner
+	li.WebsocketListener = l
+	li.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "websocketListener"))
+
+	_, err := actor.Spawn(li)
+	if err != nil {
+		panic(err) // "impossible"
+	}
+
+	return l
+}
+
+func (l *WebsocketListener) putTopology(topology *configuration.Topology) {
+	l.topologyLock.Lock()
+	defer l.topologyLock.Unlock()
+	l.topology = topology
+}
+
+func (l *WebsocketListener) getTopology() *configuration.Topology {
+	l.topologyLock.RLock()
+	defer l.topologyLock.RUnlock()
+	return l.topology
 }
 
 type websocketListenerMsgTopologyChanged struct {
 	actor.MsgSyncQuery
-	*websocketListenerInner
+	*WebsocketListener
 	topology *configuration.Topology
 }
 
@@ -55,7 +88,7 @@ func (msg websocketListenerMsgTopologyChanged) Exec() (bool, error) {
 }
 
 func (l *WebsocketListener) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	msg := &websocketListenerMsgTopologyChanged{websocketListenerInner: l.inner, topology: topology}
+	msg := &websocketListenerMsgTopologyChanged{WebsocketListener: l, topology: topology}
 	msg.InitMsg(l)
 	if l.EnqueueMsg(msg) {
 		go func() {
@@ -67,51 +100,24 @@ func (l *WebsocketListener) TopologyChanged(topology *configuration.Topology, do
 	}
 }
 
-func NewWebsocketListener(mux *HttpListenerWithMux, cm *ConnectionManager, logger log.Logger) *WebsocketListener {
-	l := &WebsocketListener{}
-
-	li := &websocketListenerInner{
-		WebsocketListener: l,
-		BasicServerInner:  actor.NewBasicServerInner(log.With(logger, "subsystem", "websocketListener")),
-		parentLogger:      logger,
-		connectionManager: cm,
-		mux:               mux,
-	}
-
-	mailbox, err := actor.Spawn(li)
-	if err != nil {
-		panic(err) // "impossible"
-	}
-
-	l.Mailbox = mailbox
-	l.BasicServerOuter = actor.NewBasicServerOuter(mailbox)
-	l.inner = li
-
-	return l
-}
-
 func (l *websocketListenerInner) Init(self *actor.Actor) (bool, error) {
+	terminate, err := l.BasicServerInner.Init(self)
+	if terminate || err != nil {
+		return terminate, err
+	}
+
+	l.Mailbox = self.Mailbox
+	l.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
+
 	topology := l.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, l)
 	l.putTopology(topology)
 	l.configureMux()
-	return l.BasicServerInner.Init(self)
+	return false, nil
 }
 
 func (l *websocketListenerInner) HandleShutdown(err error) bool {
 	l.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, l)
 	return l.BasicServerInner.HandleShutdown(err)
-}
-
-func (l *websocketListenerInner) putTopology(topology *configuration.Topology) {
-	l.topologyLock.Lock()
-	defer l.topologyLock.Unlock()
-	l.topology = topology
-}
-
-func (l *websocketListenerInner) getTopology() *configuration.Topology {
-	l.topologyLock.RLock()
-	defer l.topologyLock.RUnlock()
-	return l.topology
 }
 
 func (l *websocketListenerInner) configureMux() {
@@ -288,8 +294,8 @@ func (wmpc *wssMsgPackClient) Restart() bool {
 	return false // client connections are never restarted
 }
 
-func (wmpc *wssMsgPackClient) Run(conn *connectionInner) error {
-	wmpc.connectionInner = conn
+func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
+	wmpc.Connection = conn
 	servers, metrics := wmpc.connectionManager.ClientEstablished(wmpc.connectionNumber, wmpc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
@@ -350,6 +356,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	}
 	cont := func() {
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
+		wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
 		wmpc.shutdownCompleted()
 	}
 	if wmpc.submitter == nil {

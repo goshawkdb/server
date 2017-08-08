@@ -26,7 +26,6 @@ type ShutdownSignaller interface {
 type ConnectionManager struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
-	inner *connectionManagerInner
 
 	lock                          sync.RWMutex
 	parentLogger                  log.Logger
@@ -49,11 +48,71 @@ type ConnectionManager struct {
 	clientConnsGauge              prometheus.Gauge
 	serverConnsGauge              prometheus.Gauge
 	clientTxnMetrics              *paxos.ClientTxnMetrics
+
+	inner connectionManagerInner
 }
 
 type connectionManagerInner struct {
 	*ConnectionManager
 	*actor.BasicServerInner
+}
+
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
+
+	cm := &ConnectionManager{
+		parentLogger:      logger,
+		localHost:         "",
+		RMId:              rmId,
+		BootCount:         bootCount,
+		certificate:       certificate,
+		servers:           make(map[string][]*connectionManagerMsgServerEstablished),
+		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
+		flushedServers:    make(map[common.RMId]server.EmptyStruct),
+		connCountToClient: make(map[uint32]paxos.ClientConnection),
+	}
+
+	cm.serverConnSubscribers.subscribers = make(map[paxos.ServerConnectionSubscriber]server.EmptyStruct)
+	cm.serverConnSubscribers.ConnectionManager = cm
+
+	topSubs := make([]map[eng.TopologySubscriber]server.EmptyStruct, eng.TopologyChangeSubscriberTypeLimit)
+	for idx := range topSubs {
+		topSubs[idx] = make(map[eng.TopologySubscriber]server.EmptyStruct)
+	}
+	cm.topologySubscribers.subscribers = topSubs
+	cm.topologySubscribers.ConnectionManager = cm
+
+	cmi := &cm.inner
+	cmi.ConnectionManager = cm
+	cmi.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "connectionManager"))
+
+	_, err := actor.Spawn(cmi)
+	if err != nil {
+		panic(err) // "impossible"
+	}
+
+	// this remaining initialisation work must be done in this thread
+	// because we need connectionManager actually working for this
+	// (e.g. localConnection creation requires sync calls to
+	// connectionManager!).
+
+	cd := &connectionManagerMsgServerEstablished{
+		send:        cmi.send,
+		host:        cm.localHost,
+		rmId:        cm.RMId,
+		bootCount:   cm.BootCount,
+		established: true,
+		cm:          cm,
+	}
+	cm.rmToServer[cd.rmId] = cd
+	cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
+
+	cm.localConnection = client.NewLocalConnection(cm.RMId, cm.BootCount, cm, cm.parentLogger)
+	cm.Dispatchers = paxos.NewDispatchers(cm, cm.RMId, cm.BootCount, procs, db, cm.localConnection, cm.parentLogger)
+	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
+	cm.transmogrifier = transmogrifier
+
+	<-localEstablished
+	return cm, cm.transmogrifier, cm.localConnection
 }
 
 func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg msgs.Message) {
@@ -227,7 +286,7 @@ func (msg *connectionManagerMsgServerEstablished) Exec() (terminate bool, error 
 
 func (cm *ConnectionManager) ServerEstablished(tcs *TLSCapnpServer, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func()) {
 	cm.EnqueueMsg(&connectionManagerMsgServerEstablished{
-		Connection:    tcs.conn.Connection,
+		Connection:    tcs.conn,
 		send:          tcs.Send,
 		host:          host,
 		rmId:          rmId,
@@ -316,7 +375,7 @@ func (msg *connectionManagerMsgServerLost) Exec() (terminate bool, err error) {
 
 func (cm *ConnectionManager) ServerLost(tcs *TLSCapnpServer, host string, rmId common.RMId, restarting bool) {
 	cm.EnqueueMsg(&connectionManagerMsgServerLost{
-		Connection: tcs.conn.Connection,
+		Connection: tcs.conn,
 		host:       host,
 		rmId:       rmId,
 		restarting: restarting,
@@ -389,7 +448,6 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn paxos.ClientConn
 		cm.clientConnsGauge.Dec()
 	}
 	cm.lock.Unlock()
-	cm.RemoveServerConnectionSubscriber(conn)
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) paxos.ClientConnection {
@@ -681,69 +739,6 @@ func (cm *ConnectionManager) SetMetrics(client, server prometheus.Gauge, clientT
 	})
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
-
-	cm := &ConnectionManager{
-		parentLogger:      logger,
-		localHost:         "",
-		RMId:              rmId,
-		BootCount:         bootCount,
-		certificate:       certificate,
-		servers:           make(map[string][]*connectionManagerMsgServerEstablished),
-		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
-		flushedServers:    make(map[common.RMId]server.EmptyStruct),
-		connCountToClient: make(map[uint32]paxos.ClientConnection),
-	}
-
-	cmi := &connectionManagerInner{
-		ConnectionManager: cm,
-		BasicServerInner:  actor.NewBasicServerInner(log.With(logger, "subsystem", "connectionManager")),
-	}
-	cm.inner = cmi
-
-	cm.serverConnSubscribers.subscribers = make(map[paxos.ServerConnectionSubscriber]server.EmptyStruct)
-	cm.serverConnSubscribers.connectionManagerInner = cmi
-
-	topSubs := make([]map[eng.TopologySubscriber]server.EmptyStruct, eng.TopologyChangeSubscriberTypeLimit)
-	for idx := range topSubs {
-		topSubs[idx] = make(map[eng.TopologySubscriber]server.EmptyStruct)
-	}
-	cm.topologySubscribers.subscribers = topSubs
-	cm.topologySubscribers.connectionManagerInner = cmi
-
-	mailbox, err := actor.Spawn(cmi)
-	if err != nil {
-		panic(err) // "impossible"
-	}
-
-	cm.BasicServerOuter = actor.NewBasicServerOuter(mailbox)
-	cm.Mailbox = mailbox
-
-	// this remaining initialisation work must be done in this thread
-	// because we need connectionManager actually working for this
-	// (e.g. localConnection creation requires sync calls to
-	// connectionManager!).
-
-	cd := &connectionManagerMsgServerEstablished{
-		send:        cmi.send,
-		host:        cm.localHost,
-		rmId:        cm.RMId,
-		bootCount:   cm.BootCount,
-		established: true,
-		cm:          cm,
-	}
-	cm.rmToServer[cd.rmId] = cd
-	cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
-
-	cm.localConnection = client.NewLocalConnection(cm.RMId, cm.BootCount, cm, cm.parentLogger)
-	cm.Dispatchers = paxos.NewDispatchers(cm, cm.RMId, cm.BootCount, procs, db, cm.localConnection, cm.parentLogger)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
-	cm.transmogrifier = transmogrifier
-
-	<-localEstablished
-	return cm, cm.transmogrifier, cm.localConnection
-}
-
 func (cm *connectionManagerInner) checkFlushed() {
 	if cm.flushedServers != nil && cm.topology != nil {
 		requiredFlushed := len(cm.topology.Hosts) - int(cm.topology.F)
@@ -777,6 +772,18 @@ func (cm *connectionManagerInner) send(b []byte) {
 	cm.DispatchMessage(cm.RMId, msg.Which(), msg)
 }
 
+func (cm *connectionManagerInner) Init(self *actor.Actor) (bool, error) {
+	terminate, err := cm.BasicServerInner.Init(self)
+	if terminate || err != nil {
+		return terminate, err
+	}
+
+	cm.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
+	cm.Mailbox = self.Mailbox
+
+	return false, nil
+}
+
 func (cm *connectionManagerInner) HandleShutdown(err error) bool {
 	for _, cds := range cm.servers {
 		for _, cd := range cds {
@@ -797,7 +804,7 @@ func (cm *connectionManagerInner) HandleShutdown(err error) bool {
 // serverConnSubscribers
 
 type serverConnSubscribers struct {
-	*connectionManagerInner
+	*ConnectionManager
 	subscribers map[paxos.ServerConnectionSubscriber]server.EmptyStruct
 }
 
@@ -820,7 +827,7 @@ func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsg
 	wg.Done()
 	go func() {
 		if callback != nil {
-			server.DebugLog(subs.Logger, "debug", "ServerConnEstablished. Expecting callbacks.")
+			server.DebugLog(subs.inner.Logger, "debug", "ServerConnEstablished. Expecting callbacks.")
 			wg.WaitUntilEither(subs.ConnectionManager.Mailbox.Terminated)
 			callback()
 		}
@@ -836,7 +843,7 @@ func (subs serverConnSubscribers) ServerConnLost(rmId common.RMId) {
 
 func (subs serverConnSubscribers) AddSubscriber(ob paxos.ServerConnectionSubscriber) {
 	if _, found := subs.subscribers[ob]; found {
-		server.DebugLog(subs.Logger, "debug", "Found duplicate add serverConn subscriber.", "subscriber", ob)
+		server.DebugLog(subs.inner.Logger, "debug", "Found duplicate add serverConn subscriber.", "subscriber", ob)
 	} else {
 		subs.subscribers[ob] = server.EmptyStructVal
 		ob.ConnectedRMs(subs.cloneRMToServer())
@@ -850,7 +857,7 @@ func (subs serverConnSubscribers) RemoveSubscriber(ob paxos.ServerConnectionSubs
 // topologySubscribers
 
 type topologySubscribers struct {
-	*connectionManagerInner
+	*ConnectionManager
 	subscribers []map[eng.TopologySubscriber]server.EmptyStruct
 }
 
@@ -869,7 +876,7 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 		}
 		expected := len(subsMap)
 		go func() {
-			server.DebugLog(subs.Logger, "debug", "TopologyChanged. Expecting callbacks.",
+			server.DebugLog(subs.inner.Logger, "debug", "TopologyChanged. Expecting callbacks.",
 				"type", subTypeCopy, "expected", expected)
 			for expected > 0 {
 				select {
@@ -878,12 +885,12 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 				case success := <-resultChan:
 					expected--
 					if !success {
-						server.DebugLog(subs.Logger, "debug", "TopologyChanged. Callback failure.", "type", subTypeCopy)
+						server.DebugLog(subs.inner.Logger, "debug", "TopologyChanged. Callback failure.", "type", subTypeCopy)
 						return
 					}
 				}
 			}
-			server.DebugLog(subs.Logger, "debug", "TopologyChanged. Callback success.", "type", subTypeCopy)
+			server.DebugLog(subs.inner.Logger, "debug", "TopologyChanged. Callback success.", "type", subTypeCopy)
 			callback()
 		}()
 	}
@@ -891,7 +898,7 @@ func (subs topologySubscribers) TopologyChanged(topology *configuration.Topology
 
 func (subs topologySubscribers) AddSubscriber(subType eng.TopologyChangeSubscriberType, ob eng.TopologySubscriber) {
 	if _, found := subs.subscribers[subType][ob]; found {
-		server.DebugLog(subs.Logger, "debug", "Found duplicate add topology subscriber.", "subscriber", ob)
+		server.DebugLog(subs.inner.Logger, "debug", "Found duplicate add topology subscriber.", "subscriber", ob)
 	} else {
 		subs.subscribers[subType][ob] = server.EmptyStructVal
 	}

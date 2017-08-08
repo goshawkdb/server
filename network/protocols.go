@@ -30,7 +30,7 @@ type Handshaker interface {
 }
 
 type Protocol interface {
-	Run(*connectionInner) error
+	Run(*Connection) error
 	TopologyChanged(*connectionMsgTopologyChanged) error
 	Restart() bool
 	InternalShutdown()
@@ -177,7 +177,7 @@ func (tch *TLSCapnpHandshaker) serverError(err error) error {
 type TLSCapnpServer struct {
 	*TLSCapnpHandshaker
 	logger            log.Logger
-	conn              *connectionInner
+	conn              *Connection
 	remoteHost        string
 	remoteRMId        common.RMId
 	remoteClusterUUId uint64
@@ -291,7 +291,7 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 	return false
 }
 
-func (tcs *TLSCapnpServer) Run(conn *connectionInner) error {
+func (tcs *TLSCapnpServer) Run(conn *Connection) error {
 	tcs.conn = conn
 	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remoteHost, "remoteRMId", tcs.remoteRMId)
 
@@ -391,7 +391,7 @@ func (tcs *TLSCapnpServer) createReader() {
 
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
-	*connectionInner
+	*Connection
 	remoteHost string
 	logger     log.Logger
 	peerCerts  []*x509.Certificate
@@ -468,8 +468,8 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	return seg
 }
 
-func (tcc *TLSCapnpClient) Run(conn *connectionInner) error {
-	tcc.connectionInner = conn
+func (tcc *TLSCapnpClient) Run(conn *Connection) error {
+	tcc.Connection = conn
 	servers, metrics := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
 	if servers == nil {
 		return errors.New("Not ready for client connections")
@@ -537,6 +537,7 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 	}
 	cont := func() {
 		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+		tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
 		tcc.shutdownCompleted()
 	}
 	if tcc.submitter == nil {
