@@ -207,7 +207,7 @@ func (s *server) start() {
 	s.certificate = nil
 	s.addOnShutdown(transmogrifier.Shutdown)
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
-	s.addOnShutdown(sp.Shutdown)
+	s.addOnShutdown(sp.ShutdownSync)
 	s.addOnShutdown(cm.ShutdownSync)
 	s.connectionManager = cm
 	s.transmogrifier = transmogrifier

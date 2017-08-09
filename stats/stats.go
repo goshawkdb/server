@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
-	cc "github.com/msackman/chancell"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -17,195 +16,135 @@ import (
 	"goshawkdb.io/server/network"
 	eng "goshawkdb.io/server/txnengine"
 	"math/rand"
-	"sync/atomic"
 	"time"
 )
 
 type StatsPublisher struct {
-	logger            log.Logger
+	*actor.Mailbox
+	*actor.BasicServerOuter
+
 	localConnection   *client.LocalConnection
 	connectionManager *network.ConnectionManager
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(statsPublisherMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan statsPublisherMsg
 	rng               *rand.Rand
 	configPublisher
+
+	inner statsPublisherInner
 }
 
-type statsPublisherMsg interface {
-	witness() statsPublisherMsg
-}
-
-type statsPublisherMsgBasic struct{}
-
-func (sp statsPublisherMsgBasic) witness() statsPublisherMsg { return sp }
-
-type statsPublisherMsgShutdown struct{ statsPublisherMsgBasic }
-
-func (sp *StatsPublisher) Shutdown() {
-	if sp.enqueueQuery(statsPublisherMsgShutdown{}) {
-		sp.cellTail.Wait()
-	}
-}
-
-type statsPublisherExe func() error
-
-func (spe statsPublisherExe) witness() statsPublisherMsg { return spe }
-
-func (sp *StatsPublisher) exec(fun func() error) bool {
-	return sp.enqueueQuery(statsPublisherExe(fun))
-}
-
-type statsPublisherQueryCapture struct {
-	sp  *StatsPublisher
-	msg statsPublisherMsg
-}
-
-func (spqc *statsPublisherQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-	return spqc.sp.enqueueQueryInner(spqc.msg, cell, spqc.ccc)
-}
-
-func (sp *StatsPublisher) enqueueQuery(msg statsPublisherMsg) bool {
-	spqc := &statsPublisherQueryCapture{sp: sp, msg: msg}
-	return sp.cellTail.WithCell(spqc.ccc)
+type statsPublisherInner struct {
+	*StatsPublisher
+	*actor.BasicServerInner
 }
 
 func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection, logger log.Logger) *StatsPublisher {
 	sp := &StatsPublisher{
-		logger:            log.With(logger, "subsystem", "statsPublisher"),
 		localConnection:   lc,
 		connectionManager: cm,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	var head *cc.ChanCellHead
-	head, sp.cellTail = cc.NewChanCellTail(
-		func(n int, cell *cc.ChanCell) {
-			queryChan := make(chan statsPublisherMsg, n)
-			cell.Open = func() { sp.queryChan = queryChan }
-			cell.Close = func() { close(queryChan) }
-			sp.enqueueQueryInner = func(msg statsPublisherMsg, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
-				if curCell == cell {
-					select {
-					case queryChan <- msg:
-						return true, nil
-					default:
-						return false, nil
-					}
-				} else {
-					return false, cont
-				}
-			}
-		})
-	go sp.actorLoop(head)
+
+	spi := &sp.inner
+	spi.StatsPublisher = sp
+	spi.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "statsPublisher"))
+
+	_, err := actor.Spawn(spi)
+	if err != nil {
+		panic(err) // impossible
+	}
+
 	return sp
 }
 
-func (sp *StatsPublisher) actorLoop(head *cc.ChanCellHead) {
-	var (
-		err       error
-		queryChan <-chan statsPublisherMsg
-		queryCell *cc.ChanCell
-	)
-	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = sp.queryChan, cell }
-	head.WithCell(chanFun)
-
-	sp.configPublisher.init(sp)
-
-	terminate := err != nil
-	for !terminate {
-		if msg, ok := <-queryChan; ok {
-			switch msgT := msg.(type) {
-			case statsPublisherMsgShutdown:
-				terminate = true
-			case statsPublisherExe:
-				err = msgT()
-			default:
-				err = fmt.Errorf("Fatal to StatsPublisher: Received unexpected message: %#v", msgT)
-			}
-			terminate = terminate || err != nil
-		} else {
-			head.Next(queryCell, chanFun)
-		}
+func (sp *statsPublisherInner) Init(self *actor.Actor) (bool, error) {
+	terminate, err := sp.BasicServerInner.Init(self)
+	if terminate || err != nil {
+		return terminate, err
 	}
-	if err != nil {
-		sp.logger.Log("msg", "Fatal error.", "error", err)
-	}
-	sp.cellTail.Terminate()
+
+	sp.Mailbox = self.Mailbox
+	sp.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
+
+	sp.configPublisher.init(sp.StatsPublisher)
+	return false, nil
 }
 
 type configPublisher struct {
 	*StatsPublisher
-	vsn      *common.TxnId
-	root     *configuration.Root
-	topology *configuration.Topology
-	json     []byte
-	backoff  *server.BinaryBackoffEngine
+	vsn        *common.TxnId
+	publishing *configPublisherMsg
 }
 
 func (cp *configPublisher) init(sp *StatsPublisher) {
 	cp.StatsPublisher = sp
 	cp.vsn = common.VersionZero
 	topology := cp.connectionManager.AddTopologySubscriber(eng.MiscSubscriber, cp)
-	cp.TopologyChanged(topology, func(bool) {})
+	go cp.TopologyChanged(topology, func(bool) {})
+}
+
+type configPublisherMsgTopologyChanged struct {
+	actor.MsgSyncQuery
+	*configPublisher
+	topology *configuration.Topology
+}
+
+func (msg *configPublisherMsgTopologyChanged) Exec() (bool, error) {
+	msg.MustClose()
+
+	msg.publishing = nil
+
+	if msg.topology == nil || msg.topology.NextConfiguration != nil {
+		// it's not safe to publish during topology changes.
+		return false, nil
+	}
+
+	var root *configuration.Root
+	for idx, rootName := range msg.topology.Roots {
+		if rootName == server.ConfigRootName {
+			root = &msg.topology.RootVarUUIds[idx]
+			break
+		}
+	}
+	if root == nil {
+		return false, nil
+	}
+	json, err := msg.topology.ToJSONString()
+	if err != nil {
+		return false, err
+	}
+
+	msg.publishing = &configPublisherMsg{
+		configPublisher: msg.configPublisher,
+		root:            root,
+		topology:        msg.topology,
+		json:            json,
+		backoff:         server.NewBinaryBackoffEngine(msg.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+	}
+	return msg.publishing.Exec()
 }
 
 func (cp *configPublisher) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan struct{})
-	enqueued := cp.exec(func() error {
-		close(finished)
-		return cp.maybePublishConfig(topology)
-	})
-	if enqueued {
-		go func() {
-			select {
-			case <-finished:
-				done(true)
-			case <-cp.cellTail.Terminated:
-				done(false)
-			}
-		}()
+	msg := &configPublisherMsgTopologyChanged{configPublisher: cp, topology: topology}
+	msg.InitMsg(cp)
+	if cp.EnqueueMsg(msg) {
+		go done(msg.Wait())
 	} else {
 		done(false)
 	}
 }
 
-func (cp *configPublisher) maybePublishConfig(topology *configuration.Topology) error {
-	cp.root = nil
-	cp.topology = nil
-	cp.backoff = nil
-	cp.json = nil
-
-	if topology == nil || topology.NextConfiguration != nil {
-		// it's not safe to publish during topology changes.
-		return nil
-	}
-
-	var root *configuration.Root
-	for idx, rootName := range topology.Roots {
-		if rootName == server.ConfigRootName {
-			root = &topology.RootVarUUIds[idx]
-			break
-		}
-	}
-	if root == nil {
-		return nil
-	}
-	json, err := topology.ToJSONString()
-	if err != nil {
-		return err
-	}
-
-	cp.root = root
-	cp.topology = topology
-	cp.json = json
-	cp.backoff = server.NewBinaryBackoffEngine(cp.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
-	return cp.publishConfig()
+type configPublisherMsg struct {
+	*configPublisher
+	root     *configuration.Root
+	topology *configuration.Topology
+	json     []byte
+	backoff  *server.BinaryBackoffEngine
 }
 
-func (cp *configPublisher) publishConfig() error {
-	if cp.root == nil || cp.json == nil {
-		return nil
+func (msg *configPublisherMsg) Exec() (bool, error) {
+	if msg.publishing != msg {
+		return false, nil
 	}
+
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
 	ctxn.SetRetry(false)
@@ -213,122 +152,97 @@ func (cp *configPublisher) publishConfig() error {
 	actions := cmsgs.NewClientActionList(seg, 1)
 
 	action := actions.At(0)
-	action.SetVarId(cp.root.VarUUId[:])
+	action.SetVarId(msg.root.VarUUId[:])
 	action.SetReadwrite()
 	rw := action.Readwrite()
-	rw.SetVersion(cp.vsn[:])
-	rw.SetValue(cp.json)
+	rw.SetVersion(msg.vsn[:])
+	rw.SetValue(msg.json)
 	rw.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
 
 	ctxn.SetActions(actions)
 
 	varPosMap := make(map[common.VarUUId]*common.Positions)
-	varPosMap[*cp.root.VarUUId] = cp.root.Positions
+	varPosMap[*msg.root.VarUUId] = msg.root.Positions
 
-	server.DebugLog(cp.logger, "debug", "Publishing Config.", "config", string(cp.json))
+	server.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json))
 
-	backoff := cp.backoff
-	var i uint32 = 0
-	closer := func() bool {
-		return atomic.CompareAndSwapUint32(&i, 0, 1)
-	}
-
-	time.AfterFunc(2*time.Second, func() {
-		if !closer() {
-			return
-		}
-		cp.exec(func() error {
-			if cp.backoff == backoff {
-				return cp.publishConfig()
-			} else {
-				return nil
-			}
-		})
-	})
+	time.AfterFunc(2*time.Second, func() { msg.EnqueueMsg(msg) })
 
 	go func() {
-		_, result, err := cp.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)
-		if !closer() {
-			return
-		}
-		cp.exec(func() error {
-			if cp.backoff != backoff {
-				return nil
-			}
-
-			retryAfterDelay := err != nil || (result != nil && result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT)
-			if err != nil {
-				// log, but ignore the error as it's most likely temporary
-				cp.logger.Log("msg", "Error during config publish.", "error", err)
-				err = nil
-			} else if result == nil { // shutdown
-				return nil
-			} else if result.Which() == msgs.OUTCOME_COMMIT {
-				server.DebugLog(cp.logger, "debug", "Publishing Config committed.")
-				return nil
-			}
-
-			if retryAfterDelay {
-				server.DebugLog(cp.logger, "debug", "Publishing Config requires resubmit.")
-				cp.backoff.Advance()
-				cp.backoff.After(func() {
-					cp.exec(func() error {
-						if cp.backoff == backoff {
-							return cp.publishConfig()
-						} else {
-							return nil
-						}
-					})
-				})
-				return nil
-			}
-
-			server.DebugLog(cp.logger, "debug", "Publishing Config requires rerun.")
-			updates := result.Abort().Rerun()
-			found := false
-			var value []byte
-			for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
-				update := updates.At(idx)
-				updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
-				for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
-					updateAction := updateActions.At(idy)
-					if found = bytes.Equal(cp.root.VarUUId[:], updateAction.VarId()); found {
-						if updateAction.Which() == msgs.ACTION_WRITE {
-							cp.vsn = common.MakeTxnId(update.TxnId())
-							updateWrite := updateAction.Write()
-							value = updateWrite.Value()
-						} else {
-							// must be MISSING, which I'm really not sure should ever happen!
-							cp.vsn = common.VersionZero
-						}
-					}
-				}
-			}
-			if !found {
-				return errors.New("Internal error: failed to find update for rerun of config publishing")
-			}
-			if len(value) > 0 {
-				inDB := new(configuration.ConfigurationJSON)
-				if err := json.Unmarshal(value, inDB); err != nil {
-					return err
-				}
-				if inDB.Version > cp.topology.Version {
-					server.DebugLog(cp.logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
-					return nil
-				} else if inDB.Version == cp.topology.Version {
-					server.DebugLog(cp.logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
-					return nil
-				}
-			}
-			cp.exec(func() error {
-				if cp.backoff == backoff {
-					return cp.publishConfig()
-				} else {
-					return nil
-				}
-			})
-			return nil
-		})
+		_, result, err := msg.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)
+		msg.EnqueueFuncAsync(func() (bool, error) { return msg.execPart2(result, err) })
 	}()
-	return nil
+
+	return false, nil
+}
+
+func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool, error) {
+	if msg.publishing != msg {
+		return false, nil
+	}
+
+	retryAfterDelay := err != nil || (result != nil && result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT)
+	if err != nil {
+		// log, but ignore the error as it's most likely temporary. Then continue.
+		msg.inner.Logger.Log("msg", "Error during config publish.", "error", err)
+		err = nil
+	}
+	if result == nil { // shutdown
+		msg.publishing = nil
+		return false, nil
+	} else if result.Which() == msgs.OUTCOME_COMMIT {
+		msg.publishing = nil
+		server.DebugLog(msg.inner.Logger, "debug", "Publishing Config committed.")
+		return false, nil
+	}
+
+	if retryAfterDelay {
+		server.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires resubmit.")
+		msg.backoff.Advance()
+		msg.backoff.After(func() { msg.EnqueueMsg(msg) })
+		return false, nil
+	}
+
+	server.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires rerun.")
+	updates := result.Abort().Rerun()
+	found := false
+	var value []byte
+	for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
+		update := updates.At(idx)
+		updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
+		for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
+			updateAction := updateActions.At(idy)
+			if found = bytes.Equal(msg.root.VarUUId[:], updateAction.VarId()); found {
+				if updateAction.Which() == msgs.ACTION_WRITE {
+					msg.vsn = common.MakeTxnId(update.TxnId())
+					updateWrite := updateAction.Write()
+					value = updateWrite.Value()
+				} else {
+					// must be MISSING, which I'm really not sure should ever happen!
+					msg.vsn = common.VersionZero
+				}
+			}
+		}
+	}
+	if !found {
+		msg.publishing = nil
+		return false, errors.New("Internal error: failed to find update for rerun of config publishing")
+	}
+	if len(value) > 0 {
+		inDB := new(configuration.ConfigurationJSON)
+		if err := json.Unmarshal(value, inDB); err != nil {
+			msg.publishing = nil
+			return false, err
+		} else if inDB.Version > msg.topology.Version {
+			msg.publishing = nil
+			server.DebugLog(msg.inner.Logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
+			return false, nil
+		} else if inDB.Version == msg.topology.Version {
+			msg.publishing = nil
+			server.DebugLog(msg.inner.Logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
+			return false, nil
+		}
+	}
+	msg.EnqueueMsg(msg)
+	return false, nil
 }

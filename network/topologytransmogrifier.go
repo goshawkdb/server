@@ -126,6 +126,7 @@ func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bo
 }
 
 func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
+	localEstablished := make(chan struct{})
 	tt := &TopologyTransmogrifier{
 		logger:            log.With(logger, "subsystem", "topologyTransmogrifier"),
 		db:                db,
@@ -135,7 +136,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 		listenPort:        listenPort,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		shutdownSignaller: ss,
-		localEstablished:  make(chan struct{}),
+		localEstablished:  localEstablished,
 	}
 	tt.task = &targetConfig{
 		TopologyTransmogrifier: tt,
@@ -165,7 +166,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 	cm.AddServerConnectionSubscriber(tt)
 
 	go tt.actorLoop(head)
-	return tt, tt.localEstablished
+	return tt, localEstablished
 }
 
 func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
