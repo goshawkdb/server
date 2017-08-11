@@ -6,10 +6,10 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
-	cc "github.com/msackman/chancell"
 	mdb "github.com/msackman/gomdb"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -24,7 +24,9 @@ import (
 )
 
 type TopologyTransmogrifier struct {
-	logger            log.Logger
+	*actor.Mailbox
+	*actor.BasicServerOuter
+
 	db                *db.Databases
 	connectionManager *ConnectionManager
 	localConnection   *client.LocalConnection
@@ -32,103 +34,27 @@ type TopologyTransmogrifier struct {
 	hostToConnection  map[string]paxos.Connection
 	activeConnections map[common.RMId]paxos.Connection
 	migrations        map[uint32]map[common.RMId]*int32
-	task              topologyTask
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(topologyTransmogrifierMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan topologyTransmogrifierMsg
+
+	currentTask  topologyTask
+	previousTask topologyTask
+
 	listenPort        uint16
 	rng               *rand.Rand
 	shutdownSignaller ShutdownSignaller
 	localEstablished  chan struct{}
+
+	inner topologyTransmogrifierInner
 }
 
-type topologyTransmogrifierMsg interface {
-	witness() topologyTransmogrifierMsg
-}
-
-type topologyTransmogrifierMsgBasic struct{}
-
-func (ttmb topologyTransmogrifierMsgBasic) witness() topologyTransmogrifierMsg { return ttmb }
-
-type topologyTransmogrifierMsgShutdown struct{ topologyTransmogrifierMsgBasic }
-
-func (tt *TopologyTransmogrifier) Shutdown() {
-	if tt.enqueueQuery(topologyTransmogrifierMsgShutdown{}) {
-		tt.cellTail.Wait()
-	}
-}
-
-type topologyTransmogrifierMsgRequestConfigChange struct {
-	topologyTransmogrifierMsgBasic
-	config *configuration.Configuration
-}
-
-func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
-	tt.enqueueQuery(topologyTransmogrifierMsgRequestConfigChange{config: config})
-}
-
-type topologyTransmogrifierMsgSetActiveConnections struct {
-	servers map[common.RMId]paxos.Connection
-	done    func()
-}
-
-func (ttmsac topologyTransmogrifierMsgSetActiveConnections) witness() topologyTransmogrifierMsg {
-	return ttmsac
-}
-
-type topologyTransmogrifierMsgTopologyObserved struct {
-	topologyTransmogrifierMsgBasic
-	topology *configuration.Topology
-}
-
-type topologyTransmogrifierMsgExe func() error
-
-func (ttme topologyTransmogrifierMsgExe) witness() topologyTransmogrifierMsg { return ttme }
-
-type topologyTransmogrifierMsgMigration struct {
-	topologyTransmogrifierMsgBasic
-	migration *msgs.Migration
-	sender    common.RMId
-}
-
-func (tt *TopologyTransmogrifier) MigrationReceived(sender common.RMId, migration *msgs.Migration) {
-	tt.enqueueQuery(topologyTransmogrifierMsgMigration{
-		migration: migration,
-		sender:    sender,
-	})
-}
-
-type topologyTransmogrifierMsgMigrationComplete struct {
-	topologyTransmogrifierMsgBasic
-	complete *msgs.MigrationComplete
-	sender   common.RMId
-}
-
-func (tt *TopologyTransmogrifier) MigrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) {
-	tt.enqueueQuery(topologyTransmogrifierMsgMigrationComplete{
-		complete: migrationComplete,
-		sender:   sender,
-	})
-}
-
-type topologyTransmogrifierQueryCapture struct {
-	tt  *TopologyTransmogrifier
-	msg topologyTransmogrifierMsg
-}
-
-func (ttqc *topologyTransmogrifierQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-	return ttqc.tt.enqueueQueryInner(ttqc.msg, cell, ttqc.ccc)
-}
-
-func (tt *TopologyTransmogrifier) enqueueQuery(msg topologyTransmogrifierMsg) bool {
-	ttqc := &topologyTransmogrifierQueryCapture{tt: tt, msg: msg}
-	return tt.cellTail.WithCell(ttqc.ccc)
+type topologyTransmogrifierInner struct {
+	*TopologyTransmogrifier
+	*actor.BasicServerInner
 }
 
 func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
+
 	localEstablished := make(chan struct{})
 	tt := &TopologyTransmogrifier{
-		logger:            log.With(logger, "subsystem", "topologyTransmogrifier"),
 		db:                db,
 		connectionManager: cm,
 		localConnection:   lc,
@@ -138,65 +64,33 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 		shutdownSignaller: ss,
 		localEstablished:  localEstablished,
 	}
-	tt.task = &targetConfig{
+	tt.currentTask = &targetConfig{
 		TopologyTransmogrifier: tt,
 		config:                 &configuration.NextConfiguration{Configuration: config},
 	}
+	tti := &tt.inner
+	tti.TopologyTransmogrifier = tt
+	tti.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "topologyTransmogrifier"))
 
-	var head *cc.ChanCellHead
-	head, tt.cellTail = cc.NewChanCellTail(
-		func(n int, cell *cc.ChanCell) {
-			queryChan := make(chan topologyTransmogrifierMsg, n)
-			cell.Open = func() { tt.queryChan = queryChan }
-			cell.Close = func() { close(queryChan) }
-			tt.enqueueQueryInner = func(msg topologyTransmogrifierMsg, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
-				if curCell == cell {
-					select {
-					case queryChan <- msg:
-						return true, nil
-					default:
-						return false, nil
-					}
-				} else {
-					return false, cont
-				}
-			}
-		})
+	_, err := actor.Spawn(tti)
+	if err != nil {
+		panic(err)
+	}
 
-	cm.AddServerConnectionSubscriber(tt)
-
-	go tt.actorLoop(head)
 	return tt, localEstablished
 }
 
-func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{servers: conns})
-}
-
-func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
-	tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{servers: conns})
-}
-
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
-	finished := make(chan struct{})
-	enqueued := tt.enqueueQuery(topologyTransmogrifierMsgSetActiveConnections{
-		servers: conns,
-		done:    func() { close(finished) },
-	})
-	if enqueued {
-		go func() {
-			select {
-			case <-finished:
-			case <-tt.cellTail.Terminated:
-			}
-			done()
-		}()
-	} else {
-		done()
+func (tt *topologyTransmogrifierInner) Init(self *actor.Actor) (bool, error) {
+	terminate, err := tt.BasicServerInner.Init(self)
+	if terminate || err != nil {
+		return terminate, err
 	}
-}
 
-func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
+	tt.Mailbox = self.Mailbox
+	tt.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
+
+	tt.connectionManager.AddServerConnectionSubscriber(tt.TopologyTransmogrifier)
+
 	subscriberInstalled := make(chan struct{})
 	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var) {
 		if v == nil {
@@ -209,8 +103,11 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 					if err != nil {
 						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 					}
-					server.DebugLog(tt.logger, "debug", "Observation enqueued.", "topology", topology)
-					tt.enqueueQuery(topologyTransmogrifierMsgTopologyObserved{topology: topology})
+					server.DebugLog(tt.inner.Logger, "debug", "Observation enqueued.", "topology", topology)
+					tt.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
+						TopologyTransmogrifier: tt.TopologyTransmogrifier,
+						topology:               topology,
+					})
 				},
 				Cancel: func(v *eng.Var) {
 					panic("Subscriber on topology var has been cancelled!")
@@ -220,120 +117,240 @@ func (tt *TopologyTransmogrifier) actorLoop(head *cc.ChanCellHead) {
 	}, true, configuration.TopologyVarUUId)
 	<-subscriberInstalled
 
-	var (
-		err       error
-		queryChan <-chan topologyTransmogrifierMsg
-		queryCell *cc.ChanCell
-		oldTask   topologyTask
-	)
-	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = tt.queryChan, cell }
-	head.WithCell(chanFun)
+	return false, nil
+}
 
-	terminate := err != nil
-	for !terminate {
-		if oldTask != tt.task {
-			oldTask = tt.task
-			if oldTask != nil {
-				err = oldTask.tick()
-				terminate = err != nil
-			}
-		} else if msg, ok := <-queryChan; ok {
-			switch msgT := msg.(type) {
-			case topologyTransmogrifierMsgShutdown:
-				terminate = true
-			case topologyTransmogrifierMsgSetActiveConnections:
-				err = tt.activeConnectionsChange(msgT.servers)
-				if msgT.done != nil {
-					msgT.done()
-				}
-			case topologyTransmogrifierMsgTopologyObserved:
-				server.DebugLog(tt.logger, "debug", "New topology observed.", "topology", msgT.topology)
-				err = tt.setActive(msgT.topology)
-			case topologyTransmogrifierMsgRequestConfigChange:
-				server.DebugLog(tt.logger, "debug", "Topology change request.", "config", msgT.config)
-				nonFatalErr := tt.selectGoal(&configuration.NextConfiguration{Configuration: msgT.config})
-				// because this is definitely not the cmd-line config, an error here is non-fatal
-				if nonFatalErr != nil {
-					tt.logger.Log("msg", "Ignoring requested configuration change.", "error", err)
-				}
-			case topologyTransmogrifierMsgMigration:
-				err = tt.migrationReceived(msgT)
-			case topologyTransmogrifierMsgMigrationComplete:
-				err = tt.migrationCompleteReceived(msgT)
-			case topologyTransmogrifierMsgExe:
-				err = msgT()
-			default:
-				err = fmt.Errorf("Fatal to TopologyTransmogrifier: Received unexpected message: %#v", msgT)
-			}
-			terminate = terminate || err != nil
-		} else {
-			head.Next(queryCell, chanFun)
-		}
+func (tt *topologyTransmogrifierInner) HandleBeat() (terminate bool, err error) {
+	for tt.currentTask != nil && tt.previousTask != tt.currentTask && !terminate && err == nil {
+		tt.previousTask = tt.currentTask
+		terminate, err = tt.currentTask.Tick()
+	}
+	return
+}
+
+func (tt *topologyTransmogrifierInner) HandleShutdown(err error) bool {
+	tt.connectionManager.RemoveServerConnectionSubscriber(tt.TopologyTransmogrifier)
+	if tt.localEstablished != nil {
+		close(tt.localEstablished)
+		tt.localEstablished = nil
 	}
 	if err != nil {
-		if tt.localEstablished != nil {
-			close(tt.localEstablished)
-			tt.localEstablished = nil
-		}
-		tt.logger.Log("msg", "Fatal error.", "error", err)
+		tt.inner.Logger.Log("msg", "Fatal error.", "error", err)
 		tt.shutdownSignaller.SignalShutdown()
 	}
-	tt.connectionManager.RemoveServerConnectionSubscriber(tt)
-	tt.cellTail.Terminate()
+	return tt.BasicServerInner.HandleShutdown(err)
 }
 
-func (tt *TopologyTransmogrifier) activeConnectionsChange(conns map[common.RMId]paxos.Connection) error {
-	tt.activeConnections = conns
-
-	tt.hostToConnection = make(map[string]paxos.Connection, len(conns))
-	for _, cd := range conns {
-		tt.hostToConnection[cd.Host()] = cd
-	}
-
-	if tt.task != nil {
-		return tt.task.tick()
-	}
-	return nil
+type topologyTransmogrifierMsgRequestConfigChange struct {
+	*TopologyTransmogrifier
+	config *configuration.Configuration
 }
 
-func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) error {
-	server.DebugLog(tt.logger, "debug", "SetActive.", "topology", topology)
+func (msg *topologyTransmogrifierMsgRequestConfigChange) Exec() (bool, error) {
+	server.DebugLog(msg.inner.Logger, "debug", "Topology change request.", "config", msg.config)
+	nonFatalErr := msg.selectGoal(&configuration.NextConfiguration{Configuration: msg.config})
+	// because this is definitely not the cmd-line config, an error here is non-fatal
+	if nonFatalErr != nil {
+		msg.inner.Logger.Log("msg", "Ignoring requested configuration change.", "error", nonFatalErr)
+	}
+	return false, nil
+}
+
+func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configuration.Configuration) {
+	tt.EnqueueMsg(topologyTransmogrifierMsgRequestConfigChange{TopologyTransmogrifier: tt, config: config})
+}
+
+type topologyTransmogrifierMsgMigrationReceived struct {
+	*TopologyTransmogrifier
+	migration *msgs.Migration
+	sender    common.RMId
+}
+
+func (msg topologyTransmogrifierMsgMigrationReceived) Exec() (bool, error) {
+	version := msg.migration.Version()
+	if version <= msg.active.Version {
+		// This topology change has been completed. Ignore this migration.
+		return false, nil
+	} else if next := msg.active.NextConfiguration; next != nil {
+		if version < next.Version {
+			// Whatever change that was for, it isn't happening any
+			// more. Ignore.
+			return false, nil
+		} else if _, found := next.Pending[msg.connectionManager.RMId]; version == next.Version && !found {
+			// Migration is for the current topology change, but we've
+			// declared ourselves done, so Ignore.
+			return false, nil
+		}
+	}
+
+	senders, found := msg.migrations[version]
+	if !found {
+		senders = make(map[common.RMId]*int32)
+		msg.migrations[version] = senders
+	}
+	sender := msg.sender
+	inprogressPtr, found := senders[sender]
+	if found {
+		atomic.AddInt32(inprogressPtr, 1)
+	} else {
+		inprogress := int32(2)
+		inprogressPtr = &inprogress
+		senders[sender] = inprogressPtr
+	}
+	txnCount := int32(msg.migration.Elems().Len())
+	lsc := msg.newTxnLSC(txnCount, inprogressPtr)
+	msg.connectionManager.Dispatchers.ProposerDispatcher.ImmigrationReceived(msg.migration, lsc)
+	return false, nil
+}
+
+func (tt *TopologyTransmogrifier) MigrationReceived(sender common.RMId, migration *msgs.Migration) {
+	tt.EnqueueMsg(topologyTransmogrifierMsgMigrationReceived{
+		TopologyTransmogrifier: tt,
+		migration:              migration,
+		sender:                 sender,
+	})
+}
+
+type topologyTransmogrifierMsgMigrationComplete struct {
+	*TopologyTransmogrifier
+	complete *msgs.MigrationComplete
+	sender   common.RMId
+}
+
+func (msg topologyTransmogrifierMsgMigrationComplete) Exec() (bool, error) {
+	version := msg.complete.Version()
+	sender := msg.sender
+	server.DebugLog(msg.inner.Logger, "debug", "MCR received.", "sender", sender, "version", version)
+	senders, found := msg.migrations[version]
+	if !found {
+		if version > msg.active.Version {
+			senders = make(map[common.RMId]*int32)
+			msg.migrations[version] = senders
+		} else {
+			return false, nil
+		}
+	}
+	inprogress := int32(0)
+	if inprogressPtr, found := senders[sender]; found {
+		inprogress = atomic.AddInt32(inprogressPtr, -1)
+	} else {
+		inprogressPtr = &inprogress
+		senders[sender] = inprogressPtr
+	}
+	// race here?!
+	if inprogress == 0 {
+		return msg.maybeTick()
+	}
+	return false, nil
+}
+
+func (tt *TopologyTransmogrifier) MigrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) {
+	tt.EnqueueMsg(topologyTransmogrifierMsgMigrationComplete{
+		TopologyTransmogrifier: tt,
+		complete:               migrationComplete,
+		sender:                 sender,
+	})
+}
+
+type topologyTransmogrifierMsgSetActiveConnections struct {
+	actor.MsgSyncQuery
+	*TopologyTransmogrifier
+	servers map[common.RMId]paxos.Connection
+}
+
+func (msg *topologyTransmogrifierMsgSetActiveConnections) Exec() (bool, error) {
+	defer msg.MustClose()
+	msg.activeConnections = msg.servers
+
+	msg.hostToConnection = make(map[string]paxos.Connection, len(msg.activeConnections))
+	for _, cd := range msg.activeConnections {
+		msg.hostToConnection[cd.Host()] = cd
+	}
+
+	return msg.maybeTick()
+}
+
+func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
+	msg.InitMsg(tt)
+	tt.EnqueueMsg(msg)
+}
+
+func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
+	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
+	msg.InitMsg(tt)
+	tt.EnqueueMsg(msg)
+}
+
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
+	msg.InitMsg(tt)
+	if tt.EnqueueMsg(msg) {
+		go func() {
+			msg.Wait()
+			done()
+		}()
+	} else {
+		done()
+	}
+}
+
+type topologyTransmogrifierMsgTopologyObserved struct {
+	*TopologyTransmogrifier
+	topology *configuration.Topology
+}
+
+func (msg topologyTransmogrifierMsgTopologyObserved) Exec() (bool, error) {
+	server.DebugLog(msg.inner.Logger, "debug", "New topology observed.", "topology", msg.topology)
+	return msg.setActive(msg.topology)
+}
+
+func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
+	if tt.currentTask == nil {
+		return false, nil
+	} else {
+		return tt.currentTask.Tick()
+	}
+}
+
+func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) (bool, error) {
+	server.DebugLog(tt.inner.Logger, "debug", "SetActive.", "topology", topology)
 	if tt.active != nil {
 		switch {
 		case tt.active.ClusterId != topology.ClusterId && tt.active.ClusterId != "":
-			return fmt.Errorf("Topology: Fatal: config with ClusterId change from '%s' to '%s'.",
+			return false, fmt.Errorf("Topology: Fatal: config with ClusterId change from '%s' to '%s'.",
 				tt.active.ClusterId, topology.ClusterId)
 
 		case topology.Version < tt.active.Version:
-			tt.logger.Log("msg", "Ignoring config with version less than active version.",
+			tt.inner.Logger.Log("msg", "Ignoring config with version less than active version.",
 				"goalVersion", topology.Version, "activeVersion", tt.active.Version)
-			return nil
+			return false, nil
 
 		case tt.active.Configuration.Equal(topology.Configuration):
 			// silently ignore it
-			return nil
+			return false, nil
 		}
 	}
 
 	if _, found := topology.RMsRemoved[tt.connectionManager.RMId]; found {
-		return errors.New("We have been removed from the cluster. Shutting down.")
+		return false, errors.New("We have been removed from the cluster. Shutting down.")
 	}
 	tt.active = topology
 
-	if tt.task != nil {
-		if err := tt.task.tick(); err != nil {
-			return err
+	if tt.currentTask != nil {
+		if terminate, err := tt.currentTask.Tick(); terminate || err != nil {
+			return terminate, err
 		}
 	}
 
-	if tt.task == nil {
+	if tt.currentTask == nil {
 		if next := topology.NextConfiguration; next == nil {
 			localHost, remoteHosts, err := tt.active.LocalRemoteHosts(tt.listenPort)
 			if err != nil {
-				return err
+				return false, err
 			}
 			tt.installTopology(topology, nil, localHost, remoteHosts)
-			tt.logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.connectionManager.RMId)
+			tt.inner.Logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.connectionManager.RMId)
 
 			future := tt.db.WithEnv(func(env *mdb.Env) (interface{}, error) {
 				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
@@ -346,30 +363,30 @@ func (tt *TopologyTransmogrifier) setActive(topology *configuration.Topology) er
 
 			_, err = future.ResultError()
 			if err != nil {
-				return err
+				return false, err
 			}
 
 		} else {
-			return tt.selectGoal(next)
+			return false, tt.selectGoal(next)
 		}
 	}
-	return nil
+	return false, nil
 }
 
-func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func() error, localHost string, remoteHosts []string) {
-	server.DebugLog(tt.logger, "debug", "Installing topology to connection manager, et al.", "topology", topology)
+func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func() (bool, error), localHost string, remoteHosts []string) {
+	server.DebugLog(tt.inner.Logger, "debug", "Installing topology to connection manager, et al.", "topology", topology)
 	if tt.localEstablished != nil {
 		if callbacks == nil {
-			callbacks = make(map[eng.TopologyChangeSubscriberType]func() error)
+			callbacks = make(map[eng.TopologyChangeSubscriberType]func() (bool, error))
 		}
 		origFun := callbacks[eng.ConnectionManagerSubscriber]
-		callbacks[eng.ConnectionManagerSubscriber] = func() error {
+		callbacks[eng.ConnectionManagerSubscriber] = func() (bool, error) {
 			if tt.localEstablished != nil {
 				close(tt.localEstablished)
 				tt.localEstablished = nil
 			}
 			if origFun == nil {
-				return nil
+				return false, nil
 			} else {
 				return origFun()
 			}
@@ -378,7 +395,7 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 	wrapped := make(map[eng.TopologyChangeSubscriberType]func(), len(callbacks))
 	for subType, cb := range callbacks {
 		cbCopy := cb
-		wrapped[subType] = func() { tt.enqueueQuery(topologyTransmogrifierMsgExe(cbCopy)) }
+		wrapped[subType] = func() { tt.EnqueueFuncAsync(cbCopy) }
 	}
 	tt.connectionManager.SetTopology(topology, wrapped, localHost, remoteHosts)
 }
@@ -406,7 +423,7 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 				goal.Version, tt.active.Version)
 
 		case goal.Configuration.EqualExternally(tt.active.Configuration):
-			tt.logger.Log("msg", "Config transition completed.", "activeVersion", goal.Version)
+			tt.inner.Logger.Log("msg", "Config transition completed.", "activeVersion", goal.Version)
 			return nil
 
 		case goal.Version == tt.active.Version:
@@ -414,8 +431,8 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 		}
 	}
 
-	if tt.task != nil {
-		existingGoal := tt.task.goal()
+	if tt.currentTask != nil {
+		existingGoal := tt.currentTask.Goal()
 		switch {
 		case goal.ClusterId != existingGoal.ClusterId:
 			return fmt.Errorf("Illegal config change: ClusterId should be '%s' instead of '%s'.",
@@ -426,22 +443,22 @@ func (tt *TopologyTransmogrifier) selectGoal(goal *configuration.NextConfigurati
 				goal.Version, existingGoal.Version)
 
 		case goal.Configuration.EqualExternally(existingGoal.Configuration):
-			tt.logger.Log("msg", "Config transition already in progress.", "goalVersion", goal.Version)
+			tt.inner.Logger.Log("msg", "Config transition already in progress.", "goalVersion", goal.Version)
 			return nil
 
 		case goal.Version == existingGoal.Version:
 			return fmt.Errorf("Illegal config change: Config has changed but Version has not been increased (%v). Ignoring.", goal.Version)
 
 		default:
-			server.DebugLog(tt.logger, "debug", "Abandoning old task.")
-			tt.task.abandon()
-			tt.task = nil
+			server.DebugLog(tt.inner.Logger, "debug", "Abandoning old task.")
+			tt.currentTask.Abandon()
+			tt.currentTask = nil
 		}
 	}
 
-	if tt.task == nil {
-		server.DebugLog(tt.logger, "debug", "Creating new task.")
-		tt.task = &targetConfig{
+	if tt.currentTask == nil {
+		server.DebugLog(tt.inner.Logger, "debug", "Creating new task.")
+		tt.currentTask = &targetConfig{
 			TopologyTransmogrifier: tt,
 			config:                 goal,
 		}
@@ -454,18 +471,18 @@ func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask, tc *targetConfi
 		tc.tickEnqueued = true
 		tc.createOrAdvanceBackoff()
 		tc.backoff.After(func() {
-			tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			tt.EnqueueFuncAsync(func() (bool, error) {
 				tc.tickEnqueued = false
-				if tt.task == task {
-					return tt.task.tick()
+				if tt.currentTask == task {
+					return tt.currentTask.Tick()
 				}
-				return nil
-			}))
+				return false, nil
+			})
 		})
 	}
 }
 
-func (tt *TopologyTransmogrifier) maybeTick(task topologyTask, tc *targetConfig) func() bool {
+func (tt *TopologyTransmogrifier) maybeTick2(task topologyTask, tc *targetConfig) func() bool {
 	var i uint32 = 0
 	closer := func() bool {
 		return atomic.CompareAndSwapUint32(&i, 0, 1)
@@ -474,76 +491,12 @@ func (tt *TopologyTransmogrifier) maybeTick(task topologyTask, tc *targetConfig)
 		if !closer() {
 			return
 		}
-		tt.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+		tt.EnqueueFuncAsync(func() (bool, error) {
 			tt.enqueueTick(task, tc)
-			return nil
-		}))
+			return false, nil
+		})
 	})
 	return closer
-}
-
-func (tt *TopologyTransmogrifier) migrationReceived(migration topologyTransmogrifierMsgMigration) error {
-	version := migration.migration.Version()
-	if version <= tt.active.Version {
-		// This topology change has been completed. Ignore this migration.
-		return nil
-	} else if next := tt.active.NextConfiguration; next != nil {
-		if version < next.Version {
-			// Whatever change that was for, it isn't happening any
-			// more. Ignore.
-			return nil
-		} else if _, found := next.Pending[tt.connectionManager.RMId]; version == next.Version && !found {
-			// Migration is for the current topology change, but we've
-			// declared ourselves done, so Ignore.
-			return nil
-		}
-	}
-
-	senders, found := tt.migrations[version]
-	if !found {
-		senders = make(map[common.RMId]*int32)
-		tt.migrations[version] = senders
-	}
-	sender := migration.sender
-	inprogressPtr, found := senders[sender]
-	if found {
-		atomic.AddInt32(inprogressPtr, 1)
-	} else {
-		inprogress := int32(2)
-		inprogressPtr = &inprogress
-		senders[sender] = inprogressPtr
-	}
-	txnCount := int32(migration.migration.Elems().Len())
-	lsc := tt.newTxnLSC(txnCount, inprogressPtr)
-	tt.connectionManager.Dispatchers.ProposerDispatcher.ImmigrationReceived(migration.migration, lsc)
-	return nil
-}
-
-func (tt *TopologyTransmogrifier) migrationCompleteReceived(migrationComplete topologyTransmogrifierMsgMigrationComplete) error {
-	version := migrationComplete.complete.Version()
-	sender := migrationComplete.sender
-	server.DebugLog(tt.logger, "debug", "MCR received.", "sender", sender, "version", version)
-	senders, found := tt.migrations[version]
-	if !found {
-		if version > tt.active.Version {
-			senders = make(map[common.RMId]*int32)
-			tt.migrations[version] = senders
-		} else {
-			return nil
-		}
-	}
-	inprogress := int32(0)
-	if inprogressPtr, found := senders[sender]; found {
-		inprogress = atomic.AddInt32(inprogressPtr, -1)
-	} else {
-		inprogressPtr = &inprogress
-		senders[sender] = inprogressPtr
-	}
-	// race here?!
-	if tt.task != nil && inprogress == 0 {
-		return tt.task.tick()
-	}
-	return nil
 }
 
 func (tt *TopologyTransmogrifier) newTxnLSC(txnCount int32, inprogressPtr *int32) eng.TxnLocalStateChange {
@@ -569,12 +522,12 @@ func (mtlsc *migrationTxnLocalStateChange) TxnLocallyComplete(txn *eng.Txn) {
 	txn.CompletionReceived()
 	if atomic.AddInt32(&mtlsc.pendingLocallyComplete, -1) == 0 &&
 		atomic.AddInt32(mtlsc.inprogressPtr, -1) == 0 {
-		mtlsc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
-			if mtlsc.task != nil {
-				return mtlsc.task.tick()
+		mtlsc.EnqueueFuncAsync(func() (bool, error) {
+			if mtlsc.currentTask != nil {
+				return mtlsc.currentTask.Tick()
 			}
-			return nil
-		}))
+			return false, nil
+		})
 	}
 }
 
@@ -583,10 +536,9 @@ func (mtlsc *migrationTxnLocalStateChange) TxnFinished(*eng.Txn) {}
 // topologyTask
 
 type topologyTask interface {
-	tick() error
-	abandon()
-	goal() *configuration.NextConfiguration
-	witness() topologyTask
+	Tick() (bool, error)
+	Abandon()
+	Goal() *configuration.NextConfiguration
 }
 
 // targetConfig
@@ -599,46 +551,46 @@ type targetConfig struct {
 	tickEnqueued bool
 }
 
-func (task *targetConfig) tick() error {
+func (task *targetConfig) Tick() (bool, error) {
 	task.backoff = nil
 	task.tickEnqueued = false
 
 	switch {
 	case task.active == nil:
-		task.logger.Log("msg", "Ensuring local topology.")
-		task.task = &ensureLocalTopology{task}
+		task.inner.Logger.Log("msg", "Ensuring local topology.")
+		task.currentTask = &ensureLocalTopology{task}
 
 	case task.active.ClusterId == "":
-		task.logger.Log("msg", "Attempting to join cluster.", "configuration", task.config)
-		task.task = &joinCluster{targetConfig: task}
+		task.inner.Logger.Log("msg", "Attempting to join cluster.", "configuration", task.config)
+		task.currentTask = &joinCluster{targetConfig: task}
 
 	case task.active.NextConfiguration == nil || task.active.NextConfiguration.Version < task.config.Version:
-		task.logger.Log("msg", "Attempting to install topology change target.", "configuration", task.config)
-		task.task = &installTargetOld{targetConfig: task}
+		task.inner.Logger.Log("msg", "Attempting to install topology change target.", "configuration", task.config)
+		task.currentTask = &installTargetOld{targetConfig: task}
 
 	case task.active.NextConfiguration != nil && task.active.NextConfiguration.Version == task.config.Version:
 		if !task.active.NextConfiguration.InstalledOnNew {
-			task.logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", task.config)
-			task.task = &installTargetNew{targetConfig: task}
+			task.inner.Logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", task.config)
+			task.currentTask = &installTargetNew{targetConfig: task}
 
 		} else if !task.active.NextConfiguration.QuietRMIds[task.connectionManager.RMId] {
-			task.logger.Log("msg", "Waiting for quiet.", "configuration", task.config)
-			task.task = &quiet{targetConfig: task}
+			task.inner.Logger.Log("msg", "Waiting for quiet.", "configuration", task.config)
+			task.currentTask = &quiet{targetConfig: task}
 
 		} else if len(task.active.NextConfiguration.Pending) > 0 {
-			task.logger.Log("msg", "Attempting to perform object migration for topology target.", "configuration", task.config)
-			task.task = &migrate{targetConfig: task}
+			task.inner.Logger.Log("msg", "Attempting to perform object migration for topology target.", "configuration", task.config)
+			task.currentTask = &migrate{targetConfig: task}
 
 		} else {
-			task.logger.Log("msg", "Object migration completed, switching to new topology.", "configuration", task.config)
-			task.task = &installCompletion{targetConfig: task}
+			task.inner.Logger.Log("msg", "Object migration completed, switching to new topology.", "configuration", task.config)
+			task.currentTask = &installCompletion{targetConfig: task}
 		}
 
 	default:
-		return fmt.Errorf("Topology: Confused about what to do. Active topology is: %v; goal is %v",
+		return false, fmt.Errorf("Topology: Confused about what to do. Active topology is: %v; goal is %v",
 			task.active, task.config)
 	}
-	return nil
+	return false, nil
 }
 
 func (task *targetConfig) shareGoalWithAll() {
@@ -659,29 +611,28 @@ func (task *targetConfig) ensureRemoveTaskSender() {
 	}
 }
 
-func (task *targetConfig) abandon()                               { task.ensureRemoveTaskSender() }
-func (task *targetConfig) goal() *configuration.NextConfiguration { return task.config }
-func (task *targetConfig) witness() topologyTask                  { return task }
+func (task *targetConfig) Abandon()                               { task.ensureRemoveTaskSender() }
+func (task *targetConfig) Goal() *configuration.NextConfiguration { return task.config }
 
-func (task *targetConfig) fatal(err error) error {
+func (task *targetConfig) fatal(err error) (bool, error) {
 	task.ensureRemoveTaskSender()
-	task.task = nil
-	task.logger.Log("msg", "Fatal error.", "error", err)
-	return err
+	task.currentTask = nil
+	task.inner.Logger.Log("msg", "Fatal error.", "error", err)
+	return false, err
 }
 
-func (task *targetConfig) error(err error) error {
+func (task *targetConfig) error(err error) (bool, error) {
 	task.ensureRemoveTaskSender()
-	task.task = nil
-	task.logger.Log("msg", "Non-fatal error.", "error", err)
-	return nil
+	task.currentTask = nil
+	task.inner.Logger.Log("msg", "Non-fatal error.", "error", err)
+	return false, nil
 }
 
-func (task *targetConfig) completed() error {
+func (task *targetConfig) completed() (bool, error) {
 	task.ensureRemoveTaskSender()
-	task.logger.Log("msg", "Task completed.")
-	task.task = nil
-	return nil
+	task.inner.Logger.Log("msg", "Task completed.")
+	task.currentTask = nil
+	return false, nil
 }
 
 // NB filters out empty RMIds so no need to pre-filter.
@@ -698,7 +649,7 @@ func (task *targetConfig) formActivePassive(activeCandidates, extraPassives comm
 	}
 
 	if len(active) <= len(passive) {
-		task.logger.Log("msg", "Can not make progress at this time due to too many failures.",
+		task.inner.Logger.Log("msg", "Can not make progress at this time due to too many failures.",
 			"failures", fmt.Sprint(passive))
 		return nil, nil
 	}
@@ -776,12 +727,12 @@ type ensureLocalTopology struct {
 	*targetConfig
 }
 
-func (task *ensureLocalTopology) tick() error {
+func (task *ensureLocalTopology) Tick() (bool, error) {
 	if task.active != nil {
 		// The fact we're here means we're done - there is a topology
 		// discovered one way or another.
-		if err := task.completed(); err != nil {
-			return err
+		if terminate, err := task.completed(); terminate || err != nil {
+			return terminate, err
 		}
 		if task.config.Configuration == nil {
 			// There was no config supplied on the command line, so just
@@ -791,11 +742,11 @@ func (task *ensureLocalTopology) tick() error {
 		// However, just because we have a local config doesn't mean it
 		// actually satisfies the goal, so we now need to reevaluate our
 		// goal versus our loaded config.
-		return task.selectGoal(task.config)
+		return false, task.selectGoal(task.config)
 	}
 
 	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
-		return nil
+		return false, nil
 	}
 
 	topology, err := task.getTopologyFromLocalDatabase()
@@ -812,7 +763,7 @@ func (task *ensureLocalTopology) tick() error {
 			return task.fatal(err)
 		}
 		// if err == nil, the create succeeded, so wait for observation
-		return nil
+		return false, nil
 	} else {
 		// It's already on disk, we're not going to see it through the subscriber.
 		return task.setActive(topology)
@@ -825,15 +776,15 @@ type joinCluster struct {
 	*targetConfig
 }
 
-func (task *joinCluster) tick() error {
+func (task *joinCluster) Tick() (bool, error) {
 	if !(task.active.ClusterId == "") {
-		if err := task.completed(); err != nil {
-			return err
+		if terminate, err := task.completed(); terminate || err != nil {
+			return terminate, err
 		}
 		// Exactly the same logic as in ensureLocalTopology: the active
 		// probably doesn't have a Next set; even if it does, it may
 		// have no relationship to task.config.
-		return task.selectGoal(task.config)
+		return false, task.selectGoal(task.config)
 	}
 
 	localHost, remoteHosts, err := task.config.LocalRemoteHosts(task.listenPort)
@@ -867,7 +818,7 @@ func (task *joinCluster) tick() error {
 		if !found {
 			// We can only continue at this point if we really are
 			// connected to everyone mentioned in the config.
-			return nil
+			return false, nil
 		}
 		rmIds = append(rmIds, cd.RMId())
 		switch theirClusterUUId := cd.ClusterUUId(); {
@@ -893,12 +844,12 @@ func (task *joinCluster) tick() error {
 		// learns of the change. The shareGoalWithAll() call above will
 		// ensure this happens.
 
-		task.logger.Log("msg", "Requesting help from existing cluster members for topology change.")
-		return nil
+		task.inner.Logger.Log("msg", "Requesting help from existing cluster members for topology change.")
+		return false, nil
 	}
 }
 
-func (task *joinCluster) allJoining(allRMIds common.RMIds) error {
+func (task *joinCluster) allJoining(allRMIds common.RMIds) (bool, error) {
 	// NB: active never gets installed to the DB itself.
 	config := task.config
 	config1 := configuration.BlankConfiguration()
@@ -923,82 +874,83 @@ type installTargetOld struct {
 	*targetConfig
 }
 
-func (task *installTargetOld) tick() error {
+func (task *installTargetOld) Tick() (bool, error) {
 	if next := task.active.NextConfiguration; !(next == nil || next.Version < task.config.Version) {
 		return task.completed()
 	}
 
 	if !task.isInRMs(task.active.RMs) {
 		task.shareGoalWithAll()
-		task.logger.Log("msg", "Awaiting existing cluster members.")
+		task.inner.Logger.Log("msg", "Awaiting existing cluster members.")
 		// this step must be performed by the existing RMs
-		return nil
+		return false, nil
 	}
 	// If we're in the old config, do not share with others just yet
 	// because we may well have more information (new connections) than
 	// the others so they might calculate different targets and then
 	// we'd be racing.
 
-	targetTopology, rootsRequired, err := task.calculateTargetTopology()
-	if err != nil || targetTopology == nil {
-		return err
+	targetTopology, rootsRequired, terminate, err := task.calculateTargetTopology()
+	if terminate || err != nil || targetTopology == nil {
+		return terminate, err
 	}
 
 	// Here, we just want to use the RMs in the old topology only.
 	// And add on all new (if there are any) as passives
 	active, passive := task.formActivePassive(task.active.RMs, targetTopology.NextConfiguration.NewRMIds)
 	if active == nil {
-		return nil
+		return false, nil
 	}
 
-	task.logger.Log("msg", "Calculated target topology.", "configuration", targetTopology.NextConfiguration,
+	task.inner.Logger.Log("msg", "Calculated target topology.", "configuration", targetTopology.NextConfiguration,
 		"newRoots", rootsRequired, "active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	if rootsRequired != 0 {
 		go func() {
-			closer := task.maybeTick(task, task.targetConfig)
+			closer := task.maybeTick2(task, task.targetConfig)
 			resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
 			if !closer() {
 				return
 			}
-			task.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+			task.EnqueueFuncAsync(func() (bool, error) {
 				switch {
-				case task.task != task:
-					return nil
+				case task.currentTask != task:
+					return false, nil
 
 				case err != nil:
 					return task.fatal(err)
 
 				case resubmit:
 					task.enqueueTick(task, task.targetConfig)
-					return nil
+					return false, nil
 
 				default:
 					targetTopology.RootVarUUIds = append(targetTopology.RootVarUUIds, roots...)
 					return task.installTargetOld(targetTopology, active, passive)
 				}
-			}))
+			})
 		}()
 	} else {
 		return task.installTargetOld(targetTopology, active, passive)
 	}
-	return nil
+	return false, nil
 }
 
-func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology, active, passive common.RMIds) error {
+func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology, active, passive common.RMIds) (bool, error) {
 	// We use all the nodes in the old cluster as potential
 	// acceptors. We will require a majority of them are alive, which
 	// we've checked once above.
 	twoFInc := uint16(task.active.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.active, targetTopology, twoFInc, active, passive)
 	go task.runTopologyTransaction(task, txn, active, passive)
-	return nil
+	return false, nil
 }
 
-func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, int, error) {
+func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, int, bool, error) {
 	localHost, err := task.firstLocalHost(task.active.Configuration)
 	if err != nil {
-		return nil, 0, task.fatal(err)
+		terminate, err := task.fatal(err)
+		return nil, 0, terminate, err
 	}
 
 	hostsSurvived, hostsRemoved, hostsAdded :=
@@ -1039,9 +991,10 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	hostsAddedList := allRemoteHosts[len(hostsOld)-1:]
 	allAddedFound, err := task.verifyClusterUUIds(task.active.ClusterUUId, hostsAddedList)
 	if err != nil {
-		return nil, 0, task.error(err)
+		terminate, err := task.error(err)
+		return nil, 0, terminate, err
 	} else if !allAddedFound {
-		return nil, 0, nil
+		return nil, 0, false, nil
 	}
 
 	// map(old -> new)
@@ -1059,7 +1012,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	for host := range hostsAdded {
 		cd, found := task.hostToConnection[host]
 		if !found {
-			return nil, 0, nil
+			return nil, 0, false, nil
 		}
 		hostsAdded[host] = cd
 		connsAdded = append(connsAdded, cd)
@@ -1184,9 +1137,9 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// ClusterUUId is non-0 and consistent down the chain. Of course,
 	// the txn will ensure only one such rewrite will win.
 	targetTopology.EnsureClusterUUId(0)
-	server.DebugLog(task.logger, "debug", "Set cluster uuid.", "uuid", targetTopology.ClusterUUId)
+	server.DebugLog(task.inner.Logger, "debug", "Set cluster uuid.", "uuid", targetTopology.ClusterUUId)
 
-	return targetTopology, rootsRequired, nil
+	return targetTopology, rootsRequired, false, nil
 }
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
@@ -1231,7 +1184,7 @@ type installTargetNew struct {
 	*targetConfig
 }
 
-func (task *installTargetNew) tick() error {
+func (task *installTargetNew) Tick() (bool, error) {
 	next := task.active.NextConfiguration
 	if !(next != nil && next.Version == task.config.Version && !next.InstalledOnNew) {
 		return task.completed()
@@ -1247,9 +1200,9 @@ func (task *installTargetNew) tick() error {
 	task.shareGoalWithAll()
 
 	if !task.isInRMs(next.NewRMIds) {
-		task.logger.Log("msg", "Awaiting new cluster members.")
+		task.inner.Logger.Log("msg", "Awaiting new cluster members.")
 		// this step must be performed by the new RMs
-		return nil
+		return false, nil
 	}
 
 	// From this point onwards, we have the possibility that some
@@ -1259,12 +1212,12 @@ func (task *installTargetNew) tick() error {
 	// them to be alive; and we use the removed RMs as extra passives.
 	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 	if active == nil {
-		return nil
+		return false, nil
 	}
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
-	task.logger.Log("msg", "Installing on new cluster members.",
+	task.inner.Logger.Log("msg", "Installing on new cluster members.",
 		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	topology := task.active.Clone()
@@ -1272,7 +1225,7 @@ func (task *installTargetNew) tick() error {
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 	go task.runTopologyTransaction(task, txn, active, passive)
-	return nil
+	return false, nil
 }
 
 // quiet
@@ -1283,9 +1236,7 @@ type quiet struct {
 	stage      uint8
 }
 
-func (task *quiet) witness() topologyTask { return task.targetConfig.witness() }
-
-func (task *quiet) tick() error {
+func (task *quiet) Tick() (bool, error) {
 	// The purpose of getting the vars to go quiet isn't just for
 	// emigration; it's also to require that txn outcomes are decided
 	// (consensus reached) before any acceptors get booted out. So we
@@ -1307,47 +1258,39 @@ func (task *quiet) tick() error {
 	if activeNextConfig != task.installing {
 		task.installing = activeNextConfig
 		task.stage = 0
-		task.logger.Log("msg", "Quiet: new target topology detected; restarting.")
+		task.inner.Logger.Log("msg", "Quiet: new target topology detected; restarting.")
 	}
 
 	switch task.stage {
 	case 0, 2:
-		task.logger.Log("msg", fmt.Sprintf("Quiet: installing on to Proposers (%d of 3).", task.stage+1))
+		task.inner.Logger.Log("msg", fmt.Sprintf("Quiet: installing on to Proposers (%d of 3).", task.stage+1))
 		// 0: Install to the proposerManagers. Once we know this is on
 		// all our proposerManagers, we know that they will stop
 		// accepting client txns.
 		// 2: Install to the proposers again. This is to ensure that
 		// TLCs have been written to disk.
-		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.ProposerSubscriber: func() error {
+		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() (bool, error){
+			eng.ProposerSubscriber: func() (bool, error) {
 				if activeNextConfig == task.installing {
 					if task.stage == 0 || task.stage == 2 {
 						task.stage++
 					}
 				}
-				if task.task == nil {
-					return nil
-				} else {
-					return task.task.tick()
-				}
+				return task.maybeTick()
 			},
 		}, localHost, remoteHosts)
 
 	case 1:
-		task.logger.Log("msg", "Quiet: installing on to Vars (2 of 3).")
+		task.inner.Logger.Log("msg", "Quiet: installing on to Vars (2 of 3).")
 		// 1: Install to the varManagers. They only confirm back to us
 		// once they've banned rolls, and ensured all active txns are
 		// completed (though the TLC may not have gone to disk yet).
-		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() error{
-			eng.VarSubscriber: func() error {
+		task.installTopology(task.active, map[eng.TopologyChangeSubscriberType]func() (bool, error){
+			eng.VarSubscriber: func() (bool, error) {
 				if activeNextConfig == task.installing && task.stage == 1 {
 					task.stage = 2
 				}
-				if task.task == nil {
-					return nil
-				} else {
-					return task.task.tick()
-				}
+				return task.maybeTick()
 			},
 		}, localHost, remoteHosts)
 
@@ -1355,12 +1298,12 @@ func (task *quiet) tick() error {
 		// Now run a txn to record this.
 		active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 		if active == nil {
-			return nil
+			return false, nil
 		}
 
 		twoFInc := uint16(next.RMs.NonEmptyLen())
 
-		task.logger.Log("msg", "Quiet achieved, recording progress.", "pending", next.Pending,
+		task.inner.Logger.Log("msg", "Quiet achieved, recording progress.", "pending", next.Pending,
 			"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 		topology := task.active.Clone()
@@ -1374,7 +1317,7 @@ func (task *quiet) tick() error {
 	}
 
 	task.shareGoalWithAll()
-	return nil
+	return false, nil
 }
 
 // migrate
@@ -1384,15 +1327,13 @@ type migrate struct {
 	emigrator *emigrator
 }
 
-func (task *migrate) witness() topologyTask { return task.targetConfig.witness() }
-
-func (task *migrate) tick() error {
+func (task *migrate) Tick() (bool, error) {
 	next := task.active.NextConfiguration
 	if !(next != nil && next.Version == task.config.Version && len(next.Pending) > 0) {
 		return task.completed()
 	}
 
-	task.logger.Log("msg", "Migration: all quiet, ready to attempt migration.")
+	task.inner.Logger.Log("msg", "Migration: all quiet, ready to attempt migration.")
 
 	// By this point, we know that our vars can be safely
 	// migrated. They can still learn from other txns going on, but,
@@ -1407,13 +1348,13 @@ func (task *migrate) tick() error {
 	}
 
 	if _, found := next.Pending[task.connectionManager.RMId]; !found {
-		task.logger.Log("msg", "All migration into all this RM completed. Awaiting others.")
-		return nil
+		task.inner.Logger.Log("msg", "All migration into all this RM completed. Awaiting others.")
+		return false, nil
 	}
 
 	senders, found := task.migrations[next.Version]
 	if !found {
-		return nil
+		return false, nil
 	}
 	maxSuppliers := task.active.RMs.NonEmptyLen() - int(task.active.F)
 	if task.isInRMs(task.active.RMs) {
@@ -1432,32 +1373,32 @@ func (task *migrate) tick() error {
 	// We track progress by updating the topology to remove RMs who
 	// have completed sending to us.
 	if !changed {
-		return nil
+		return false, nil
 	}
 
 	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 	if active == nil {
-		return nil
+		return false, nil
 	}
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 
-	task.logger.Log("msg", "Recording local immigration progress.", "pending", next.Pending,
+	task.inner.Logger.Log("msg", "Recording local immigration progress.", "pending", next.Pending,
 		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 	go task.runTopologyTransaction(task, txn, active, passive)
 
 	task.shareGoalWithAll()
-	return nil
+	return false, nil
 }
 
-func (task *migrate) abandon() {
+func (task *migrate) Abandon() {
 	task.ensureStopEmigrator()
-	task.targetConfig.abandon()
+	task.targetConfig.Abandon()
 }
 
-func (task *migrate) completed() error {
+func (task *migrate) completed() (bool, error) {
 	task.ensureStopEmigrator()
 	return task.targetConfig.completed()
 }
@@ -1481,16 +1422,16 @@ type installCompletion struct {
 	*targetConfig
 }
 
-func (task *installCompletion) tick() error {
+func (task *installCompletion) Tick() (bool, error) {
 	next := task.active.NextConfiguration
 	if next == nil {
-		task.logger.Log("msg", "Completion installed.")
+		task.inner.Logger.Log("msg", "Completion installed.")
 		return task.completed()
 	}
 
 	if _, found := next.RMsRemoved[task.connectionManager.RMId]; found {
-		task.logger.Log("msg", "We've been removed from cluster. Taking no further part.")
-		return nil
+		task.inner.Logger.Log("msg", "We've been removed from cluster. Taking no further part.")
+		return false, nil
 	}
 
 	noisyCount := 0
@@ -1498,9 +1439,9 @@ func (task *installCompletion) tick() error {
 		if _, found := next.QuietRMIds[rmId]; !found {
 			noisyCount++
 			if noisyCount > int(task.active.F) {
-				task.logger.Log("msg", "Awaiting more original RMIds to become quiet.",
+				task.inner.Logger.Log("msg", "Awaiting more original RMIds to become quiet.",
 					"originals", fmt.Sprint(task.active.RMs))
-				return nil
+				return false, nil
 			}
 		}
 	}
@@ -1516,7 +1457,7 @@ func (task *installCompletion) tick() error {
 
 	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 	if active == nil {
-		return nil
+		return false, nil
 	}
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
@@ -1533,35 +1474,35 @@ func (task *installCompletion) tick() error {
 
 	txn := task.createTopologyTransaction(task.active, topology, twoFInc, active, passive)
 	go task.runTopologyTransaction(task, txn, active, passive)
-	return nil
+	return false, nil
 }
 
 // utils
 
 func (tc *targetConfig) runTopologyTransaction(task topologyTask, txn *msgs.Txn, active, passive common.RMIds) {
-	closer := tc.maybeTick(task, tc)
+	closer := tc.maybeTick2(task, tc)
 	_, resubmit, err := tc.rewriteTopology(txn, active, passive)
 	if !closer() {
 		return
 	}
-	tc.enqueueQuery(topologyTransmogrifierMsgExe(func() error {
+	tc.EnqueueFuncAsync(func() (bool, error) {
 		switch {
-		case tc.task != task:
-			return nil
+		case tc.currentTask != task:
+			return false, nil
 
 		case err != nil:
 			return tc.fatal(err)
 
 		case resubmit:
 			tc.enqueueTick(task, tc)
-			return nil
+			return false, nil
 
 		default:
 			// Must be commit, or badread, which means again we should
 			// receive the updated topology through the subscriber.
-			return nil
+			return false, nil
 		}
-	}))
+	})
 }
 
 func (task *targetConfig) createTopologyTransaction(read, write *configuration.Topology, twoFInc uint16, active, passive common.RMIds) *msgs.Txn {
@@ -1719,18 +1660,18 @@ func (task *targetConfig) createTopologyZero(config *configuration.NextConfigura
 
 func (task *targetConfig) rewriteTopology(txn *msgs.Txn, active, passive common.RMIds) (bool, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
-	server.DebugLog(task.logger, "debug", "Running transaction.", "active", active, "passive", passive)
+	server.DebugLog(task.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := task.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
 		return false, false, err
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		server.DebugLog(task.logger, "debug", "Txn Committed.", "TxnId", txnId)
+		server.DebugLog(task.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
 		return true, false, nil
 	}
 	abort := result.Abort()
-	server.DebugLog(task.logger, "debug", "Txn Aborted.", "TxnId", txnId)
+	server.DebugLog(task.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
 		return false, true, nil
 	}
@@ -1766,7 +1707,7 @@ func (task *targetConfig) rewriteTopology(txn *msgs.Txn, active, passive common.
 }
 
 func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {
-	server.DebugLog(task.logger, "debug", "Creating Roots.", "count", rootCount)
+	server.DebugLog(task.inner.Logger, "debug", "Creating Roots.", "count", rootCount)
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
@@ -1786,7 +1727,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 	}
 	ctxn.SetActions(actions)
 	txnReader, result, err := task.localConnection.RunClientTransaction(&ctxn, false, nil, nil)
-	server.DebugLog(task.logger, "debug", "Created root.", "result", result, "error", err)
+	server.DebugLog(task.inner.Logger, "debug", "Created root.", "result", result, "error", err)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1808,7 +1749,7 @@ func (task *targetConfig) attemptCreateRoots(rootCount int) (bool, configuration
 			positions := action.Create().Positions()
 			root.Positions = (*common.Positions)(&positions)
 		}
-		server.DebugLog(task.logger, "debug", "Roots created.", "roots", roots)
+		server.DebugLog(task.inner.Logger, "debug", "Roots created.", "roots", roots)
 		return false, roots, nil
 	}
 	if result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT {
@@ -1831,7 +1772,7 @@ type emigrator struct {
 
 func newEmigrator(task *migrate) *emigrator {
 	e := &emigrator{
-		logger:            task.logger,
+		logger:            task.inner.Logger,
 		db:                task.db,
 		connectionManager: task.connectionManager,
 		activeBatches:     make(map[common.RMId]*sendBatch),
