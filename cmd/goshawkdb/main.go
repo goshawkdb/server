@@ -244,7 +244,7 @@ func (s *server) start() {
 			s.maybeShutdown(err)
 		}
 		promListener := stats.NewPrometheusListener(promMux, cm, s.logger)
-		s.addOnShutdown(promListener.Shutdown)
+		s.addOnShutdown(promListener.ShutdownSync)
 	}
 
 	defer s.shutdown(nil)

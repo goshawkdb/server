@@ -3,10 +3,10 @@ package stats
 import (
 	"fmt"
 	"github.com/go-kit/kit/log"
-	cc "github.com/msackman/chancell"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
@@ -18,14 +18,13 @@ import (
 )
 
 type PrometheusListener struct {
-	logger              log.Logger
-	cellTail            *cc.ChanCellTail
-	enqueueQueryInner   func(prometheusListenerMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan           <-chan prometheusListenerMsg
+	*actor.Mailbox
+	*actor.BasicServerOuter
+
 	connectionManager   *network.ConnectionManager
 	mux                 *network.HttpListenerWithMux
 	topology            *configuration.Topology
-	topologyLock        *sync.RWMutex
+	topologyLock        sync.RWMutex
 	clientConnsVec      *prometheus.GaugeVec
 	serverConnsVec      *prometheus.GaugeVec
 	txnSubmitVec        *prometheus.CounterVec
@@ -36,157 +35,97 @@ type PrometheusListener struct {
 	acceptorsVec        *prometheus.GaugeVec
 	proposerLifespanVec *prometheus.HistogramVec
 	proposersVec        *prometheus.GaugeVec
+
+	inner prometheusListenerInner
 }
 
-type prometheusListenerMsg interface {
-	prometheusListenerMsgWitness()
-}
-
-type prometheusListenerMsgShutdown struct{}
-
-func (lms *prometheusListenerMsgShutdown) prometheusListenerMsgWitness() {}
-
-var prometheusListenerMsgShutdownInst = &prometheusListenerMsgShutdown{}
-
-func (l *PrometheusListener) Shutdown() {
-	if l.enqueueQuery(prometheusListenerMsgShutdownInst) {
-		l.cellTail.Wait()
-	}
-}
-
-type prometheusListenerMsgTopologyChanged struct {
-	topology   *configuration.Topology
-	resultChan chan struct{}
-}
-
-func (lmtc *prometheusListenerMsgTopologyChanged) prometheusListenerMsgWitness() {}
-
-func (lmtc *prometheusListenerMsgTopologyChanged) maybeClose() {
-	select {
-	case <-lmtc.resultChan:
-	default:
-		close(lmtc.resultChan)
-	}
-}
-
-func (l *PrometheusListener) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	msg := &prometheusListenerMsgTopologyChanged{
-		resultChan: make(chan struct{}),
-		topology:   topology,
-	}
-	if l.enqueueQuery(msg) {
-		go func() {
-			select {
-			case <-msg.resultChan:
-			case <-l.cellTail.Terminated:
-			}
-			done(true)
-		}()
-	} else {
-		done(true)
-	}
-}
-
-type prometheusListenerQueryCapture struct {
-	wl  *PrometheusListener
-	msg prometheusListenerMsg
-}
-
-func (wlqc *prometheusListenerQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-	return wlqc.wl.enqueueQueryInner(wlqc.msg, cell, wlqc.ccc)
-}
-
-func (l *PrometheusListener) enqueueQuery(msg prometheusListenerMsg) bool {
-	wlqc := &prometheusListenerQueryCapture{wl: l, msg: msg}
-	return l.cellTail.WithCell(wlqc.ccc)
+type prometheusListenerInner struct {
+	*PrometheusListener
+	*actor.BasicServerInner
 }
 
 func NewPrometheusListener(mux *network.HttpListenerWithMux, cm *network.ConnectionManager, logger log.Logger) *PrometheusListener {
-	l := &PrometheusListener{
-		logger:            log.With(logger, "subsystem", "prometheusListener"),
-		mux:               mux,
+	pl := &PrometheusListener{
 		connectionManager: cm,
-		topologyLock:      new(sync.RWMutex),
+		mux:               mux,
 	}
-	var head *cc.ChanCellHead
-	head, l.cellTail = cc.NewChanCellTail(
-		func(n int, cell *cc.ChanCell) {
-			queryChan := make(chan prometheusListenerMsg, n)
-			cell.Open = func() { l.queryChan = queryChan }
-			cell.Close = func() { close(queryChan) }
-			l.enqueueQueryInner = func(msg prometheusListenerMsg, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
-				if curCell == cell {
-					select {
-					case queryChan <- msg:
-						return true, nil
-					default:
-						return false, nil
-					}
-				} else {
-					return false, cont
-				}
-			}
-		})
 
-	go l.actorLoop(head)
-	return l
-}
+	pli := &pl.inner
+	pli.PrometheusListener = pl
+	pli.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "prometheusListener"))
 
-func (l *PrometheusListener) actorLoop(head *cc.ChanCellHead) {
-	l.initMetrics()
-
-	topology := l.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, l)
-	defer l.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, l)
-	l.putTopology(topology)
-	l.configureMux()
-
-	var (
-		err       error
-		queryChan <-chan prometheusListenerMsg
-		queryCell *cc.ChanCell
-	)
-	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = l.queryChan, cell }
-	head.WithCell(chanFun)
-	terminate := false
-	for !terminate {
-		if msg, ok := <-queryChan; ok {
-			switch msgT := msg.(type) {
-			case *prometheusListenerMsgShutdown:
-				terminate = true
-			case *prometheusListenerMsgTopologyChanged:
-				l.putTopology(msgT.topology)
-				msgT.maybeClose()
-			}
-			terminate = terminate || err != nil
-		} else {
-			head.Next(queryCell, chanFun)
-		}
-	}
+	_, err := actor.Spawn(pli)
 	if err != nil {
-		l.logger.Log("msg", "Fatal error.", "error", err)
+		panic(err) // "impossible"
 	}
-	l.cellTail.Terminate()
+
+	return pl
 }
 
-func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
-	l.topologyLock.Lock()
-	l.topology = topology
-	l.topologyLock.Unlock()
+type prometheusListenerMsgTopologyChanged struct {
+	actor.MsgSyncQuery
+	*PrometheusListener
+	topology *configuration.Topology
+}
+
+func (msg prometheusListenerMsgTopologyChanged) Exec() (bool, error) {
+	defer msg.MustClose()
+	msg.putTopology(msg.topology)
+	return false, nil
+}
+
+func (pl *PrometheusListener) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	msg := &prometheusListenerMsgTopologyChanged{PrometheusListener: pl, topology: topology}
+	msg.InitMsg(pl)
+	if pl.EnqueueMsg(msg) {
+		go done(msg.Wait())
+	} else {
+		done(false)
+	}
+}
+
+func (pl *prometheusListenerInner) Init(self *actor.Actor) (bool, error) {
+	terminate, err := pl.BasicServerInner.Init(self)
+	if terminate || err != nil {
+		return terminate, err
+	}
+
+	pl.Mailbox = self.Mailbox
+	pl.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
+
+	pl.initMetrics()
+
+	topology := pl.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, pl)
+	pl.putTopology(topology)
+	pl.configureMux()
+
+	return false, nil
+}
+
+func (pl *prometheusListenerInner) HandleShutdown(err error) bool {
+	pl.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, pl)
+	return pl.BasicServerInner.HandleShutdown(err)
+}
+
+func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
+	pl.topologyLock.Lock()
+	pl.topology = topology
+	pl.topologyLock.Unlock()
 
 	labels := prometheus.Labels{
 		"ClusterId": topology.ClusterId,
-		"RMId":      fmt.Sprint(l.connectionManager.RMId),
+		"RMId":      fmt.Sprint(pl.connectionManager.RMId),
 	}
 
-	clientConns := l.clientConnsVec.With(labels)
-	serverConns := l.serverConnsVec.With(labels)
+	clientConns := pl.clientConnsVec.With(labels)
+	serverConns := pl.serverConnsVec.With(labels)
 
-	txnSubmit := l.txnSubmitVec.With(labels)
-	txnLatency := l.txnLatencyVec.With(labels)
-	txnResubmit := l.txnResubmitVec.With(labels)
-	txnRerun := l.txnRerunVec.With(labels)
+	txnSubmit := pl.txnSubmitVec.With(labels)
+	txnLatency := pl.txnLatencyVec.With(labels)
+	txnResubmit := pl.txnResubmitVec.With(labels)
+	txnRerun := pl.txnRerunVec.With(labels)
 
-	l.connectionManager.SetMetrics(clientConns, serverConns,
+	pl.connectionManager.SetMetrics(clientConns, serverConns,
 		&paxos.ClientTxnMetrics{
 			TxnSubmit:   txnSubmit,
 			TxnLatency:  txnLatency,
@@ -194,35 +133,35 @@ func (l *PrometheusListener) putTopology(topology *configuration.Topology) {
 			TxnRerun:    txnRerun,
 		})
 
-	acceptorsGauge := l.acceptorsVec.With(labels)
-	acceptorLifespan := l.acceptorLifespanVec.With(labels)
-	l.connectionManager.Dispatchers.AcceptorDispatcher.SetMetrics(
+	acceptorsGauge := pl.acceptorsVec.With(labels)
+	acceptorLifespan := pl.acceptorLifespanVec.With(labels)
+	pl.connectionManager.Dispatchers.AcceptorDispatcher.SetMetrics(
 		&paxos.AcceptorMetrics{
 			Gauge:    acceptorsGauge,
 			Lifespan: acceptorLifespan,
 		})
 
-	proposersGauge := l.proposersVec.With(labels)
-	proposerLifespan := l.proposerLifespanVec.With(labels)
-	l.connectionManager.Dispatchers.ProposerDispatcher.SetMetrics(
+	proposersGauge := pl.proposersVec.With(labels)
+	proposerLifespan := pl.proposerLifespanVec.With(labels)
+	pl.connectionManager.Dispatchers.ProposerDispatcher.SetMetrics(
 		&paxos.ProposerMetrics{
 			Gauge:    proposersGauge,
 			Lifespan: proposerLifespan,
 		})
 }
 
-func (l *PrometheusListener) getTopology() *configuration.Topology {
-	l.topologyLock.RLock()
-	defer l.topologyLock.RUnlock()
-	return l.topology
+func (pl *PrometheusListener) getTopology() *configuration.Topology {
+	pl.topologyLock.RLock()
+	defer pl.topologyLock.RUnlock()
+	return pl.topology
 }
 
-func (l *PrometheusListener) configureMux() {
+func (pl *PrometheusListener) configureMux() {
 	promHandler := promhttp.Handler()
 
-	l.mux.HandleFunc(fmt.Sprintf("/%s", server.MetricsRootName), func(w http.ResponseWriter, req *http.Request) {
+	pl.mux.HandleFunc(fmt.Sprintf("/%s", server.MetricsRootName), func(w http.ResponseWriter, req *http.Request) {
 		peerCerts := req.TLS.PeerCertificates
-		if authenticated, _, roots := l.getTopology().VerifyPeerCerts(peerCerts); authenticated {
+		if authenticated, _, roots := pl.getTopology().VerifyPeerCerts(peerCerts); authenticated {
 			if cap, found := roots[server.MetricsRootName]; found {
 				if capWhich := cap.Which(); capWhich == msgs.CAPABILITY_READ || capWhich == msgs.CAPABILITY_READWRITE {
 					promHandler.ServeHTTP(w, req)
@@ -230,88 +169,88 @@ func (l *PrometheusListener) configureMux() {
 				}
 			}
 		}
-		l.logger.Log("type", "client", "authentication", "failure")
+		pl.inner.Logger.Log("type", "client", "authentication", "failure")
 		w.WriteHeader(http.StatusForbidden)
 	})
 
-	l.mux.Done()
+	pl.mux.Done()
 }
 
-func (l *PrometheusListener) initMetrics() {
+func (pl *PrometheusListener) initMetrics() {
 	// cm
-	l.clientConnsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	pl.clientConnsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
 		Name:      "client_connections_count",
 		Help:      "Current count of live client connections.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.clientConnsVec)
+	prometheus.MustRegister(pl.clientConnsVec)
 
-	l.serverConnsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	pl.serverConnsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
 		Name:      "server_connections_count",
 		Help:      "Current count of live server connections.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.serverConnsVec)
+	prometheus.MustRegister(pl.serverConnsVec)
 
 	// txns
-	l.txnSubmitVec = prometheus.NewCounterVec(prometheus.CounterOpts{
+	pl.txnSubmitVec = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: common.ProductName,
 		Name:      "transaction_client_submit_count",
 		Help:      "Number of transactions submitted by clients.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.txnSubmitVec)
+	prometheus.MustRegister(pl.txnSubmitVec)
 
-	l.txnLatencyVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	pl.txnLatencyVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: common.ProductName,
 		Name:      "transaction_submit_duration_seconds",
 		Help:      "Time taken to determine transaction outcome.",
 		Buckets:   prometheus.ExponentialBuckets(0.0005, 1.2, 55),
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.txnLatencyVec)
+	prometheus.MustRegister(pl.txnLatencyVec)
 
-	l.txnResubmitVec = prometheus.NewCounterVec(prometheus.CounterOpts{
+	pl.txnResubmitVec = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: common.ProductName,
 		Name:      "transaction_internal_submit_count",
 		Help:      "Number of transactions submitted internally.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.txnResubmitVec)
+	prometheus.MustRegister(pl.txnResubmitVec)
 
-	l.txnRerunVec = prometheus.NewCounterVec(prometheus.CounterOpts{
+	pl.txnRerunVec = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: common.ProductName,
 		Name:      "transaction_rerun_count",
 		Help:      "Number of times each transaction is returned to the client to be rerun.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.txnRerunVec)
+	prometheus.MustRegister(pl.txnRerunVec)
 
 	// acceptors
-	l.acceptorsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	pl.acceptorsVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
 		Name:      "acceptors_count",
 		Help:      "Current count of acceptors.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.acceptorsVec)
+	prometheus.MustRegister(pl.acceptorsVec)
 
-	l.acceptorLifespanVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	pl.acceptorLifespanVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: common.ProductName,
 		Name:      "acceptor_life_duration_seconds",
 		Help:      "Duration for which each acceptor is alive.",
 		Buckets:   prometheus.ExponentialBuckets(0.002, 1.2, 55),
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.acceptorLifespanVec)
+	prometheus.MustRegister(pl.acceptorLifespanVec)
 
 	// proposers
-	l.proposersVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	pl.proposersVec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: common.ProductName,
 		Name:      "proposers_count",
 		Help:      "Current count of proposers.",
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.proposersVec)
+	prometheus.MustRegister(pl.proposersVec)
 
-	l.proposerLifespanVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	pl.proposerLifespanVec = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: common.ProductName,
 		Name:      "proposer_life_duration_seconds",
 		Help:      "Duration for which each proposer is alive.",
 		Buckets:   prometheus.ExponentialBuckets(0.002, 1.2, 55),
 	}, []string{"ClusterId", "RMId"})
-	prometheus.MustRegister(l.proposerLifespanVec)
+	prometheus.MustRegister(pl.proposerLifespanVec)
 }
