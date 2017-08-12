@@ -165,10 +165,10 @@ func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Me
 		}
 	case msgs.MESSAGE_MIGRATION:
 		migration := msg.Migration()
-		cm.transmogrifier.MigrationReceived(sender, &migration)
+		cm.transmogrifier.ImmigrationReceived(sender, &migration)
 	case msgs.MESSAGE_MIGRATIONCOMPLETE:
 		migrationComplete := msg.MigrationComplete()
-		cm.transmogrifier.MigrationCompleteReceived(sender, &migrationComplete)
+		cm.transmogrifier.ImmigrationCompleteReceived(sender, &migrationComplete)
 	case msgs.MESSAGE_FLUSHED:
 		cm.ServerConnectionFlushed(sender)
 	default:

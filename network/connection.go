@@ -22,7 +22,6 @@ type Connection struct {
 	shuttingDown      bool
 	handshaker        Handshaker
 	rng               *rand.Rand
-	previousState     connectionStateMachineComponent
 	currentState      connectionStateMachineComponent
 	connectionDelay
 	connectionDial
@@ -35,6 +34,7 @@ type Connection struct {
 type connectionInner struct {
 	*Connection
 	*actor.BasicServerInner // super-type, essentially
+	previousState           connectionStateMachineComponent
 }
 
 // we are dialing out to someone else
