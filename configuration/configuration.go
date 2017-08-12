@@ -293,6 +293,7 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.Fingerprints) == len(b.Fingerprints)) {
 		return false
 	}
+	// we must cope with the hosts being in different orders on a and b
 	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
 	for _, aHost := range a.Hosts {
 		aHosts[aHost] = server.EmptyStructVal

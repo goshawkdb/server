@@ -14,7 +14,8 @@ func (task *ensureLocalTopology) Tick() (bool, error) {
 	if task.activeTopology != nil {
 		if task.targetConfig.Configuration == nil {
 			// There was no config supplied on the command line, so just
-			// pop what we've read in here.
+			// pop what we've read in here as we may still be on a
+			// journey to create it!
 			task.targetConfig.Configuration = task.activeTopology.Configuration
 		}
 		// The fact we're here means we're done - there is a topology
@@ -44,6 +45,6 @@ func (task *ensureLocalTopology) Tick() (bool, error) {
 		return false, nil
 	} else {
 		// It's already on disk, we're not going to see it through the subscriber.
-		return task.setActive(topology)
+		return task.setActiveTopology(topology)
 	}
 }

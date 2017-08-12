@@ -37,7 +37,7 @@ func (tcb *targetConfigBase) Tick() (bool, error) {
 		tcb.inner.Logger.Log("msg", "Ensuring local topology.")
 		tcb.currentTask = &ensureLocalTopology{tcb}
 
-	case tcb.activeTopology.ClusterId == "":
+	case len(tcb.activeTopology.ClusterId) == 0:
 		tcb.inner.Logger.Log("msg", "Attempting to join cluster.", "configuration", tcb.targetConfig)
 		tcb.currentTask = &joinCluster{targetConfigBase: tcb}
 
@@ -120,7 +120,7 @@ func (tcb *targetConfigBase) completed() (bool, error) {
 	tcb.shutdown()
 	tcb.inner.Logger.Log("msg", "Task completed.")
 	// force reevaluation as to how to get to this targetConfig
-	return false, tcb.selectGoal(tcb.targetConfig)
+	return false, tcb.setTarget(tcb.targetConfig)
 }
 
 // NB filters out empty RMIds so no need to pre-filter.

@@ -14,6 +14,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/topologytransmogrifier"
 	eng "goshawkdb.io/server/txnengine"
 	"net"
 	"sync"
@@ -34,7 +35,7 @@ type ConnectionManager struct {
 	BootCount                     uint32
 	certificate                   []byte
 	nodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
-	transmogrifier                *TopologyTransmogrifier
+	transmogrifier                *topologytransmogrifier.TopologyTransmogrifier
 	topology                      *configuration.Topology
 	servers                       map[string][]*connectionManagerMsgServerEstablished
 	rmToServer                    map[common.RMId]*connectionManagerMsgServerEstablished
@@ -57,7 +58,7 @@ type connectionManagerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *TopologyTransmogrifier, *client.LocalConnection) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *topologytransmogrifier.TopologyTransmogrifier, *client.LocalConnection) {
 
 	cm := &ConnectionManager{
 		parentLogger:      logger,
@@ -108,7 +109,7 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *d
 
 	cm.localConnection = client.NewLocalConnection(cm.RMId, cm.BootCount, cm, cm.parentLogger)
 	cm.Dispatchers = paxos.NewDispatchers(cm, cm.RMId, cm.BootCount, procs, db, cm.localConnection, cm.parentLogger)
-	transmogrifier, localEstablished := NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
+	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
 	cm.transmogrifier = transmogrifier
 
 	<-localEstablished
