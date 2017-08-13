@@ -1,6 +1,6 @@
 // +build debug
 
-package server
+package utils
 
 import (
 	"fmt"

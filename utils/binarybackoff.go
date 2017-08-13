@@ -1,28 +1,9 @@
-package server
+package utils
 
 import (
-	"github.com/go-kit/kit/log"
 	"math/rand"
 	"time"
 )
-
-func CheckWarn(e error, logger log.Logger) bool {
-	if e != nil {
-		logger.Log("msg", "Warning", "error", e)
-		return true
-	}
-	return false
-}
-
-type DebugLogFunc func(log.Logger, ...interface{})
-
-var DebugLog = DebugLogFunc(func(log.Logger, ...interface{}) {})
-
-type EmptyStruct struct{}
-
-var EmptyStructVal = EmptyStruct{}
-
-func (es EmptyStruct) String() string { return "" }
 
 type BinaryBackoffEngine struct {
 	rng    *rand.Rand
