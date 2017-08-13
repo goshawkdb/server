@@ -62,34 +62,19 @@ func (task *installTargetOld) Tick() (bool, error) {
 		"newRoots", rootsRequired, "active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	if rootsRequired != 0 {
-		go func() {
-			closer := task.maybeTick2(task, task.targetConfig)
-			resubmit, roots, err := task.attemptCreateRoots(rootsRequired)
-			if !closer() {
-				return
-			}
-			task.EnqueueFuncAsync(func() (bool, error) {
-				switch {
-				case task.currentTask != task:
-					return false, nil
-
-				case err != nil:
-					return task.fatal(err)
-
-				case resubmit:
-					task.enqueueTick(task, task.targetConfig)
-					return false, nil
-
-				default:
-					targetTopology.RootVarUUIds = append(targetTopology.RootVarUUIds, roots...)
-					return task.installTargetOld(targetTopology, active, passive)
-				}
-			})
-		}()
+		task.runTxnMsg = &topologyTransmogrifierMsgCreateRoots{
+			transmogrificationTask: task.transmogrificationTask,
+			task:           task,
+			backoff:        server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+			rootsRequired:  rootsRequired,
+			targetTopology: targetTopology,
+			active:         active,
+			passive:        passive,
+		}
+		return task.Exec()
 	} else {
 		return task.installTargetOld(targetTopology, active, passive)
 	}
-	return false, nil
 }
 
 func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology, active, passive common.RMIds) (bool, error) {
@@ -98,7 +83,7 @@ func (task *installTargetOld) installTargetOld(targetTopology *configuration.Top
 	// we've checked once above.
 	twoFInc := uint16(task.activeTopology.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.activeTopology, targetTopology, twoFInc, active, passive)
-	go task.runTopologyTransaction(task, txn, active, passive)
+	task.runTopologyTransaction(task, txn, active, passive)
 	return false, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
@@ -31,8 +32,7 @@ type transmogrificationTask struct {
 	*TopologyTransmogrifier
 	targetConfig *configuration.NextConfiguration
 	sender       paxos.ServerConnectionSubscriber
-	backoff      *server.BinaryBackoffEngine
-	tickEnqueued bool
+	runTxnMsg    actor.MsgExec
 
 	ensureLocalTopology
 	joinCluster
@@ -119,8 +119,7 @@ func (tt *transmogrificationTask) shutdown() {
 		tt.sender = nil
 	}
 	tt.currentTask = nil
-	tt.backoff = nil
-	tt.tickEnqueued = false
+	tt.runTxnMsg = nil
 }
 
 func (tt *transmogrificationTask) fatal(err error) (bool, error) {
@@ -146,7 +145,17 @@ func (tt *transmogrificationTask) completed() (bool, error) {
 
 func (tt *transmogrificationTask) Abandon() {
 	tt.shutdown()
-	tt.currentTask = nil
+}
+
+func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) {
+	tt.runTxnMsg = &topologyTransmogrifierMsgRunTransaction{
+		transmogrificationTask: tt,
+		backoff:                server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+		task:                   tt.currentTask,
+		active:                 active,
+		passive:                passive,
+	}
+	tt.EnqueueMsg(tt.runTxnMsg)
 }
 
 // NB filters out empty RMIds so no need to pre-filter.
@@ -206,40 +215,6 @@ func (tt *transmogrificationTask) isInRMs(rmIds common.RMIds) bool {
 		}
 	}
 	return false
-}
-
-func (tt *transmogrificationTask) createOrAdvanceBackoff() {
-	if tt.backoff == nil {
-		tt.backoff = server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay)
-	} else {
-		tt.backoff.Advance()
-	}
-}
-
-func (tt *transmogrificationTask) runTopologyTransaction(tt topologyTask, txn *msgs.Txn, active, passive common.RMIds) {
-	closer := tt.maybeTick2(tt, tt) // todo - wtf
-	_, resubmit, err := tt.rewriteTopology(txn, active, passive)
-	if !closer() {
-		return
-	}
-	tt.EnqueueFuncAsync(func() (bool, error) {
-		switch {
-		case tt.currentTask != tt:
-			return false, nil
-
-		case err != nil:
-			return tt.fatal(err)
-
-		case resubmit:
-			tt.enqueueTick(tt, tt) // todo similarly - wtf
-			return false, nil
-
-		default:
-			// Must be commit, or badread, which means again we should
-			// receive the updated topology through the subscriber.
-			return false, nil
-		}
-	})
 }
 
 func (tt *transmogrificationTask) createTopologyTransaction(read, write *configuration.Topology, twoFInc uint16, active, passive common.RMIds) *msgs.Txn {

@@ -72,16 +72,6 @@ func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, cm *Connectio
 	return tt, localEstablished
 }
 
-type topologyTransmogrifierMsgTopologyObserved struct {
-	*TopologyTransmogrifier
-	topology *configuration.Topology
-}
-
-func (msg topologyTransmogrifierMsgTopologyObserved) Exec() (bool, error) {
-	server.DebugLog(msg.inner.Logger, "debug", "New topology observed.", "topology", msg.topology)
-	return msg.setActiveTopology(msg.topology)
-}
-
 func (tt *topologyTransmogrifierInner) Init(self *actor.Actor) (bool, error) {
 	terminate, err := tt.BasicServerInner.Init(self)
 	if terminate || err != nil {

@@ -66,6 +66,6 @@ func (task *installTargetNew) Tick() (bool, error) {
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
-	go task.runTopologyTransaction(task, txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive)
 	return false, nil
 }

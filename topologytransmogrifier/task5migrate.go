@@ -84,7 +84,7 @@ func (task *migrate) Tick() (bool, error) {
 		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
-	go task.runTopologyTransaction(task, txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive)
 
 	task.ensureShareGoalWithAll()
 	return false, nil

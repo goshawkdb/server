@@ -101,7 +101,7 @@ func (task *quiet) Tick() (bool, error) {
 		topology.NextConfiguration.QuietRMIds[task.self] = true
 
 		txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
-		go task.runTopologyTransaction(task, txn, active, passive)
+		task.runTopologyTransaction(txn, active, passive)
 
 	default:
 		panic(fmt.Sprintf("Unexpected stage: %d", task.stage))

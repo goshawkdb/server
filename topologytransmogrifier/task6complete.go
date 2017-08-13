@@ -72,6 +72,6 @@ func (task *installCompletion) Tick() (bool, error) {
 	topology.RootVarUUIds = newRoots
 
 	txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
-	go task.runTopologyTransaction(task, txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive)
 	return false, nil
 }

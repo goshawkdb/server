@@ -7,8 +7,6 @@ import (
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
-	"sync/atomic"
-	"time"
 )
 
 func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
@@ -151,37 +149,4 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConf
 	server.DebugLog(tt.inner.Logger, "debug", "Creating new task.")
 	tt.currentTask = tt.newTransmogrificationTask(targetConfig)
 	return nil
-}
-
-func (tt *TopologyTransmogrifier) enqueueTick(task topologyTask, tc *targetConfig) {
-	if !tc.tickEnqueued {
-		tc.tickEnqueued = true
-		tc.createOrAdvanceBackoff()
-		tc.backoff.After(func() {
-			tt.EnqueueFuncAsync(func() (bool, error) {
-				tc.tickEnqueued = false
-				if tt.currentTask == task {
-					return tt.currentTask.Tick()
-				}
-				return false, nil
-			})
-		})
-	}
-}
-
-func (tt *TopologyTransmogrifier) maybeTick2(task topologyTask, tc *targetConfig) func() bool {
-	var i uint32 = 0
-	closer := func() bool {
-		return atomic.CompareAndSwapUint32(&i, 0, 1)
-	}
-	time.AfterFunc(2*time.Second, func() {
-		if !closer() {
-			return
-		}
-		tt.EnqueueFuncAsync(func() (bool, error) {
-			tt.enqueueTick(task, tc)
-			return false, nil
-		})
-	})
-	return closer
 }
