@@ -14,31 +14,64 @@ import (
 	"time"
 )
 
-type topologyTask interface {
+type stage interface {
 	Tick() (bool, error)
-	Abandon()
-	Goal() *configuration.NextConfiguration
 }
 
-type targetConfigBase struct {
+type transmogrificationTask struct {
 	*TopologyTransmogrifier
 	targetConfig *configuration.NextConfiguration
 	sender       paxos.ServerConnectionSubscriber
 	backoff      *server.BinaryBackoffEngine
 	tickEnqueued bool
+
+	stage
+
+	ensureLocalTopology
+	joinCluster
+	installTargetOld
+	installTargetNew
+	quiet
+	migrate
+	installCompletion
 }
 
-func (tcb *targetConfigBase) Tick() (bool, error) {
-	tcb.backoff = nil
-	tcb.tickEnqueued = false
+func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *configuration.NextConfiguration) *transmogrificationTask {
+	base := &transmogrificationTask{
+		TopologyTransmogrifier: tt,
+		targetConfig:           targetConfig,
+	}
+	base.ensureLocalTopology.init(base)
+	base.joinCluster.init(base)
+	base.installTargetOld.init(base)
+	base.installTargetNew.init(base)
+	base.quiet.init(base)
+	base.migrate.init(base)
+	base.installCompletion.init(base)
+
+	base.stage = &base
+
+	return base
+}
+
+func (tt *transmogrificationTask) Tick() (bool, error) {
+	tt.backoff = nil
+	tt.tickEnqueued = false
+
+	switch {
+	case tt.ensureLocalTopology.IsValidTask():
+		tt.inner.Logger.Log("msg", "Ensuring local topology.")
+		tt.stage = &tt.ensureLocalTopology
+	case tt.joinCluster.IsValidTask():
+		tt.inner.Logger.Log("msg", "Attempting to join cluster.", "configuration", tt.targetConfig)
+
+	}
 
 	switch {
 	case tcb.activeTopology == nil:
-		tcb.inner.Logger.Log("msg", "Ensuring local topology.")
 		tcb.currentTask = &ensureLocalTopology{tcb}
 
 	case len(tcb.activeTopology.ClusterId) == 0:
-		tcb.inner.Logger.Log("msg", "Attempting to join cluster.", "configuration", tcb.targetConfig)
 		tcb.currentTask = &joinCluster{targetConfigBase: tcb}
 
 	case tcb.activeTopology.NextConfiguration == nil || tcb.activeTopology.NextConfiguration.Version < tcb.targetConfig.Version:
@@ -87,12 +120,6 @@ func (tcb *targetConfigBase) ensureRemoveTaskSender() {
 		tcb.connectionManager.RemoveServerConnectionSubscriber(tcb.sender)
 		tcb.sender = nil
 	}
-}
-
-// todo - should we use shutdown?
-// is there any reason to avoid the re-eval that's now on completed?
-func (tcb *targetConfigBase) Abandon() {
-	tcb.ensureRemoveTaskSender()
 }
 
 func (tcb *targetConfigBase) Goal() *configuration.NextConfiguration {

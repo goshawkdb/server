@@ -10,12 +10,25 @@ type migrate struct {
 	emigrator *emigrator
 }
 
+func (task *migrate) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *migrate) IsValidTask() bool {
+	active := task.activeTopology
+	return active != nil && len(active.ClusterId) > 0 &&
+		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+		active.NextConfiguration.InstalledOnNew &&
+		active.NextConfiguration.QuietRMIds[task.connectionManager.RMId] &&
+		len(next.Pending) > 0
+}
+
 func (task *migrate) Tick() (bool, error) {
-	next := task.activeTopology.NextConfiguration
-	if !(next != nil && next.Version == task.targetConfig.Version && len(next.Pending) > 0) {
+	if !task.IsValidTask() {
 		return task.completed()
 	}
 
+	next := task.activeTopology.NextConfiguration
 	task.inner.Logger.Log("msg", "Migration: all quiet, ready to attempt migration.")
 
 	// By this point, we know that our vars can be safely

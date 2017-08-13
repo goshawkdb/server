@@ -9,8 +9,17 @@ type joinCluster struct {
 	*targetConfigBase
 }
 
+func (task *joinCluster) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *joinCluster) IsValidTask() bool {
+	active := task.activeTopology
+	return active != nil && len(active.ClusterId) == 0
+}
+
 func (task *joinCluster) Tick() (bool, error) {
-	if !(task.activeTopology.ClusterId == "") {
+	if !task.IsValidTask() {
 		return task.completed()
 	}
 

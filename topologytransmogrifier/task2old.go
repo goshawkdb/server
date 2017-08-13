@@ -17,8 +17,18 @@ type installTargetOld struct {
 	*targetConfigBase
 }
 
+func (task *installTargetOld) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *installTargetOld) IsValidTask() bool {
+	active := task.activeTopology
+	return active != nil && len(active.ClusterId) > 0 &&
+		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
+}
+
 func (task *installTargetOld) Tick() (bool, error) {
-	if next := task.activeTopology.NextConfiguration; !(next == nil || next.Version < task.targetConfig.Version) {
+	if !task.IsValidTask() {
 		return task.completed()
 	}
 

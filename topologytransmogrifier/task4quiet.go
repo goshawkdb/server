@@ -14,17 +14,28 @@ type quiet struct {
 	stage      uint8
 }
 
+func (task *quiet) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *quiet) IsValidTask() bool {
+	active := task.activeTopology
+	return active != nil && len(active.ClusterId) > 0 &&
+		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+		active.NextConfiguration.InstalledOnNew &&
+		!active.NextConfiguration.QuietRMIds[task.connectionManager.RMId]
+}
+
 func (task *quiet) Tick() (bool, error) {
 	// The purpose of getting the vars to go quiet isn't just for
 	// emigration; it's also to require that txn outcomes are decided
 	// (consensus reached) before any acceptors get booted out. So we
 	// go through all this even if len(pending) is 0.
-	next := task.activeTopology.NextConfiguration
-	if !(next != nil && next.Version == task.targetConfig.Version &&
-		!next.QuietRMIds[task.connectionManager.RMId]) {
+	if !task.IsValidTask() {
 		return task.completed()
 	}
 
+	next := task.activeTopology.NextConfiguration
 	localHost, err := task.firstLocalHost(task.activeTopology.Configuration)
 	if err != nil {
 		return task.fatal(err)

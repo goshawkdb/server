@@ -9,13 +9,26 @@ type installCompletion struct {
 	*targetConfigBase
 }
 
+func (task *installCompletion) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *installCompletion) IsValidTask() bool {
+	active := task.activeTopology
+	return active != nil && len(active.ClusterId) > 0 &&
+		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+		active.NextConfiguration.InstalledOnNew &&
+		active.NextConfiguration.QuietRMIds[task.connectionManager.RMId] &&
+		len(next.Pending) == 0
+}
+
 func (task *installCompletion) Tick() (bool, error) {
-	next := task.activeTopology.NextConfiguration
-	if next == nil {
+	if !task.IsValidTask() {
 		task.inner.Logger.Log("msg", "Completion installed.")
 		return task.completed()
 	}
 
+	next := task.activeTopology.NextConfiguration
 	if _, found := next.RMsRemoved[task.connectionManager.RMId]; found {
 		task.inner.Logger.Log("msg", "We've been removed from cluster. Taking no further part.")
 		return false, nil

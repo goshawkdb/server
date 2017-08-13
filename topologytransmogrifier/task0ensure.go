@@ -10,8 +10,16 @@ type ensureLocalTopology struct {
 	*targetConfigBase
 }
 
+func (task *ensureLocalTopology) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *ensureLocalTopology) IsValidTask() bool {
+	return task.activeTopology == nil
+}
+
 func (task *ensureLocalTopology) Tick() (bool, error) {
-	if task.activeTopology != nil {
+	if !task.IsValidTask() {
 		if task.targetConfig.Configuration == nil {
 			// There was no config supplied on the command line, so just
 			// pop what we've read in here as we may still be on a

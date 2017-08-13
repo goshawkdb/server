@@ -13,12 +13,23 @@ type installTargetNew struct {
 	*targetConfigBase
 }
 
+func (task *installTargetNew) init(base *targetConfigBase) {
+	task.targetConfigBase = base
+}
+
+func (task *installTargetNew) IsValidTask() bool {
+	active := task.activeTopology
+	return active != nil && len(active.ClusterId) > 0 &&
+		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+		!active.NextConfiguration.InstalledOnNew
+}
+
 func (task *installTargetNew) Tick() (bool, error) {
-	next := task.activeTopology.NextConfiguration
-	if !(next != nil && next.Version == task.targetConfig.Version && !next.InstalledOnNew) {
+	if !task.IsValidTask() {
 		return task.completed()
 	}
 
+	next := task.activeTopology.NextConfiguration
 	localHost, err := task.firstLocalHost(task.activeTopology.Configuration)
 	if err != nil {
 		return task.fatal(err)
