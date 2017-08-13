@@ -6,30 +6,29 @@ import (
 )
 
 type installCompletion struct {
-	*targetConfigBase
+	*transmogrificationTask
 }
 
-func (task *installCompletion) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *installCompletion) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *installCompletion) IsValidTask() bool {
+func (task *installCompletion) isValid() bool {
 	active := task.activeTopology
-	return active != nil && len(active.ClusterId) > 0 &&
-		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
-		active.NextConfiguration.InstalledOnNew &&
-		active.NextConfiguration.QuietRMIds[task.connectionManager.RMId] &&
-		len(next.Pending) == 0
+	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version
+}
+
+func (task *installCompletion) announce() {
+	task.inner.Logger.Log("msg", "Object migration completed, switching to new topology.", "configuration", task.targetConfig)
 }
 
 func (task *installCompletion) Tick() (bool, error) {
-	if !task.IsValidTask() {
-		task.inner.Logger.Log("msg", "Completion installed.")
+	if task.selectStage() != task {
 		return task.completed()
 	}
 
 	next := task.activeTopology.NextConfiguration
-	if _, found := next.RMsRemoved[task.connectionManager.RMId]; found {
+	if _, found := next.RMsRemoved[task.self]; found {
 		task.inner.Logger.Log("msg", "We've been removed from cluster. Taking no further part.")
 		return false, nil
 	}
@@ -53,7 +52,7 @@ func (task *installCompletion) Tick() (bool, error) {
 
 	remoteHosts := task.allHostsBarLocalHost(localHost, next)
 	task.installTopology(task.activeTopology, nil, localHost, remoteHosts)
-	task.shareGoalWithAll()
+	task.ensureShareGoalWithAll()
 
 	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 	if active == nil {

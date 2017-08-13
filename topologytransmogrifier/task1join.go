@@ -6,20 +6,23 @@ import (
 )
 
 type joinCluster struct {
-	*targetConfigBase
+	*transmogrificationTask
 }
 
-func (task *joinCluster) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *joinCluster) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *joinCluster) IsValidTask() bool {
-	active := task.activeTopology
-	return active != nil && len(active.ClusterId) == 0
+func (task *joinCluster) isValid() bool {
+	return len(task.activeTopology.ClusterId) == 0
+}
+
+func (task *joinCluster) announce() {
+	task.inner.Logger.Log("msg", "Attempting to join cluster.", "configuration", task.targetConfig)
 }
 
 func (task *joinCluster) Tick() (bool, error) {
-	if !task.IsValidTask() {
+	if task.selectStage() != task {
 		return task.completed()
 	}
 
@@ -75,8 +78,8 @@ func (task *joinCluster) Tick() (bool, error) {
 	} else {
 		// If we're not allJoining then we need the previous config
 		// because we need to make sure that everyone in the old config
-		// learns of the change. The shareGoalWithAll() call above will
-		// ensure this happens.
+		// learns of the change. The ensureShareGoalWithAll() call above
+		// will ensure this happens.
 
 		task.inner.Logger.Log("msg", "Requesting help from existing cluster members for topology change.")
 		return false, nil

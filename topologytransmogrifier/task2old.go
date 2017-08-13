@@ -14,26 +14,29 @@ import (
 // migration strategy at this point too.
 
 type installTargetOld struct {
-	*targetConfigBase
+	*transmogrificationTask
 }
 
-func (task *installTargetOld) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *installTargetOld) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *installTargetOld) IsValidTask() bool {
+func (task *installTargetOld) isValid() bool {
 	active := task.activeTopology
-	return active != nil && len(active.ClusterId) > 0 &&
-		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
+	return active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version
+}
+
+func (task *installTargetOld) announce() {
+	task.inner.Logger.Log("msg", "Attempting to install topology change target.", "configuration", task.targetConfig)
 }
 
 func (task *installTargetOld) Tick() (bool, error) {
-	if !task.IsValidTask() {
+	if task.selectStage() != task {
 		return task.completed()
 	}
 
 	if !task.isInRMs(task.activeTopology.RMs) {
-		task.shareGoalWithAll()
+		task.ensureShareGoalWithAll()
 		task.inner.Logger.Log("msg", "Awaiting existing cluster members.")
 		// this step must be performed by the existing RMs
 		return false, nil

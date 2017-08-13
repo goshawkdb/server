@@ -6,25 +6,26 @@ import (
 )
 
 type migrate struct {
-	*targetConfigBase
+	*transmogrificationTask
 	emigrator *emigrator
 }
 
-func (task *migrate) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *migrate) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *migrate) IsValidTask() bool {
+func (task *migrate) isValid() bool {
 	active := task.activeTopology
-	return active != nil && len(active.ClusterId) > 0 &&
-		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
-		active.NextConfiguration.InstalledOnNew &&
-		active.NextConfiguration.QuietRMIds[task.connectionManager.RMId] &&
+	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
 		len(next.Pending) > 0
 }
 
+func (task *migrate) announce() {
+	task.inner.Logger.Log("msg", "Attempting to perform object migration for topology target.", "configuration", task.targetConfig)
+}
+
 func (task *migrate) Tick() (bool, error) {
-	if !task.IsValidTask() {
+	if task.selectStage() != task {
 		return task.completed()
 	}
 
@@ -43,7 +44,7 @@ func (task *migrate) Tick() (bool, error) {
 		task.ensureEmigrator()
 	}
 
-	if _, found := next.Pending[task.connectionManager.RMId]; !found {
+	if _, found := next.Pending[task.self]; !found {
 		task.inner.Logger.Log("msg", "All migration into all this RM completed. Awaiting others.")
 		return false, nil
 	}
@@ -63,7 +64,7 @@ func (task *migrate) Tick() (bool, error) {
 	for sender, inprogressPtr := range senders {
 		if atomic.LoadInt32(inprogressPtr) == 0 {
 			// Because we wait for locallyComplete, we know they've gone to disk.
-			changed = next.Pending.SuppliedBy(task.connectionManager.RMId, sender, maxSuppliers) || changed
+			changed = next.Pending.SuppliedBy(task.self, sender, maxSuppliers) || changed
 		}
 	}
 	// We track progress by updating the topology to remove RMs who
@@ -85,7 +86,7 @@ func (task *migrate) Tick() (bool, error) {
 	txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
 	go task.runTopologyTransaction(task, txn, active, passive)
 
-	task.shareGoalWithAll()
+	task.ensureShareGoalWithAll()
 	return false, nil
 }
 

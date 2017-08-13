@@ -20,6 +20,7 @@ import (
 type emigrator struct {
 	logger            log.Logger
 	stop              int32
+	rmId              common.RMId
 	db                *db.Databases
 	connectionManager *ConnectionManager
 	activeBatches     map[common.RMId]*sendBatch
@@ -30,6 +31,7 @@ type emigrator struct {
 func newEmigrator(task *migrate) *emigrator {
 	e := &emigrator{
 		logger:            task.inner.Logger,
+		self:              task.rmId,
 		db:                task.db,
 		connectionManager: task.connectionManager,
 		activeBatches:     make(map[common.RMId]*sendBatch),
@@ -62,7 +64,7 @@ func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos
 
 func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
 	defer done()
-	if rmId == e.connectionManager.RMId {
+	if rmId == e.self {
 		return
 	}
 	e.conns = conns
@@ -73,7 +75,7 @@ func (e *emigrator) startBatches() {
 	pending := e.topology.NextConfiguration.Pending
 	batchConds := make([]*sendBatch, 0, len(pending))
 	for rmId, cond := range pending {
-		if rmId == e.connectionManager.RMId {
+		if rmId == e.self {
 			continue
 		}
 		if _, found := e.activeBatches[rmId]; found {

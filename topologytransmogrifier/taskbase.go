@@ -14,8 +14,17 @@ import (
 	"time"
 )
 
-type stage interface {
+type Task interface {
 	Tick() (bool, error)
+	TargetConfig() *configuration.NextConfiguration
+	Abandon()
+}
+
+type stage interface {
+	Task
+	init(*transmogrificationTask)
+	isValid() bool
+	announce()
 }
 
 type transmogrificationTask struct {
@@ -25,8 +34,6 @@ type transmogrificationTask struct {
 	backoff      *server.BinaryBackoffEngine
 	tickEnqueued bool
 
-	stage
-
 	ensureLocalTopology
 	joinCluster
 	installTargetOld
@@ -34,6 +41,7 @@ type transmogrificationTask struct {
 	quiet
 	migrate
 	installCompletion
+	stages []stage
 }
 
 func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *configuration.NextConfiguration) *transmogrificationTask {
@@ -41,122 +49,113 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 		TopologyTransmogrifier: tt,
 		targetConfig:           targetConfig,
 	}
-	base.ensureLocalTopology.init(base)
-	base.joinCluster.init(base)
-	base.installTargetOld.init(base)
-	base.installTargetNew.init(base)
-	base.quiet.init(base)
-	base.migrate.init(base)
-	base.installCompletion.init(base)
-
-	base.stage = &base
+	base.stages = []stage{
+		&base.ensureLocalTopology,
+		&base.joinCluster,
+		&base.installTargetOld,
+		&base.installTargetNew,
+		&base.quiet,
+		&base.migrate,
+		&base.installCompletion,
+	}
+	for _, s := range base.stages {
+		s.init(base)
+	}
 
 	return base
 }
 
-func (tt *transmogrificationTask) Tick() (bool, error) {
-	tt.backoff = nil
-	tt.tickEnqueued = false
-
-	switch {
-	case tt.ensureLocalTopology.IsValidTask():
-		tt.inner.Logger.Log("msg", "Ensuring local topology.")
-		tt.stage = &tt.ensureLocalTopology
-	case tt.joinCluster.IsValidTask():
-		tt.inner.Logger.Log("msg", "Attempting to join cluster.", "configuration", tt.targetConfig)
-
-	}
-
-	switch {
-	case tcb.activeTopology == nil:
-		tcb.currentTask = &ensureLocalTopology{tcb}
-
-	case len(tcb.activeTopology.ClusterId) == 0:
-		tcb.currentTask = &joinCluster{targetConfigBase: tcb}
-
-	case tcb.activeTopology.NextConfiguration == nil || tcb.activeTopology.NextConfiguration.Version < tcb.targetConfig.Version:
-		tcb.inner.Logger.Log("msg", "Attempting to install topology change target.", "configuration", tcb.targetConfig)
-		tcb.currentTask = &installTargetOld{targetConfigBase: tcb}
-
-	case tcb.activeTopology.NextConfiguration != nil && tcb.activeTopology.NextConfiguration.Version == tcb.targetConfig.Version:
-		switch {
-		case !tcb.activeTopology.NextConfiguration.InstalledOnNew:
-			tcb.inner.Logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", tcb.targetConfig)
-			tcb.currentTask = &installTargetNew{targetConfigBase: tcb}
-
-		case !tcb.activeTopology.NextConfiguration.QuietRMIds[tcb.connectionManager.RMId]:
-			tcb.inner.Logger.Log("msg", "Waiting for quiet.", "configuration", tcb.targetConfig)
-			tcb.currentTask = &quiet{targetConfigBase: tcb}
-
-		case len(tcb.activeTopology.NextConfiguration.Pending) > 0:
-			tcb.inner.Logger.Log("msg", "Attempting to perform object migration for topology target.", "configuration", tcb.targetConfig)
-			tcb.currentTask = &migrate{targetConfigBase: tcb}
-
-		default:
-			tcb.inner.Logger.Log("msg", "Object migration completed, switching to new topology.", "configuration", tcb.targetConfig)
-			tcb.currentTask = &installCompletion{targetConfigBase: tcb}
+func (tt *transmogrificationTask) selectStage() Task {
+	for _, s := range tt.stages {
+		if s.isValid() {
+			return s
 		}
-
-	default:
-		return false, fmt.Errorf("Topology: Confused about what to do. Active topology is: %v; target config is %v",
-			tcb.activeTopology, tcb.targetConfig)
 	}
-	return false, nil
+	return nil
 }
 
-func (tcb *targetConfigBase) ensureShareGoalWithAll() {
-	if tcb.sender != nil {
+func (tt *transmogrificationTask) TargetConfig() *configuration.NextConfiguration {
+	return tt.targetConfig
+}
+
+func (tt *transmogrificationTask) Tick() (bool, error) {
+	s := tt.selectStage()
+	tt.currentTask = s
+	if s == nil {
+		tt.inner.Logger.Log("msg", "Task completed.")
+		if tt.activeTopology != nil && tt.activeTopology.NextConfiguration != nil {
+			// Our own targetConfig is either reached or can't be reached
+			// given where activeTopology is. And activeTopology has its
+			// own target (NextConfiguration). So we should adopt that as
+			// a fresh new target.
+			return false, tt.setTarget(tt.activeTopology.NextConfiguration)
+		} else {
+			return false, nil
+		}
+	} else {
+		s.announce()
+		return false, nil
+	}
+}
+
+func (tt *transmogrificationTask) ensureShareGoalWithAll() {
+	if tt.sender != nil {
 		return
 	}
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
-	msg.SetTopologyChangeRequest(tcb.targetConfig.AddToSegAutoRoot(seg))
-	tcb.sender = paxos.NewRepeatingAllSender(common.SegToBytes(seg))
-	tcb.connectionManager.AddServerConnectionSubscriber(tcb.sender)
+	msg.SetTopologyChangeRequest(tt.targetConfig.AddToSegAutoRoot(seg))
+	tt.sender = paxos.NewRepeatingAllSender(common.SegToBytes(seg))
+	tt.connectionManager.AddServerConnectionSubscriber(tt.sender)
 }
 
-func (tcb *targetConfigBase) ensureRemoveTaskSender() {
-	if tcb.sender != nil {
-		tcb.connectionManager.RemoveServerConnectionSubscriber(tcb.sender)
-		tcb.sender = nil
+func (tt *transmogrificationTask) Goal() *configuration.NextConfiguration {
+	return tt.targetConfig
+}
+
+func (tt *transmogrificationTask) shutdown() {
+	if tt.sender != nil {
+		tt.connectionManager.RemoveServerConnectionSubscriber(tt.sender)
+		tt.sender = nil
 	}
+	tt.currentTask = nil
+	tt.backoff = nil
+	tt.tickEnqueued = false
 }
 
-func (tcb *targetConfigBase) Goal() *configuration.NextConfiguration {
-	return tcb.targetConfig
-}
-
-func (tcb *targetConfigBase) shutdown() {
-	tcb.ensureRemoveTaskSender()
-	tcb.currentTask = nil
-}
-
-func (tcb *targetConfigBase) fatal(err error) (bool, error) {
-	tcb.shutdown()
-	tcb.inner.Logger.Log("msg", "Fatal error.", "error", err)
+func (tt *transmogrificationTask) fatal(err error) (bool, error) {
+	tt.shutdown()
+	tt.inner.Logger.Log("msg", "Fatal error.", "error", err)
 	return false, err
 }
 
-func (tcb *targetConfigBase) error(err error) (bool, error) {
-	tcb.shutdown()
-	tcb.inner.Logger.Log("msg", "Non-fatal error.", "error", err)
+func (tt *transmogrificationTask) error(err error) (bool, error) {
+	tt.shutdown()
+	tt.inner.Logger.Log("msg", "Non-fatal error.", "error", err)
 	return false, nil
 }
 
-func (tcb *targetConfigBase) completed() (bool, error) {
-	tcb.shutdown()
-	tcb.inner.Logger.Log("msg", "Task completed.")
-	// force reevaluation as to how to get to this targetConfig
-	return false, tcb.setTarget(tcb.targetConfig)
+func (tt *transmogrificationTask) completed() (bool, error) {
+	tt.shutdown()
+	tt.inner.Logger.Log("msg", "Stage completed.")
+	// next Tick will force reevaluation as to how to get to this
+	// targetConfig
+	tt.currentTask = tt
+	return false, nil
+}
+
+func (tt *transmogrificationTask) Abandon() {
+	tt.shutdown()
+	tt.currentTask = nil
 }
 
 // NB filters out empty RMIds so no need to pre-filter.
-func (tcb *targetConfigBase) formActivePassive(activeCandidates, extraPassives common.RMIds) (active, passive common.RMIds) {
+func (tt *transmogrificationTask) formActivePassive(activeCandidates, extraPassives common.RMIds) (active, passive common.RMIds) {
 	active, passive = []common.RMId{}, []common.RMId{}
 	for _, rmId := range activeCandidates {
 		if rmId == common.RMIdEmpty {
 			continue
-		} else if _, found := tcb.activeConnections[rmId]; found {
+		} else if _, found := tt.activeConnections[rmId]; found {
 			active = append(active, rmId)
 		} else {
 			passive = append(passive, rmId)
@@ -169,7 +168,7 @@ func (tcb *targetConfigBase) formActivePassive(activeCandidates, extraPassives c
 	// this as if it's a cluster of 7 with one failure.
 	fInc := ((len(active) + len(passive)) >> 1) + 1
 	if len(active) < fInc {
-		tcb.inner.Logger.Log("msg", "Can not make progress at this time due to too many failures.",
+		tt.inner.Logger.Log("msg", "Can not make progress at this time due to too many failures.",
 			"failures", fmt.Sprint(passive))
 		return nil, nil
 	}
@@ -177,9 +176,9 @@ func (tcb *targetConfigBase) formActivePassive(activeCandidates, extraPassives c
 	return active, append(passive, extraPassives...)
 }
 
-func (tcb *targetConfigBase) firstLocalHost(config *configuration.Configuration) (localHost string, err error) {
+func (tt *transmogrificationTask) firstLocalHost(config *configuration.Configuration) (localHost string, err error) {
 	for config != nil {
-		localHost, _, err = config.LocalRemoteHosts(tcb.listenPort)
+		localHost, _, err = config.LocalRemoteHosts(tt.listenPort)
 		if err == nil {
 			return localHost, err
 		}
@@ -188,7 +187,7 @@ func (tcb *targetConfigBase) firstLocalHost(config *configuration.Configuration)
 	return "", err
 }
 
-func (tcb *targetConfigBase) allHostsBarLocalHost(localHost string, next *configuration.NextConfiguration) []string {
+func (tt *transmogrificationTask) allHostsBarLocalHost(localHost string, next *configuration.NextConfiguration) []string {
 	remoteHosts := make([]string, len(next.AllHosts))
 	copy(remoteHosts, next.AllHosts)
 	for idx, host := range remoteHosts {
@@ -200,39 +199,39 @@ func (tcb *targetConfigBase) allHostsBarLocalHost(localHost string, next *config
 	return remoteHosts
 }
 
-func (tcb *targetConfigBase) isInRMs(rmIds common.RMIds) bool {
+func (tt *transmogrificationTask) isInRMs(rmIds common.RMIds) bool {
 	for _, rmId := range rmIds {
-		if rmId == tcb.connectionManager.RMId {
+		if rmId == tt.self {
 			return true
 		}
 	}
 	return false
 }
 
-func (tcb *targetConfigBase) createOrAdvanceBackoff() {
-	if tcb.backoff == nil {
-		tcb.backoff = server.NewBinaryBackoffEngine(tcb.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tcb.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay)
+func (tt *transmogrificationTask) createOrAdvanceBackoff() {
+	if tt.backoff == nil {
+		tt.backoff = server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay)
 	} else {
-		tcb.backoff.Advance()
+		tt.backoff.Advance()
 	}
 }
 
-func (tcb *targetConfigBase) runTopologyTransaction(tcb topologyTask, txn *msgs.Txn, active, passive common.RMIds) {
-	closer := tcb.maybeTick2(tcb, tcb) // todo - wtf
-	_, resubmit, err := tcb.rewriteTopology(txn, active, passive)
+func (tt *transmogrificationTask) runTopologyTransaction(tt topologyTask, txn *msgs.Txn, active, passive common.RMIds) {
+	closer := tt.maybeTick2(tt, tt) // todo - wtf
+	_, resubmit, err := tt.rewriteTopology(txn, active, passive)
 	if !closer() {
 		return
 	}
-	tcb.EnqueueFuncAsync(func() (bool, error) {
+	tt.EnqueueFuncAsync(func() (bool, error) {
 		switch {
-		case tcb.currentTask != tcb:
+		case tt.currentTask != tt:
 			return false, nil
 
 		case err != nil:
-			return tcb.fatal(err)
+			return tt.fatal(err)
 
 		case resubmit:
-			tcb.enqueueTick(tcb, tcb) // todo similarly - wtf
+			tt.enqueueTick(tt, tt) // todo similarly - wtf
 			return false, nil
 
 		default:
@@ -243,7 +242,7 @@ func (tcb *targetConfigBase) runTopologyTransaction(tcb topologyTask, txn *msgs.
 	})
 }
 
-func (tcb *targetConfigBase) createTopologyTransaction(read, write *configuration.Topology, twoFInc uint16, active, passive common.RMIds) *msgs.Txn {
+func (tt *transmogrificationTask) createTopologyTransaction(read, write *configuration.Topology, twoFInc uint16, active, passive common.RMIds) *msgs.Txn {
 	if write == nil && read != nil {
 		panic("Topology transaction with nil write and non-nil read not supported")
 	}
@@ -305,7 +304,7 @@ func (tcb *targetConfigBase) createTopologyTransaction(read, write *configuratio
 			alloc := allocs.At(idy + offset)
 			alloc.SetRmId(uint32(rmId))
 			if idx == 0 {
-				alloc.SetActive(tcb.activeConnections[rmId].BootCount())
+				alloc.SetActive(tt.activeConnections[rmId].BootCount())
 			} else {
 				alloc.SetActive(0)
 			}
@@ -327,17 +326,17 @@ func (tcb *targetConfigBase) createTopologyTransaction(read, write *configuratio
 	return &txn
 }
 
-func (tcb *targetConfigBase) getTopologyFromLocalDatabase() (*configuration.Topology, error) {
-	empty, err := tcb.connectionManager.Dispatchers.IsDatabaseEmpty()
+func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration.Topology, error) {
+	empty, err := tt.connectionManager.Dispatchers.IsDatabaseEmpty()
 	if empty || err != nil {
 		return nil, err
 	}
 
-	backoff := server.NewBinaryBackoffEngine(tcb.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
+	backoff := server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
 	for {
-		txn := tcb.createTopologyTransaction(nil, nil, 1, []common.RMId{tcb.connectionManager.RMId}, nil)
+		txn := tt.createTopologyTransaction(nil, nil, 1, []common.RMId{tt.self}, nil)
 
-		_, result, err := tcb.localConnection.RunTransaction(txn, nil, backoff, tcb.connectionManager.RMId)
+		_, result, err := tt.localConnection.RunTransaction(txn, nil, backoff, tt.self)
 		if err != nil {
 			return nil, err
 		} else if result == nil {
@@ -373,14 +372,14 @@ func (tcb *targetConfigBase) getTopologyFromLocalDatabase() (*configuration.Topo
 	}
 }
 
-func (tcb *targetConfigBase) createTopologyZero(config *configuration.NextConfiguration) (*configuration.Topology, error) {
+func (tt *transmogrificationTask) createTopologyZero(config *configuration.NextConfiguration) (*configuration.Topology, error) {
 	topology := configuration.BlankTopology()
 	topology.NextConfiguration = config
-	txn := tcb.createTopologyTransaction(nil, topology, 1, []common.RMId{tcb.connectionManager.RMId}, nil)
+	txn := tt.createTopologyTransaction(nil, topology, 1, []common.RMId{tt.self}, nil)
 	txnId := topology.DBVersion
 	txn.SetId(txnId[:])
 	// in general, we do backoff locally, so don't pass backoff through here
-	_, result, err := tcb.localConnection.RunTransaction(txn, txnId, nil, tcb.connectionManager.RMId)
+	_, result, err := tt.localConnection.RunTransaction(txn, txnId, nil, tt.self)
 	if err != nil {
 		return nil, err
 	}
@@ -394,20 +393,20 @@ func (tcb *targetConfigBase) createTopologyZero(config *configuration.NextConfig
 	}
 }
 
-func (tcb *targetConfigBase) rewriteTopology(txn *msgs.Txn, active, passive common.RMIds) (bool, bool, error) {
+func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive common.RMIds) (bool, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
-	server.DebugLog(tcb.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
-	txnReader, result, err := tcb.localConnection.RunTransaction(txn, nil, nil, active...)
+	server.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
+	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
 		return false, false, err
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		server.DebugLog(tcb.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
+		server.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
 		return true, false, nil
 	}
 	abort := result.Abort()
-	server.DebugLog(tcb.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
+	server.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
 		return false, true, nil
 	}
@@ -442,8 +441,8 @@ func (tcb *targetConfigBase) rewriteTopology(txn *msgs.Txn, active, passive comm
 	return false, false, err
 }
 
-func (tcb *targetConfigBase) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {
-	server.DebugLog(tcb.inner.Logger, "debug", "Creating Roots.", "count", rootCount)
+func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {
+	server.DebugLog(tt.inner.Logger, "debug", "Creating Roots.", "count", rootCount)
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
@@ -452,7 +451,7 @@ func (tcb *targetConfigBase) attemptCreateRoots(rootCount int) (bool, configurat
 	actions := cmsgs.NewClientActionList(seg, rootCount)
 	for idx := range roots {
 		action := actions.At(idx)
-		vUUId := tcb.localConnection.NextVarUUId()
+		vUUId := tt.localConnection.NextVarUUId()
 		action.SetVarId(vUUId[:])
 		action.SetCreate()
 		create := action.Create()
@@ -462,8 +461,8 @@ func (tcb *targetConfigBase) attemptCreateRoots(rootCount int) (bool, configurat
 		root.VarUUId = vUUId
 	}
 	ctxn.SetActions(actions)
-	txnReader, result, err := tcb.localConnection.RunClientTransaction(&ctxn, false, nil, nil)
-	server.DebugLog(tcb.inner.Logger, "debug", "Created root.", "result", result, "error", err)
+	txnReader, result, err := tt.localConnection.RunClientTransaction(&ctxn, false, nil, nil)
+	server.DebugLog(tt.inner.Logger, "debug", "Created root.", "result", result, "error", err)
 	if err != nil {
 		return false, nil, err
 	}
@@ -485,7 +484,7 @@ func (tcb *targetConfigBase) attemptCreateRoots(rootCount int) (bool, configurat
 			positions := action.Create().Positions()
 			root.Positions = (*common.Positions)(&positions)
 		}
-		server.DebugLog(tcb.inner.Logger, "debug", "Roots created.", "roots", roots)
+		server.DebugLog(tt.inner.Logger, "debug", "Roots created.", "roots", roots)
 		return false, roots, nil
 	}
 	if result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT {

@@ -7,31 +7,27 @@ import (
 // ensureLocalTopology
 
 type ensureLocalTopology struct {
-	*targetConfigBase
+	*transmogrificationTask
 }
 
-func (task *ensureLocalTopology) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *ensureLocalTopology) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *ensureLocalTopology) IsValidTask() bool {
+func (task *ensureLocalTopology) isValid() bool {
 	return task.activeTopology == nil
 }
 
+func (task *ensureLocalTopology) announce() {
+	task.inner.Logger.Log("msg", "Ensuring local topology.")
+}
+
 func (task *ensureLocalTopology) Tick() (bool, error) {
-	if !task.IsValidTask() {
-		if task.targetConfig.Configuration == nil {
-			// There was no config supplied on the command line, so just
-			// pop what we've read in here as we may still be on a
-			// journey to create it!
-			task.targetConfig.Configuration = task.activeTopology.Configuration
-		}
-		// The fact we're here means we're done - there is a topology
-		// discovered one way or another.
+	if task.selectStage() != task {
 		return task.completed()
 	}
 
-	if _, found := task.activeConnections[task.connectionManager.RMId]; !found {
+	if _, found := task.activeConnections[task.self]; !found {
 		return false, nil
 	}
 

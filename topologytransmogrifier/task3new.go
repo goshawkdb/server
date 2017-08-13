@@ -10,22 +10,25 @@ import (
 // joining the cluster gets told.
 
 type installTargetNew struct {
-	*targetConfigBase
+	*transmogrificationTask
 }
 
-func (task *installTargetNew) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *installTargetNew) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *installTargetNew) IsValidTask() bool {
+func (task *installTargetNew) isValid() bool {
 	active := task.activeTopology
-	return active != nil && len(active.ClusterId) > 0 &&
-		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
 		!active.NextConfiguration.InstalledOnNew
 }
 
+func (task *installTargetNew) announce() {
+	task.inner.Logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", task.targetConfig)
+}
+
 func (task *installTargetNew) Tick() (bool, error) {
-	if !task.IsValidTask() {
+	if task.selectStage() != task {
 		return task.completed()
 	}
 

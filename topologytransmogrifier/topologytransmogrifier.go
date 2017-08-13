@@ -38,7 +38,7 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 		}
 	}
 
-	if _, found := topology.RMsRemoved[tt.connectionManager.RMId]; found {
+	if _, found := topology.RMsRemoved[tt.self]; found {
 		return false, errors.New("We have been removed from the cluster. Shutting down.")
 	}
 	tt.activeTopology = topology
@@ -50,7 +50,7 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 				return false, err
 			}
 			tt.installTopology(topology, nil, localHost, remoteHosts)
-			tt.inner.Logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.connectionManager.RMId)
+			tt.inner.Logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.self)
 
 			for version := range tt.migrations {
 				if version <= topology.Version {
@@ -99,43 +99,57 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 }
 
 func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConfiguration) error {
-	if tt.activeTopology != nil {
-		activeConfig := tt.activeTopology.Configuration
-		activeClusterUUId, targetClusterUUId := activeConfig.ClusterUUId, targetConfig.ClusterUUId
+	// This can be called both via a msg (eg cmdline and SIGHUP), or
+	// when there is no current task and we have to think about
+	// creating one. If there is a currentTask, then we compare
+	// targetConfig with that. Otherwise we compare with the
+	// activeTopology.
+
+	versus := tt.activeTopology
+	if tt.currentTask != nil {
+		versus = tt.currentTask.TargetConfig()
+	}
+
+	if versus != nil {
+		versusConfig := versus.Configuration
+		versusClusterUUId, targetClusterUUId := versusConfig.ClusterUUId, targetConfig.ClusterUUId
 		switch {
-		case targetConfig.ClusterId != activeConfig.ClusterId && len(activeConfig.ClusterId) > 0:
+		case targetConfig.ClusterId != versusConfig.ClusterId && len(versusConfig.ClusterId) > 0:
 			return fmt.Errorf("Illegal config change: ClusterId should be '%s' instead of '%s'.",
-				activeConfig.ClusterId, targetConfig.ClusterId)
+				versusConfig.ClusterId, targetConfig.ClusterId)
 
-		case targetClusterUUId != 0 && activeClusterUUId != 0 && targetClusterUUId != activeClusterUUId:
+		case targetClusterUUId != 0 && versusClusterUUId != 0 && targetClusterUUId != versusClusterUUId:
 			return fmt.Errorf("Illegal config change: ClusterUUId should be '%v' instead of '%v'.",
-				activeClusterUUId, targetClusterUUId)
+				versusClusterUUId, targetClusterUUId)
 
-		case targetConfig.MaxRMCount != activeConfig.MaxRMCount && activeConfig.Version != 0:
+		case targetConfig.MaxRMCount != versusConfig.MaxRMCount && versusConfig.Version != 0:
 			return fmt.Errorf("Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
 
-		case targetConfig.Configuration.EqualExternally(activeConfig):
-			tt.inner.Logger.Log("msg", "Config transition completed.", "activeVersion", activeConfig.Version)
+		case targetConfig.Configuration.EqualExternally(versusConfig):
+			if versus == tt.activeTopology {
+				tt.inner.Logger.Log("msg", "Config already reached.", "version", versusConfig.Version)
+			} else {
+				tt.inner.Logger.Log("msg", "Config already being targetted.", "version", versusConfig.Version)
+			}
 			return nil
 
-		case targetConfig.Version == activeConfig.Version:
+		case targetConfig.Version == versusConfig.Version:
 			return fmt.Errorf("Illegal config change: Config has changed but Version has not been increased (%v). Ignoring.", targetConfig.Version)
 
-		case targetConfig.Version < activeConfig.Version:
-			return fmt.Errorf("Illegal config change: Ignoring config with version %v as newer version already active (%v).",
-				targetConfig.Version, activeConfig.Version)
+		case targetConfig.Version < versusConfig.Version:
+			return fmt.Errorf("Illegal config change: Ignoring config with version %v as newer version already seen (%v).",
+				targetConfig.Version, versusConfig.Version)
 		}
 	}
 
+	// if we're here and there is a currentTask then we know
+	// currentTask is insufficient
 	if tt.currentTask != nil {
-		panic("setTarget called with non nil currentTask")
+		tt.currentTask.Abandon()
 	}
 
 	server.DebugLog(tt.inner.Logger, "debug", "Creating new task.")
-	tt.currentTask = &targetConfig{
-		TopologyTransmogrifier: tt,
-		targetConfig:           targetConfig,
-	}
+	tt.currentTask = tt.newTransmogrificationTask(targetConfig)
 	return nil
 }
 

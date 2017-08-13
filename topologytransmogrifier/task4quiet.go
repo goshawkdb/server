@@ -9,31 +9,33 @@ import (
 // quiet
 
 type quiet struct {
-	*targetConfigBase
+	*transmogrificationTask
 	installing *configuration.Configuration
 	stage      uint8
 }
 
-func (task *quiet) init(base *targetConfigBase) {
-	task.targetConfigBase = base
+func (task *quiet) init(base *transmogrificationTask) {
+	task.transmogrificationTask = base
 }
 
-func (task *quiet) IsValidTask() bool {
+func (task *quiet) isValid() bool {
 	active := task.activeTopology
-	return active != nil && len(active.ClusterId) > 0 &&
-		active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
-		active.NextConfiguration.InstalledOnNew &&
-		!active.NextConfiguration.QuietRMIds[task.connectionManager.RMId]
+	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+		!active.NextConfiguration.QuietRMIds[task.self]
+}
+
+func (task *quiet) announce() {
+	task.inner.Logger.Log("msg", "Waiting for quiet.", "configuration", task.targetConfig)
 }
 
 func (task *quiet) Tick() (bool, error) {
+	if task.selectStage() != task {
+		return task.completed()
+	}
 	// The purpose of getting the vars to go quiet isn't just for
 	// emigration; it's also to require that txn outcomes are decided
 	// (consensus reached) before any acceptors get booted out. So we
 	// go through all this even if len(pending) is 0.
-	if !task.IsValidTask() {
-		return task.completed()
-	}
 
 	next := task.activeTopology.NextConfiguration
 	localHost, err := task.firstLocalHost(task.activeTopology.Configuration)
@@ -96,7 +98,7 @@ func (task *quiet) Tick() (bool, error) {
 			"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 		topology := task.activeTopology.Clone()
-		topology.NextConfiguration.QuietRMIds[task.connectionManager.RMId] = true
+		topology.NextConfiguration.QuietRMIds[task.self] = true
 
 		txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
 		go task.runTopologyTransaction(task, txn, active, passive)

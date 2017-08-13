@@ -24,7 +24,7 @@ func (msg topologyTransmogrifierMsgImmigrationReceived) Exec() (bool, error) {
 			// Whatever change that was for, it isn't happening any
 			// more. Ignore.
 			return false, nil
-		} else if _, found := next.Pending[msg.connectionManager.RMId]; version == next.Version && !found {
+		} else if _, found := next.Pending[msg.self]; version == next.Version && !found {
 			// Migration is for the current topology change, but we've
 			// declared ourselves done, so Ignore.
 			return false, nil

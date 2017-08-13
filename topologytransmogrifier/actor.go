@@ -20,6 +20,7 @@ type TopologyTransmogrifier struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
 
+	self              common.RMId
 	db                *db.Databases
 	connectionManager *ConnectionManager
 	localConnection   *client.LocalConnection
@@ -28,7 +29,7 @@ type TopologyTransmogrifier struct {
 	activeConnections map[common.RMId]paxos.Connection
 	migrations        map[uint32]map[common.RMId]*int32
 
-	currentTask topologyTask
+	currentTask Task
 
 	listenPort        uint16
 	rng               *rand.Rand
@@ -41,13 +42,14 @@ type TopologyTransmogrifier struct {
 type topologyTransmogrifierInner struct {
 	*TopologyTransmogrifier
 	*actor.BasicServerInner
-	previousTask topologyTask
+	previousTask Task
 }
 
-func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
 
 	localEstablished := make(chan struct{})
 	tt := &TopologyTransmogrifier{
+		self:              self,
 		db:                db,
 		connectionManager: cm,
 		localConnection:   lc,
@@ -57,10 +59,7 @@ func NewTopologyTransmogrifier(db *db.Databases, cm *ConnectionManager, lc *clie
 		shutdownSignaller: ss,
 		localEstablished:  localEstablished,
 	}
-	tt.currentTask = &targetConfigBase{
-		TopologyTransmogrifier: tt,
-		targetConfig:           &configuration.NextConfiguration{Configuration: config},
-	}
+	tt.currentTask = tt.newTransmogrificationTask(&configuration.NextConfiguration{Configuration: config})
 	tti := &tt.inner
 	tti.TopologyTransmogrifier = tt
 	tti.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "topologyTransmogrifier"))
