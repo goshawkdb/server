@@ -14,6 +14,7 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	ch "goshawkdb.io/server/consistenthash"
+	"goshawkdb.io/server/utils"
 	"math/rand"
 	"net"
 	"os"
@@ -68,9 +69,9 @@ func (a *ConfigurationJSON) Equal(b *ConfigurationJSON) bool {
 	if !(a.ClusterId == b.ClusterId && a.Version == b.Version && len(a.Hosts) == len(b.Hosts) && a.F == b.F && a.MaxRMCount == b.MaxRMCount && a.NoSync == b.NoSync && len(a.ClientCertificateFingerprints) == len(b.ClientCertificateFingerprints)) {
 		return false
 	}
-	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
+	aHosts := make(map[string]utils.EmptyStruct, len(a.Hosts))
 	for _, aHost := range a.Hosts {
-		aHosts[aHost] = server.EmptyStructVal
+		aHosts[aHost] = utils.EmptyStructVal
 	}
 	for _, bHost := range b.Hosts {
 		if _, found := aHosts[bHost]; !found {
@@ -189,7 +190,7 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 	}
 
 	seg := capn.NewBuffer(nil)
-	allRootNamesMap := make(map[string]server.EmptyStruct)
+	allRootNamesMap := make(map[string]utils.EmptyStruct)
 	for fingerprint, rootsMap := range config.ClientCertificateFingerprints {
 		fingerprintBytes, err := hex.DecodeString(fingerprint)
 		if err != nil {
@@ -202,7 +203,7 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		result.Fingerprints[fingerprintAry] = accountRootsMap
 
 		for rootName, rootCaps := range rootsMap {
-			allRootNamesMap[rootName] = server.EmptyStructVal
+			allRootNamesMap[rootName] = utils.EmptyStructVal
 
 			var capability *common.Capability
 			if rootCaps.Read && rootCaps.Write {
@@ -244,7 +245,7 @@ type Configuration struct {
 	MaxRMCount        uint16
 	NoSync            bool
 	RMs               common.RMIds
-	RMsRemoved        map[common.RMId]server.EmptyStruct
+	RMsRemoved        map[common.RMId]utils.EmptyStruct
 	Fingerprints      map[Fingerprint]map[string]*common.Capability
 	Roots             []string
 	NextConfiguration *NextConfiguration
@@ -294,9 +295,9 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 		return false
 	}
 	// we must cope with the hosts being in different orders on a and b
-	aHosts := make(map[string]server.EmptyStruct, len(a.Hosts))
+	aHosts := make(map[string]utils.EmptyStruct, len(a.Hosts))
 	for _, aHost := range a.Hosts {
-		aHosts[aHost] = server.EmptyStructVal
+		aHosts[aHost] = utils.EmptyStructVal
 	}
 	for _, bHost := range b.Hosts {
 		if _, found := aHosts[bHost]; !found {
@@ -364,7 +365,7 @@ func (config *Configuration) Clone() *Configuration {
 		MaxRMCount:        config.MaxRMCount,
 		NoSync:            config.NoSync,
 		RMs:               make([]common.RMId, len(config.RMs)),
-		RMsRemoved:        make(map[common.RMId]server.EmptyStruct, len(config.RMsRemoved)),
+		RMsRemoved:        make(map[common.RMId]utils.EmptyStruct, len(config.RMsRemoved)),
 		Fingerprints:      make(map[Fingerprint]map[string]*common.Capability, len(config.Fingerprints)),
 		Roots:             make([]string, len(config.Roots)),
 		NextConfiguration: config.NextConfiguration.Clone(),
@@ -503,12 +504,12 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 	}
 
 	rmsRemoved := config.RmsRemoved()
-	c.RMsRemoved = make(map[common.RMId]server.EmptyStruct, rmsRemoved.Len())
+	c.RMsRemoved = make(map[common.RMId]utils.EmptyStruct, rmsRemoved.Len())
 	for idx, l := 0, rmsRemoved.Len(); idx < l; idx++ {
-		c.RMsRemoved[common.RMId(rmsRemoved.At(idx))] = server.EmptyStructVal
+		c.RMsRemoved[common.RMId(rmsRemoved.At(idx))] = utils.EmptyStructVal
 	}
 
-	rootsMap := make(map[string]server.EmptyStruct)
+	rootsMap := make(map[string]utils.EmptyStruct)
 	fingerprints := config.Fingerprints()
 	fingerprintsMap := make(map[Fingerprint]map[string]*common.Capability, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
@@ -522,7 +523,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 			name := rootCap.Name()
 			capability := rootCap.Capability()
 			roots[name] = common.NewCapability(capability)
-			rootsMap[name] = server.EmptyStructVal
+			rootsMap[name] = utils.EmptyStructVal
 		}
 		fingerprintsMap[ary] = roots
 	}
@@ -1036,7 +1037,7 @@ func (g *Generator) SatisfiedBy(config *Configuration, positions *common.Positio
 		f = next.F
 	}
 	twoFInc := (uint16(f) * 2) + 1
-	server.DebugLog(logger, "debug", "Generator. SatisfiedBy. NewResolver.", "RMIds", rms, "2F+1", twoFInc)
+	utils.DebugLog(logger, "debug", "Generator. SatisfiedBy. NewResolver.", "RMIds", rms, "2F+1", twoFInc)
 	resolver := ch.NewResolver(rms, twoFInc)
 	perm, err := resolver.ResolveHashCodes((*capn.UInt8List)(positions).ToArray())
 	if err != nil {

@@ -416,9 +416,8 @@ func (palc *proposerAwaitLocallyComplete) start() {
 				palc.Log("msg", "Recovered!", "error", fmt.Sprint(r), "outcomeWhich", palc.outcome.Which())
 				sc := server.NewStatusConsumer()
 				palc.outcomeAccumulator.Status(sc)
-				sc.Consume(func(str string) {
-					os.Stderr.WriteString(str + "\n")
-				})
+				str := sc.Wait()
+				os.Stderr.WriteString(str + "\n")
 				panic("repanic")
 			}
 		}()

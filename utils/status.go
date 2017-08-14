@@ -1,4 +1,4 @@
-package server
+package utils
 
 import (
 	"strings"
@@ -18,7 +18,7 @@ func NewStatusConsumer() *StatusConsumer {
 	return &StatusConsumer{
 		forkCount: 1,
 		sep:       "\n ",
-		slots:     make([][]string, 0, 16),
+		slots:     make([][]string, 0, 8),
 		joined:    make(chan struct{}),
 	}
 }
@@ -31,12 +31,13 @@ func (s *StatusConsumer) Fork() *StatusConsumer {
 	slotIdx := len(s.slots)
 	s.slots = append(s.slots, nil)
 	s.Unlock()
-	go sc.Consume(func(str string) {
+	go func() {
+		str := s.Wait()
 		s.Lock()
 		s.slots[slotIdx] = []string{str}
 		s.Unlock()
 		s.Join()
-	})
+	}()
 	return sc
 }
 
@@ -52,16 +53,16 @@ func (s *StatusConsumer) Emit(status ...string) {
 	s.Unlock()
 }
 
-func (s *StatusConsumer) Consume(fun func(string)) {
+func (s *StatusConsumer) Wait() string {
 	buf := " "
 	<-s.joined
 	for _, strs := range s.slots {
 		buf += strings.Join(strs, s.sep) + s.sep
 	}
 	if len(buf) == 1 {
-		fun(buf)
+		return buf
 	} else {
 		end := len(buf) - len(s.sep)
-		fun(buf[:end])
+		return buf[:end]
 	}
 }

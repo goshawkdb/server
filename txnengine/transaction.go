@@ -9,6 +9,7 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/utils"
 	"sync/atomic"
 	"time"
 )
@@ -349,7 +350,7 @@ func (txn *Txn) String() string {
 	return txn.Id.String()
 }
 
-func (txn *Txn) Status(sc *server.StatusConsumer) {
+func (txn *Txn) Status(sc *utils.StatusConsumer) {
 	sc.Emit(txn.Id.String())
 	sc.Emit(fmt.Sprintf("- Local Actions: %v", txn.localActions))
 	sc.Emit(fmt.Sprintf("- Current State: %v", txn.currentState))
@@ -367,7 +368,6 @@ func (txn *Txn) Status(sc *server.StatusConsumer) {
 type txnStateMachineComponent interface {
 	init(*Txn)
 	start()
-	txnStateMachineComponentWitness()
 }
 
 // Determine Local Ballots
@@ -376,8 +376,7 @@ type txnDetermineLocalBallots struct {
 	pendingVote int32
 }
 
-func (tdb *txnDetermineLocalBallots) txnStateMachineComponentWitness() {}
-func (tdb *txnDetermineLocalBallots) String() string                   { return "txnDetermineLocalBallots" }
+func (tdb *txnDetermineLocalBallots) String() string { return "txnDetermineLocalBallots" }
 
 func (tdb *txnDetermineLocalBallots) init(txn *Txn) {
 	tdb.Txn = txn
@@ -409,8 +408,7 @@ type txnAwaitLocalBallots struct {
 	preAbortedBool bool
 }
 
-func (talb *txnAwaitLocalBallots) txnStateMachineComponentWitness() {}
-func (talb *txnAwaitLocalBallots) String() string                   { return "txnAwaitLocalBallots" }
+func (talb *txnAwaitLocalBallots) String() string { return "txnAwaitLocalBallots" }
 
 func (talb *txnAwaitLocalBallots) init(txn *Txn) {
 	talb.Txn = txn
@@ -503,8 +501,7 @@ type txnReceiveOutcome struct {
 	aborted      bool
 }
 
-func (tro *txnReceiveOutcome) txnStateMachineComponentWitness() {}
-func (tro *txnReceiveOutcome) String() string                   { return "txnReceiveOutcome" }
+func (tro *txnReceiveOutcome) String() string { return "txnReceiveOutcome" }
 
 func (tro *txnReceiveOutcome) init(txn *Txn) {
 	tro.Txn = txn
@@ -564,8 +561,7 @@ type txnAwaitLocallyComplete struct {
 	activeFramesCount int32
 }
 
-func (talc *txnAwaitLocallyComplete) txnStateMachineComponentWitness() {}
-func (talc *txnAwaitLocallyComplete) String() string                   { return "txnAwaitLocallyComplete" }
+func (talc *txnAwaitLocallyComplete) String() string { return "txnAwaitLocallyComplete" }
 
 func (talc *txnAwaitLocallyComplete) init(txn *Txn) {
 	talc.Txn = txn
@@ -581,7 +577,7 @@ func (talc *txnAwaitLocallyComplete) start() {
 // Callback (from var-dispatcher (frames) back into txn)
 func (talc *txnAwaitLocallyComplete) LocallyComplete() {
 	result := atomic.AddInt32(&talc.activeFramesCount, -1)
-	server.DebugLog(talc.logger, "debug", "LocallyComplete", "TxnId", talc.Id, "pendingFrameCount", result)
+	utils.DebugLog(talc.logger, "debug", "LocallyComplete", "TxnId", talc.Id, "pendingFrameCount", result)
 	if result == 0 {
 		talc.exe.EnqueueFuncAsync(talc.locallyComplete)
 	} else if result < 0 {
@@ -603,8 +599,7 @@ type txnReceiveCompletion struct {
 	completed bool
 }
 
-func (trc *txnReceiveCompletion) txnStateMachineComponentWitness() {}
-func (trc *txnReceiveCompletion) String() string                   { return "txnReceiveCompletion" }
+func (trc *txnReceiveCompletion) String() string { return "txnReceiveCompletion" }
 
 func (trc *txnReceiveCompletion) init(txn *Txn) {
 	trc.Txn = txn
@@ -614,7 +609,7 @@ func (trc *txnReceiveCompletion) start() {}
 
 // Callback (from network/paxos)
 func (trc *txnReceiveCompletion) CompletionReceived() {
-	server.DebugLog(trc.logger, "debug", "CompletionReceived", "TxnId", trc.Id, "alreadyCompleted", trc.completed, "currentState", trc.currentState, "aborted", trc.aborted)
+	utils.DebugLog(trc.logger, "debug", "CompletionReceived", "TxnId", trc.Id, "alreadyCompleted", trc.completed, "currentState", trc.currentState, "aborted", trc.aborted)
 	if trc.completed {
 		// Be silent in this case.
 		return

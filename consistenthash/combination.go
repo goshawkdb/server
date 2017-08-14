@@ -2,7 +2,7 @@ package consistenthash
 
 import (
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
+	"goshawkdb.io/server/utils"
 	"sort"
 )
 
@@ -56,7 +56,7 @@ type CombinationPicker struct {
 }
 
 // Here, you want desiredLen to be FInc
-func NewCombinationPicker(desiredLen int, disabledHashCodes map[common.RMId]server.EmptyStruct) *CombinationPicker {
+func NewCombinationPicker(desiredLen int, disabledHashCodes map[common.RMId]utils.EmptyStruct) *CombinationPicker {
 	dhc := make(map[common.RMId]bool, len(disabledHashCodes))
 	for hc := range disabledHashCodes {
 		dhc[hc] = false
