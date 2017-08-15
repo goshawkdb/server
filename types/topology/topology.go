@@ -1,4 +1,4 @@
-package types
+package topology
 
 import (
 	"goshawkdb.io/server/configuration"

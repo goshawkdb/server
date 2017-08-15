@@ -5,10 +5,10 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	mdbs "github.com/msackman/gomdb/server"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/utils"
 	"math/rand"
 	"time"
 )
@@ -49,7 +49,7 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
 	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
 	writesClock := VectorClockFromData(varCap.WritesClock(), true).AsMutable()
-	server.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
+	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
@@ -106,7 +106,7 @@ func (v *Var) RemoveWriteSubscriber(txnId *common.TxnId) {
 }
 
 func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
-	server.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
+	utils.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
 	v.poisson.AddThen(enqueuedAt)
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()
@@ -140,7 +140,7 @@ func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 }
 
 func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
-	server.DebugLog(v.vm.logger, "debug", "ReceiveTxnOutcome.", "VarUUId", v.UUId, "action", action)
+	utils.DebugLog(v.vm.logger, "debug", "ReceiveTxnOutcome.", "VarUUId", v.UUId, "action", action)
 	v.poisson.AddThen(enqueuedAt)
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()
@@ -182,7 +182,7 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 }
 
 func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Positions) {
-	server.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "action", action)
+	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "action", action)
 	v.curFrame = f
 
 	if positions != nil {
@@ -278,7 +278,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 		} else if ran != nil {
 			// Switch back to the right go-routine
 			v.applyToSelf(func() {
-				server.DebugLog(v.vm.logger, "debug", "Written to disk.", "VarUUId", v.UUId, "TxnId", f.frameTxnId)
+				utils.DebugLog(v.vm.logger, "debug", "Written to disk.", "VarUUId", v.UUId, "TxnId", f.frameTxnId)
 				v.curFrameOnDisk = f
 				for ancestor := f.parent; ancestor != nil && ancestor.DescendentOnDisk(); ancestor = ancestor.parent {
 				}
@@ -289,7 +289,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 }
 
 func (v *Var) TxnGloballyComplete(action *localAction, enqueuedAt time.Time) {
-	server.DebugLog(v.vm.logger, "debug", "Txn globally complete.", "VarUUId", v.UUId, "action", action)
+	utils.DebugLog(v.vm.logger, "debug", "Txn globally complete.", "VarUUId", v.UUId, "action", action)
 	if action.frame.v != v {
 		panic(fmt.Sprintf("%v frame var has changed %p -> %p (%v)", v.UUId, action.frame.v, v, action))
 	}
@@ -330,7 +330,7 @@ func (v *Var) applyToSelf(fun func()) {
 			case v1 == nil:
 				panic(fmt.Sprintf("%v not found!", v.UUId))
 			case v1 != v:
-				server.DebugLog(v.vm.logger, "debug", "Ignoring callback as var object has changed.", "VarUUId", v.UUId)
+				utils.DebugLog(v.vm.logger, "debug", "Ignoring callback as var object has changed.", "VarUUId", v.UUId)
 				v1.maybeMakeInactive()
 			default:
 				fun()
@@ -340,7 +340,7 @@ func (v *Var) applyToSelf(fun func()) {
 	})
 }
 
-func (v *Var) Status(sc *server.StatusConsumer) {
+func (v *Var) Status(sc *utils.StatusConsumer) {
 	sc.Emit(v.UUId.String())
 	if v.positions == nil {
 		sc.Emit("- Positions: unknown")

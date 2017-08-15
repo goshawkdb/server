@@ -15,9 +15,3 @@ func CheckWarn(e error, logger log.Logger) bool {
 type DebugLogFunc func(log.Logger, ...interface{})
 
 var DebugLog = DebugLogFunc(func(log.Logger, ...interface{}) {})
-
-type EmptyStruct struct{}
-
-var EmptyStructVal = EmptyStruct{}
-
-func (es EmptyStruct) String() string { return "" }

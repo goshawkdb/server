@@ -10,6 +10,7 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
 	"sort"
 	"time"
@@ -140,7 +141,7 @@ type frameOpen struct {
 	uncommittedReads   uint
 	writeVoteClock     *VectorClockMutable
 	writes             *sl.SkipList
-	clientWrites       map[[common.ClientLen]byte]utils.EmptyStruct
+	clientWrites       map[[common.ClientLen]byte]types.EmptyStruct
 	uncommittedWrites  uint
 	rwPresent          bool
 	rollScheduled      *time.Time
@@ -154,7 +155,7 @@ func (fo *frameOpen) init(f *frame) {
 	fo.reads = sl.New(f.v.rng)
 	fo.learntFutureReads = []*localAction{}
 	fo.writes = sl.New(f.v.rng)
-	fo.clientWrites = make(map[[common.ClientLen]byte]utils.EmptyStruct)
+	fo.clientWrites = make(map[[common.ClientLen]byte]types.EmptyStruct)
 }
 
 func (fo *frameOpen) start()         {}
@@ -248,7 +249,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.writes.Get(action) == nil:
 		fo.uncommittedWrites++
-		fo.clientWrites[cid] = utils.EmptyStructVal
+		fo.clientWrites[cid] = types.EmptyStructVal
 		action.frame = fo.frame
 		if fo.uncommittedReads == 0 {
 			fo.writes.Insert(action, uncommitted)

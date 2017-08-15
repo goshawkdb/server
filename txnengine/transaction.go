@@ -6,7 +6,6 @@ import (
 	"github.com/go-kit/kit/log"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/utils"

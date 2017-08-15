@@ -1,4 +1,4 @@
-package types
+package actor
 
 import (
 	"goshawkdb.io/common/actor"

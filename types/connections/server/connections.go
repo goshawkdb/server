@@ -1,4 +1,4 @@
-package types
+package server
 
 import (
 	"goshawkdb.io/common"

@@ -1,4 +1,4 @@
-package network
+package tcpcapnproto
 
 import (
 	"crypto/tls"

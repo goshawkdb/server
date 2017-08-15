@@ -4,19 +4,20 @@ import (
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server/types"
+	"goshawkdb.io/server/types/connections/server"
 )
 
 type OneShotSender struct {
 	logger    log.Logger
 	msg       []byte
-	connPub   types.ServerConnectionPublisher
-	remaining map[common.RMId]EmptyStruct
+	connPub   server.ServerConnectionPublisher
+	remaining map[common.RMId]types.EmptyStruct
 }
 
-func NewOneShotSender(logger log.Logger, msg []byte, connPub types.ServerConnectionPublisher, recipients ...common.RMId) *OneShotSender {
-	remaining := make(map[common.RMId]EmptyStruct, len(recipients))
+func NewOneShotSender(logger log.Logger, msg []byte, connPub server.ServerConnectionPublisher, recipients ...common.RMId) *OneShotSender {
+	remaining := make(map[common.RMId]types.EmptyStruct, len(recipients))
 	for _, rmId := range recipients {
-		remaining[rmId] = EmptyStructVal
+		remaining[rmId] = types.EmptyStructVal
 	}
 	oss := &OneShotSender{
 		logger:    logger,
@@ -29,7 +30,7 @@ func NewOneShotSender(logger log.Logger, msg []byte, connPub types.ServerConnect
 	return oss
 }
 
-func (oss *OneShotSender) ConnectedRMs(conns map[common.RMId]types.ServerConnection) {
+func (oss *OneShotSender) ConnectedRMs(conns map[common.RMId]server.ServerConnection) {
 	for recipient := range oss.remaining {
 		if conn, found := conns[recipient]; found {
 			delete(oss.remaining, recipient)
@@ -42,9 +43,9 @@ func (oss *OneShotSender) ConnectedRMs(conns map[common.RMId]types.ServerConnect
 	}
 }
 
-func (oss *OneShotSender) ConnectionLost(common.RMId, map[common.RMId]types.ServerConnection) {}
+func (oss *OneShotSender) ConnectionLost(common.RMId, map[common.RMId]server.ServerConnection) {}
 
-func (oss *OneShotSender) ConnectionEstablished(rmId common.RMId, conn types.ServerConnection, conns map[common.RMId]types.ServerConnection, done func()) {
+func (oss *OneShotSender) ConnectionEstablished(rmId common.RMId, conn server.ServerConnection, conns map[common.RMId]server.ServerConnection, done func()) {
 	defer done()
 	if _, found := oss.remaining[rmId]; found {
 		delete(oss.remaining, rmId)
@@ -68,7 +69,7 @@ func NewRepeatingSender(msg []byte, recipients ...common.RMId) *RepeatingSender 
 	}
 }
 
-func (rs *RepeatingSender) ConnectedRMs(conns map[common.RMId]types.ServerConnection) {
+func (rs *RepeatingSender) ConnectedRMs(conns map[common.RMId]server.ServerConnection) {
 	for _, recipient := range rs.recipients {
 		if conn, found := conns[recipient]; found {
 			conn.Send(rs.msg)
@@ -76,9 +77,9 @@ func (rs *RepeatingSender) ConnectedRMs(conns map[common.RMId]types.ServerConnec
 	}
 }
 
-func (rs *RepeatingSender) ConnectionLost(common.RMId, map[common.RMId]types.ServerConnection) {}
+func (rs *RepeatingSender) ConnectionLost(common.RMId, map[common.RMId]server.ServerConnection) {}
 
-func (rs *RepeatingSender) ConnectionEstablished(rmId common.RMId, conn types.ServerConnection, conns map[common.RMId]types.ServerConnection, done func()) {
+func (rs *RepeatingSender) ConnectionEstablished(rmId common.RMId, conn server.ServerConnection, conns map[common.RMId]server.ServerConnection, done func()) {
 	defer done()
 	for _, recipient := range rs.recipients {
 		if recipient == rmId {
@@ -98,15 +99,15 @@ func NewRepeatingAllSender(msg []byte) *RepeatingAllSender {
 	}
 }
 
-func (ras *RepeatingAllSender) ConnectedRMs(conns map[common.RMId]types.ServerConnection) {
+func (ras *RepeatingAllSender) ConnectedRMs(conns map[common.RMId]server.ServerConnection) {
 	for _, conn := range conns {
 		conn.Send(ras.msg)
 	}
 }
 
-func (ras *RepeatingAllSender) ConnectionLost(common.RMId, map[common.RMId]types.ServerConnection) {}
+func (ras *RepeatingAllSender) ConnectionLost(common.RMId, map[common.RMId]server.ServerConnection) {}
 
-func (ras *RepeatingAllSender) ConnectionEstablished(rmId common.RMId, conn types.ServerConnection, conns map[common.RMId]types.ServerConnection, done func()) {
+func (ras *RepeatingAllSender) ConnectionEstablished(rmId common.RMId, conn server.ServerConnection, conns map[common.RMId]server.ServerConnection, done func()) {
 	conn.Send(ras.msg)
 	done()
 }
