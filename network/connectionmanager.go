@@ -14,7 +14,6 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/paxos"
-	"goshawkdb.io/server/topologytransmogrifier"
 	eng "goshawkdb.io/server/txnengine"
 	"net"
 	"sync"
@@ -35,7 +34,6 @@ type ConnectionManager struct {
 	BootCount                     uint32
 	certificate                   []byte
 	nodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
-	transmogrifier                *topologytransmogrifier.TopologyTransmogrifier
 	topology                      *configuration.Topology
 	servers                       map[string][]*connectionManagerMsgServerEstablished
 	rmToServer                    map[common.RMId]*connectionManagerMsgServerEstablished
@@ -58,7 +56,7 @@ type connectionManagerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *topologytransmogrifier.TopologyTransmogrifier, *client.LocalConnection) {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*ConnectionManager, *client.LocalConnection) {
 
 	cm := &ConnectionManager{
 		parentLogger:      logger,
@@ -110,71 +108,13 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *d
 	cm.localConnection = client.NewLocalConnection(cm.RMId, cm.BootCount, cm, cm.parentLogger)
 	cm.Dispatchers = paxos.NewDispatchers(cm, cm.RMId, cm.BootCount, procs, db, cm.localConnection, cm.parentLogger)
 	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
-	cm.transmogrifier = transmogrifier
 
 	<-localEstablished
-	return cm, cm.transmogrifier, cm.localConnection
+	return cm, transmogrifier, cm.localConnection
 }
 
 func (cm *ConnectionManager) DispatchMessage(sender common.RMId, msgType msgs.Message_Which, msg msgs.Message) {
 	d := cm.Dispatchers
-	switch msgType {
-	case msgs.MESSAGE_TXNSUBMISSION:
-		txn := eng.TxnReaderFromData(msg.TxnSubmission())
-		d.ProposerDispatcher.TxnReceived(sender, txn)
-	case msgs.MESSAGE_SUBMISSIONOUTCOME:
-		outcome := msg.SubmissionOutcome()
-		txn := eng.TxnReaderFromData(outcome.Txn())
-		txnId := txn.Id
-		connNumber := txnId.ConnectionCount()
-		bootNumber := txnId.BootCount()
-		if conn := cm.GetClient(bootNumber, connNumber); conn == nil {
-			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			paxos.NewOneShotSender(cm.parentLogger, paxos.MakeTxnSubmissionCompleteMsg(txnId), cm, sender)
-		} else {
-			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
-		}
-	case msgs.MESSAGE_SUBMISSIONCOMPLETE:
-		tsc := msg.SubmissionComplete()
-		d.AcceptorDispatcher.TxnSubmissionCompleteReceived(sender, &tsc)
-	case msgs.MESSAGE_SUBMISSIONABORT:
-		tsa := msg.SubmissionAbort()
-		d.ProposerDispatcher.TxnSubmissionAbortReceived(sender, &tsa)
-	case msgs.MESSAGE_ONEATXNVOTES:
-		oneATxnVotes := msg.OneATxnVotes()
-		d.AcceptorDispatcher.OneATxnVotesReceived(sender, &oneATxnVotes)
-	case msgs.MESSAGE_ONEBTXNVOTES:
-		oneBTxnVotes := msg.OneBTxnVotes()
-		d.ProposerDispatcher.OneBTxnVotesReceived(sender, &oneBTxnVotes)
-	case msgs.MESSAGE_TWOATXNVOTES:
-		twoATxnVotes := msg.TwoATxnVotes()
-		d.AcceptorDispatcher.TwoATxnVotesReceived(sender, &twoATxnVotes)
-	case msgs.MESSAGE_TWOBTXNVOTES:
-		twoBTxnVotes := msg.TwoBTxnVotes()
-		d.ProposerDispatcher.TwoBTxnVotesReceived(sender, &twoBTxnVotes)
-	case msgs.MESSAGE_TXNLOCALLYCOMPLETE:
-		tlc := msg.TxnLocallyComplete()
-		d.AcceptorDispatcher.TxnLocallyCompleteReceived(sender, &tlc)
-	case msgs.MESSAGE_TXNGLOBALLYCOMPLETE:
-		tgc := msg.TxnGloballyComplete()
-		d.ProposerDispatcher.TxnGloballyCompleteReceived(sender, &tgc)
-	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
-		if sender != cm.RMId {
-			configCap := msg.TopologyChangeRequest()
-			config := configuration.ConfigurationFromCap(&configCap)
-			cm.transmogrifier.RequestConfigurationChange(config)
-		}
-	case msgs.MESSAGE_MIGRATION:
-		migration := msg.Migration()
-		cm.transmogrifier.ImmigrationReceived(sender, &migration)
-	case msgs.MESSAGE_MIGRATIONCOMPLETE:
-		migrationComplete := msg.MigrationComplete()
-		cm.transmogrifier.ImmigrationCompleteReceived(sender, &migrationComplete)
-	case msgs.MESSAGE_FLUSHED:
-		cm.ServerConnectionFlushed(sender)
-	default:
-		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
-	}
 }
 
 type connectionManagerMsgServerEstablished struct {

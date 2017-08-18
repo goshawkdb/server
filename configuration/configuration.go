@@ -272,7 +272,7 @@ func LocalAddresses() ([]net.IP, error) {
 	return result, nil
 }
 
-func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
+func ConfigurationFromCap(config msgs.Configuration) *Configuration {
 	c := &Configuration{
 		ClusterId:   config.ClusterId(),
 		ClusterUUId: config.ClusterUUId(),
@@ -358,7 +358,7 @@ func ConfigurationFromCap(config *msgs.Configuration) *Configuration {
 		pending := next.Pending()
 
 		c.NextConfiguration = &NextConfiguration{
-			Configuration:  ConfigurationFromCap(&nextConfig),
+			Configuration:  ConfigurationFromCap(nextConfig),
 			AllHosts:       allHosts,
 			NewRMIds:       newRMIds,
 			SurvivingRMIds: survivingRMIds,

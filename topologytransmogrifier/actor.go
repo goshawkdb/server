@@ -10,8 +10,8 @@ import (
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
-	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"math/rand"
 	"time"
 )
@@ -25,8 +25,8 @@ type TopologyTransmogrifier struct {
 	connectionManager *ConnectionManager
 	localConnection   *client.LocalConnection
 	activeTopology    *configuration.Topology
-	hostToConnection  map[string]paxos.Connection
-	activeConnections map[common.RMId]paxos.Connection
+	hostToConnection  map[string]sconn.ServerConnection
+	activeConnections map[common.RMId]sconn.ServerConnection
 	migrations        map[uint32]map[common.RMId]*int32
 
 	currentTask Task

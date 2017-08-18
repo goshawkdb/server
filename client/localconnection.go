@@ -12,6 +12,9 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	sconn "goshawkdb.io/server/types/connections/server"
+	topo "goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
 	"sync"
 )
 
@@ -72,7 +75,7 @@ func (msg localConnectionMsgInit) Exec() (bool, error) {
 	if servers == nil {
 		return false, errors.New("LocalConnection failed to register with ConnectionManager!")
 	}
-	topology := msg.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, msg.LocalConnection)
+	topology := msg.connectionManager.AddTopologySubscriber(topo.ConnectionSubscriber, msg.LocalConnection)
 	if err := msg.submitter.TopologyChanged(topology); err != nil {
 		return false, err
 	}
@@ -111,7 +114,7 @@ func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
 type localConnectionMsgOutcomeReceived struct {
 	*LocalConnection
 	sender  common.RMId
-	txn     *eng.TxnReader
+	txn     *utils.TxnReader
 	outcome *msgs.Outcome
 }
 
@@ -120,7 +123,7 @@ func (msg localConnectionMsgOutcomeReceived) Exec() (bool, error) {
 	return false, msg.submitter.SubmissionOutcomeReceived(msg.sender, msg.txn, msg.outcome)
 }
 
-func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) {
 	lc.EnqueueMsg(localConnectionMsgOutcomeReceived{
 		LocalConnection: lc,
 		sender:          sender,
@@ -157,12 +160,12 @@ type localConnectionMsgRunClientTxn struct {
 	isTopologyTxn       bool
 	varPosMap           map[common.VarUUId]*common.Positions
 	translationCallback eng.TranslationCallback
-	txnReader           *eng.TxnReader
+	txnReader           *utils.TxnReader
 	outcome             *msgs.Outcome
 	err                 error
 }
 
-func (msg *localConnectionMsgRunClientTxn) setOutcomeError(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
+func (msg *localConnectionMsgRunClientTxn) setOutcomeError(txn *utils.TxnReader, outcome *msgs.Outcome, err error) error {
 	msg.txnReader = txn
 	msg.outcome = outcome
 	msg.err = err
@@ -181,7 +184,7 @@ func (msg *localConnectionMsgRunClientTxn) Exec() (bool, error) {
 	return false, msg.submitter.SubmitClientTransaction(msg.translationCallback, txn, txnId, msg.setOutcomeError, nil, msg.isTopologyTxn, nil)
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*eng.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*utils.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunClientTxn{
 		LocalConnection:     lc,
 		txn:                 txn,
@@ -204,12 +207,12 @@ type localConnectionMsgRunTxn struct {
 	txnId     *common.TxnId
 	activeRMs []common.RMId
 	backoff   *server.BinaryBackoffEngine
-	txnReader *eng.TxnReader
+	txnReader *utils.TxnReader
 	outcome   *msgs.Outcome
 	err       error
 }
 
-func (msg *localConnectionMsgRunTxn) setOutcomeError(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
+func (msg *localConnectionMsgRunTxn) setOutcomeError(txn *utils.TxnReader, outcome *msgs.Outcome, err error) error {
 	msg.txnReader = txn
 	msg.outcome = outcome
 	msg.err = err
@@ -230,7 +233,7 @@ func (msg *localConnectionMsgRunTxn) Exec() (bool, error) {
 }
 
 // txn must be root in its segment
-func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *server.BinaryBackoffEngine, activeRMs ...common.RMId) (*eng.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *server.BinaryBackoffEngine, activeRMs ...common.RMId) (*utils.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunTxn{
 		LocalConnection: lc,
 		txn:             txn,
@@ -249,7 +252,7 @@ func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, ba
 type localConnectionMsgServerConnectionsChanged struct {
 	actor.MsgSyncQuery
 	*LocalConnection
-	servers map[common.RMId]paxos.Connection
+	servers map[common.RMId]sconn.ServerConnection
 }
 
 func (msg localConnectionMsgServerConnectionsChanged) Exec() (bool, error) {
@@ -257,19 +260,19 @@ func (msg localConnectionMsgServerConnectionsChanged) Exec() (bool, error) {
 	return false, msg.submitter.ServerConnectionsChanged(msg.servers)
 }
 
-func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
+func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]sconn.ServerConnection) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	lc.EnqueueMsg(msg)
 }
 
-func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
+func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]sconn.ServerConnection) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	lc.EnqueueMsg(msg)
 }
 
-func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, c sconn.ServerConnection, servers map[common.RMId]sconn.ServerConnection, done func()) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	if lc.EnqueueMsg(msg) {
@@ -295,7 +298,7 @@ func (lc *localConnectionInner) Init(self *actor.Actor) (bool, error) {
 }
 
 func (lc *localConnectionInner) HandleShutdown(err error) bool {
-	lc.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, lc)
+	lc.connectionManager.RemoveTopologySubscriberAsync(topo.ConnectionSubscriber, lc)
 	lc.connectionManager.ClientLost(0, lc)
 	lc.connectionManager.RemoveServerConnectionSubscriber(lc)
 	return lc.BasicServerInner.HandleShutdown(err)

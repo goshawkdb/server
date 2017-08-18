@@ -9,6 +9,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/utils"
+	vc "goshawkdb.io/server/vectorclock"
 	"sync/atomic"
 	"time"
 )
@@ -26,7 +27,7 @@ type Txn struct {
 	writes       []*common.VarUUId
 	localActions []localAction
 	voter        bool
-	TxnReader    *TxnReader
+	TxnReader    *utils.TxnReader
 	exe          *dispatcher.Executor
 	vd           *VarDispatcher
 	stateChange  TxnLocalStateChange
@@ -57,12 +58,12 @@ type localAction struct {
 	ballot          *Ballot
 	frame           *frame
 	readVsn         *common.TxnId
-	writeTxnActions *TxnActions
+	writeTxnActions *utils.TxnActions
 	writeAction     *msgs.Action
 	createPositions *common.Positions
 	roll            bool
-	outcomeClock    VectorClockInterface
-	writesClock     *VectorClock
+	outcomeClock    vc.VectorClock
+	writesClock     *vc.VectorClockImmutable
 }
 
 func (action *localAction) IsRead() bool {
@@ -81,21 +82,21 @@ func (action *localAction) IsImmigrant() bool {
 	return action.writesClock != nil
 }
 
-func (action *localAction) VoteDeadlock(clock *VectorClockMutable) {
+func (action *localAction) VoteDeadlock(clock *vc.VectorClockMutable) {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, AbortDeadlock, clock).ToBallot()
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteBadRead(clock *VectorClockMutable, txnId *common.TxnId, actions *TxnActions) {
+func (action *localAction) VoteBadRead(clock *vc.VectorClockMutable, txnId *common.TxnId, actions *utils.TxnActions) {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadBallot(txnId, actions)
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteCommit(clock *VectorClockMutable) bool {
+func (action *localAction) VoteCommit(clock *vc.VectorClockMutable) bool {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock).ToBallot()
 		return !action.voteCast(action.ballot, false)
@@ -144,7 +145,7 @@ func (action localAction) String() string {
 	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
 }
 
-func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, varCaps *msgs.Var_List, logger log.Logger) {
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *utils.TxnReader, varCaps *msgs.Var_List, logger log.Logger) {
 	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
 	txnActions := reader.Actions(true)
 	txn.localActions = make([]localAction, varCaps.Len())
@@ -157,8 +158,8 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		action.writeTxnActions = txnActions
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
-		action.outcomeClock = VectorClockFromData(varCap.WriteTxnClock(), false)
-		action.writesClock = VectorClockFromData(varCap.WritesClock(), false)
+		action.outcomeClock = vc.VectorClockFromData(varCap.WriteTxnClock(), false)
+		action.writesClock = vc.VectorClockFromData(varCap.WritesClock(), false)
 		actionsMap[*action.vUUId] = action
 	}
 
@@ -188,7 +189,7 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 	}
 }
 
-func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, logger log.Logger) *Txn {
+func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *utils.TxnReader, logger log.Logger) *Txn {
 	txnId := reader.Id
 	actions := reader.Actions(true)
 	actionsList := actions.Actions()
@@ -217,7 +218,7 @@ func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnL
 	return txn
 }
 
-func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action_List, actions *TxnActions) {
+func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action_List, actions *utils.TxnActions) {
 	localActions := make([]localAction, actionIndices.Len())
 	txn.localActions = localActions
 	var action *localAction
@@ -496,7 +497,7 @@ func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) (bool, 
 // Receive Outcome
 type txnReceiveOutcome struct {
 	*Txn
-	outcomeClock *VectorClock
+	outcomeClock *vc.VectorClockImmutable
 	aborted      bool
 }
 
@@ -523,7 +524,7 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	}
 	switch outcome.Which() {
 	case msgs.OUTCOME_COMMIT:
-		tro.outcomeClock = VectorClockFromData(outcome.Commit(), true)
+		tro.outcomeClock = vc.VectorClockFromData(outcome.Commit(), true)
 		/*
 			excess := tro.outcomeClock.Len - tro.TxnCap.Actions().Len()
 			fmt.Printf("%v ", excess)

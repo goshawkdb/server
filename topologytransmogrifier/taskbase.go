@@ -10,8 +10,9 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 	"time"
 )
 
@@ -31,7 +32,7 @@ type stage interface {
 type transmogrificationTask struct {
 	*TopologyTransmogrifier
 	targetConfig *configuration.NextConfiguration
-	sender       paxos.ServerConnectionSubscriber
+	sender       sconn.ServerConnectionSubscriber
 	runTxnMsg    actor.MsgExec
 
 	ensureLocalTopology
@@ -105,7 +106,7 @@ func (tt *transmogrificationTask) ensureShareGoalWithAll() {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTopologyChangeRequest(tt.targetConfig.AddToSegAutoRoot(seg))
-	tt.sender = paxos.NewRepeatingAllSender(common.SegToBytes(seg))
+	tt.sender = utils.NewRepeatingAllSender(common.SegToBytes(seg))
 	tt.connectionManager.AddServerConnectionSubscriber(tt.sender)
 }
 

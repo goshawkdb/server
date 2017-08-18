@@ -5,6 +5,8 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/utils"
+	vc "goshawkdb.io/server/vectorclock"
 )
 
 type Vote msgs.Vote_Which
@@ -41,7 +43,7 @@ type Ballot struct {
 	VarUUId *common.VarUUId
 	Data    []byte
 	VoteCap *msgs.Vote
-	Clock   *VectorClock
+	Clock   *vc.VectorClockImmutable
 	Vote    Vote
 }
 
@@ -51,7 +53,7 @@ func (b *Ballot) String() string {
 
 type BallotBuilder struct {
 	*Ballot
-	Clock *VectorClockMutable
+	Clock *vc.VectorClockMutable
 }
 
 func BallotFromData(data []byte) *Ballot {
@@ -66,7 +68,7 @@ func BallotFromData(data []byte) *Ballot {
 		VarUUId: vUUId,
 		Data:    data,
 		VoteCap: &voteCap,
-		Clock:   VectorClockFromData(ballotCap.Clock(), false),
+		Clock:   vc.VectorClockFromData(ballotCap.Clock(), false),
 		Vote:    Vote(voteCap.Which()),
 	}
 }
@@ -75,7 +77,7 @@ func (ballot *Ballot) Aborted() bool {
 	return ballot.Vote != Commit
 }
 
-func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *VectorClockMutable) *BallotBuilder {
+func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *vc.VectorClockMutable) *BallotBuilder {
 	ballot := &Ballot{
 		VarUUId: vUUId,
 		Vote:    vote,
@@ -91,12 +93,12 @@ func (ballot *BallotBuilder) buildSeg() (*capn.Segment, msgs.Ballot) {
 	ballotCap := msgs.NewRootBallot(seg)
 	ballotCap.SetVarId(ballot.VarUUId[:])
 	clockData := ballot.Clock.AsData()
-	ballot.Ballot.Clock = VectorClockFromData(clockData, false)
+	ballot.Ballot.Clock = vc.VectorClockFromData(clockData, false)
 	ballotCap.SetClock(clockData)
 	return seg, ballotCap
 }
 
-func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *TxnActions) *Ballot {
+func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *utils.TxnActions) *Ballot {
 	ballot.Vote = AbortBadRead
 	seg, ballotCap := ballot.buildSeg()
 

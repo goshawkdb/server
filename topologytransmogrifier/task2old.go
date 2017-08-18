@@ -5,7 +5,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/paxos"
+	sconn "goshawkdb.io/server/types/connections/server"
 )
 
 // installTargetOld
@@ -98,7 +98,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	hostsSurvived, hostsRemoved, hostsAdded :=
 		make(map[string]common.RMId),
 		make(map[string]common.RMId),
-		make(map[string]paxos.Connection)
+		make(map[string]sconn.ServerConnection)
 
 	allRemoteHosts := make([]string, 0, len(active.Hosts)+len(task.targetConfig.Hosts))
 
@@ -143,7 +143,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// map(old -> new)
 	rmIdsTranslation := make(map[common.RMId]common.RMId)
-	connsAdded := make([]paxos.Connection, 0, len(hostsAdded))
+	connsAdded := make([]sconn.ServerConnection, 0, len(hostsAdded))
 
 	// 3. Assume all old RMIds have been removed (so map to RMIdEmpty)
 	for _, rmId := range rmIdsOld {

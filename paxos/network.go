@@ -1,10 +1,8 @@
 package paxos
 
 import (
-	"github.com/go-kit/kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
-	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"

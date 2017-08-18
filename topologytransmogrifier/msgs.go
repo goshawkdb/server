@@ -5,7 +5,7 @@ import (
 	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/paxos"
+	sconn "goshawkdb.io/server/types/connections/server"
 )
 
 type topologyTransmogrifierMsgRequestConfigChange struct {
@@ -30,14 +30,14 @@ func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configurati
 type topologyTransmogrifierMsgSetActiveConnections struct {
 	actor.MsgSyncQuery
 	*TopologyTransmogrifier
-	servers map[common.RMId]paxos.Connection
+	servers map[common.RMId]sconn.ServerConnection
 }
 
 func (msg *topologyTransmogrifierMsgSetActiveConnections) Exec() (bool, error) {
 	defer msg.MustClose()
 	msg.activeConnections = msg.servers
 
-	msg.hostToConnection = make(map[string]paxos.Connection, len(msg.activeConnections))
+	msg.hostToConnection = make(map[string]sconn.ServerConnection, len(msg.activeConnections))
 	for _, cd := range msg.activeConnections {
 		msg.hostToConnection[cd.Host()] = cd
 	}
@@ -45,19 +45,19 @@ func (msg *topologyTransmogrifierMsgSetActiveConnections) Exec() (bool, error) {
 	return msg.maybeTick()
 }
 
-func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	tt.EnqueueMsg(msg)
 }
 
-func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
+func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]sconn.ServerConnection) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	tt.EnqueueMsg(msg)
 }
 
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	if tt.EnqueueMsg(msg) {

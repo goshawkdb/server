@@ -12,8 +12,8 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
-	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"sync/atomic"
 )
 
@@ -25,7 +25,7 @@ type emigrator struct {
 	connectionManager *ConnectionManager
 	activeBatches     map[common.RMId]*sendBatch
 	topology          *configuration.Topology
-	conns             map[common.RMId]paxos.Connection
+	conns             map[common.RMId]sconn.ServerConnection
 }
 
 func newEmigrator(task *migrate) *emigrator {
@@ -53,16 +53,16 @@ func (e *emigrator) TopologyChanged(topology *configuration.Topology, done func(
 	e.startBatches()
 }
 
-func (e *emigrator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+func (e *emigrator) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
 	e.conns = conns
 	e.startBatches()
 }
 
-func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]paxos.Connection) {
+func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]sconn.ServerConnection) {
 	delete(e.activeBatches, rmId)
 }
 
-func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, conns map[common.RMId]paxos.Connection, done func()) {
+func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
 	defer done()
 	if rmId == e.self {
 		return
@@ -228,7 +228,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 	return result, nil
 }
 
-func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
+func (it *dbIterator) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
 	defer it.connectionManager.RemoveServerConnectionSubscriber(it)
 
 	if atomic.LoadInt32(&it.stop) != 0 {
@@ -255,15 +255,15 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]paxos.Connection) {
 		}
 	}
 }
-func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]paxos.Connection) {}
-func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]sconn.ServerConnection) {}
+func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, servers map[common.RMId]sconn.ServerConnection, done func()) {
 	done()
 }
 
 type sendBatch struct {
 	logger  log.Logger
 	version uint32
-	conn    paxos.Connection
+	conn    sconn.ServerConnection
 	cond    configuration.Cond
 	elems   []*migrationElem
 }
@@ -273,7 +273,7 @@ type migrationElem struct {
 	vars []*msgs.Var
 }
 
-func (e *emigrator) newBatch(conn paxos.Connection, cond configuration.Cond) *sendBatch {
+func (e *emigrator) newBatch(conn sconn.ServerConnection, cond configuration.Cond) *sendBatch {
 	return &sendBatch{
 		logger:  e.logger,
 		version: e.topology.NextConfiguration.Version,

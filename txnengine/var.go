@@ -9,6 +9,7 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/utils"
+	vc "goshawkdb.io/server/vectorclock"
 	"math/rand"
 	"time"
 )
@@ -21,7 +22,7 @@ type VarWriteSubscriber struct {
 type Var struct {
 	UUId            *common.VarUUId
 	positions       *common.Positions
-	poisson         *Poisson
+	poisson         *utils.Poisson
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
@@ -47,14 +48,14 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	}
 
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
-	writeTxnClock := VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
-	writesClock := VectorClockFromData(varCap.WritesClock(), true).AsMutable()
+	writeTxnClock := vc.VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
+	writesClock := vc.VectorClockFromData(varCap.WritesClock(), true).AsMutable()
 	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
 
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
 	}).ResultError(); err == nil && result != nil {
-		txn := TxnReaderFromData(result.([]byte))
+		txn := utils.TxnReaderFromData(result.([]byte))
 		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
 		v.curFrameOnDisk = v.curFrame
 		v.varCap = &varCap
@@ -67,8 +68,8 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
 	v := newVar(uuid, exe, db, vm)
 
-	clock := NewVectorClock().AsMutable().Bump(v.UUId, 1)
-	written := NewVectorClock().AsMutable().Bump(v.UUId, 1)
+	clock := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
+	written := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
 
 	seg := capn.NewBuffer(nil)
@@ -84,7 +85,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	return &Var{
 		UUId:            uuid,
 		positions:       nil,
-		poisson:         NewPoisson(),
+		poisson:         utils.NewPoisson(),
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,

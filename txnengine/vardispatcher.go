@@ -61,6 +61,6 @@ func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarMana
 
 type TranslationCallback func(*cmsgs.ClientAction, *msgs.Action, []common.RMId, map[common.RMId]bool) error
 type LocalConnection interface {
-	RunClientTransaction(*cmsgs.ClientTxn, bool, map[common.VarUUId]*common.Positions, TranslationCallback) (*TxnReader, *msgs.Outcome, error)
+	RunClientTransaction(*cmsgs.ClientTxn, bool, map[common.VarUUId]*common.Positions, TranslationCallback) (*utils.TxnReader, *msgs.Outcome, error)
 	Status(*utils.StatusConsumer)
 }

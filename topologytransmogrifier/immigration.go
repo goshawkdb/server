@@ -10,7 +10,7 @@ import (
 
 type topologyTransmogrifierMsgImmigrationReceived struct {
 	*TopologyTransmogrifier
-	migration *msgs.Migration
+	migration msgs.Migration
 	sender    common.RMId
 }
 
@@ -51,8 +51,8 @@ func (msg topologyTransmogrifierMsgImmigrationReceived) Exec() (bool, error) {
 	return false, nil
 }
 
-func (tt *TopologyTransmogrifier) ImmigrationReceived(sender common.RMId, migration *msgs.Migration) {
-	tt.EnqueueMsg(topologyTransmogrifierMsgMigrationReceived{
+func (tt *TopologyTransmogrifier) ImmigrationReceived(sender common.RMId, migration msgs.Migration) {
+	tt.EnqueueMsg(topologyTransmogrifierMsgImmigrationReceived{
 		TopologyTransmogrifier: tt,
 		migration:              migration,
 		sender:                 sender,
@@ -61,7 +61,7 @@ func (tt *TopologyTransmogrifier) ImmigrationReceived(sender common.RMId, migrat
 
 type topologyTransmogrifierMsgImmigrationComplete struct {
 	*TopologyTransmogrifier
-	complete *msgs.MigrationComplete
+	complete msgs.MigrationComplete
 	sender   common.RMId
 }
 
@@ -92,7 +92,7 @@ func (msg topologyTransmogrifierMsgImmigrationComplete) Exec() (bool, error) {
 	return false, nil
 }
 
-func (tt *TopologyTransmogrifier) ImmigrationCompleteReceived(sender common.RMId, migrationComplete *msgs.MigrationComplete) {
+func (tt *TopologyTransmogrifier) ImmigrationCompleteReceived(sender common.RMId, migrationComplete msgs.MigrationComplete) {
 	tt.EnqueueMsg(topologyTransmogrifierMsgImmigrationComplete{
 		TopologyTransmogrifier: tt,
 		complete:               migrationComplete,

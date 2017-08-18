@@ -95,7 +95,7 @@ func TopologyFromCap(txnId *common.TxnId, roots *msgs.VarIdPos_List, data []byte
 		return nil, err
 	}
 	configCap := msgs.ReadRootConfiguration(seg)
-	config := ConfigurationFromCap(&configCap)
+	config := ConfigurationFromCap(configCap)
 	return NewTopology(txnId, roots, config), nil
 }
 
