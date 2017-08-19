@@ -256,7 +256,7 @@ func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, ba
 type localConnectionMsgServerConnectionsChanged struct {
 	actor.MsgSyncQuery
 	*LocalConnection
-	servers map[common.RMId]sconn.ServerConnection
+	servers map[common.RMId]*sconn.ServerConnection
 }
 
 func (msg localConnectionMsgServerConnectionsChanged) Exec() (bool, error) {
@@ -264,19 +264,19 @@ func (msg localConnectionMsgServerConnectionsChanged) Exec() (bool, error) {
 	return false, msg.submitter.ServerConnectionsChanged(msg.servers)
 }
 
-func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]sconn.ServerConnection) {
+func (lc *LocalConnection) ConnectedRMs(servers map[common.RMId]*sconn.ServerConnection) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	lc.EnqueueMsg(msg)
 }
 
-func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]sconn.ServerConnection) {
+func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.RMId]*sconn.ServerConnection) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	lc.EnqueueMsg(msg)
 }
 
-func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, c sconn.ServerConnection, servers map[common.RMId]sconn.ServerConnection, done func()) {
+func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	if lc.EnqueueMsg(msg) {

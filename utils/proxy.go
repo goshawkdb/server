@@ -5,44 +5,44 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/actor"
-	"goshawkdb.io/server/types/connections/server"
+	sconn "goshawkdb.io/server/types/connections/server"
 )
 
 type serverConnectionPublisherProxy struct {
 	logger   log.Logger
 	exe      actor.EnqueueActor
-	upstream server.ServerConnectionPublisher
-	subs     map[server.ServerConnectionSubscriber]types.EmptyStruct
-	servers  map[common.RMId]server.ServerConnection
+	upstream sconn.ServerConnectionPublisher
+	subs     map[sconn.ServerConnectionSubscriber]types.EmptyStruct
+	servers  map[common.RMId]*sconn.ServerConnection
 }
 
 // This assumes that AddServerConnectionSubscriber and
 // RemoveServerConnectionSubscriber will always be run from exe's
 // thread. This uses exe to process calls from ConnectedRMs,
 // ConnectionLost and ConnectionEstablished, invoked by the upstream.
-func NewServerConnectionPublisherProxy(exe actor.EnqueueActor, upstream server.ServerConnectionPublisher, logger log.Logger) server.ServerConnectionPublisher {
+func NewServerConnectionPublisherProxy(exe actor.EnqueueActor, upstream sconn.ServerConnectionPublisher, logger log.Logger) sconn.ServerConnectionPublisher {
 	proxy := &serverConnectionPublisherProxy{
 		logger:   logger,
 		exe:      exe,
 		upstream: upstream,
-		subs:     make(map[server.ServerConnectionSubscriber]types.EmptyStruct),
+		subs:     make(map[sconn.ServerConnectionSubscriber]types.EmptyStruct),
 	}
 	upstream.AddServerConnectionSubscriber(proxy)
 	return proxy
 }
 
-func (proxy *serverConnectionPublisherProxy) AddServerConnectionSubscriber(obs server.ServerConnectionSubscriber) {
+func (proxy *serverConnectionPublisherProxy) AddServerConnectionSubscriber(obs sconn.ServerConnectionSubscriber) {
 	proxy.subs[obs] = types.EmptyStructVal
 	if proxy.servers != nil {
 		obs.ConnectedRMs(proxy.servers)
 	}
 }
 
-func (proxy *serverConnectionPublisherProxy) RemoveServerConnectionSubscriber(obs server.ServerConnectionSubscriber) {
+func (proxy *serverConnectionPublisherProxy) RemoveServerConnectionSubscriber(obs sconn.ServerConnectionSubscriber) {
 	delete(proxy.subs, obs)
 }
 
-func (proxy *serverConnectionPublisherProxy) ConnectedRMs(servers map[common.RMId]server.ServerConnection) {
+func (proxy *serverConnectionPublisherProxy) ConnectedRMs(servers map[common.RMId]*sconn.ServerConnection) {
 	proxy.exe.EnqueueFuncAsync(func() (bool, error) {
 		proxy.servers = servers
 		for sub := range proxy.subs {
@@ -52,7 +52,7 @@ func (proxy *serverConnectionPublisherProxy) ConnectedRMs(servers map[common.RMI
 	})
 }
 
-func (proxy *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, servers map[common.RMId]server.ServerConnection) {
+func (proxy *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, servers map[common.RMId]*sconn.ServerConnection) {
 	proxy.exe.EnqueueFuncAsync(func() (bool, error) {
 		proxy.servers = servers
 		for sub := range proxy.subs {
@@ -65,8 +65,8 @@ func (proxy *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, se
 type scppConnectionEstablished struct {
 	proxy   *serverConnectionPublisherProxy
 	gained  common.RMId
-	conn    server.ServerConnection
-	servers map[common.RMId]server.ServerConnection
+	conn    *sconn.ServerConnection
+	servers map[common.RMId]*sconn.ServerConnection
 	wg      *common.ChannelWaitGroup
 }
 
@@ -81,7 +81,7 @@ func (msg *scppConnectionEstablished) Exec() (bool, error) {
 	return false, nil
 }
 
-func (proxy *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn server.ServerConnection, servers map[common.RMId]server.ServerConnection, onDone func()) {
+func (proxy *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, onDone func()) {
 	msg := &scppConnectionEstablished{
 		proxy:   proxy,
 		gained:  gained,

@@ -31,34 +31,34 @@ func (tt *TopologyTransmogrifier) RequestConfigurationChange(config *configurati
 type topologyTransmogrifierMsgSetActiveConnections struct {
 	actor.MsgSyncQuery
 	*TopologyTransmogrifier
-	servers map[common.RMId]sconn.ServerConnection
+	servers map[common.RMId]*sconn.ServerConnection
 }
 
 func (msg *topologyTransmogrifierMsgSetActiveConnections) Exec() (bool, error) {
 	defer msg.MustClose()
 	msg.activeConnections = msg.servers
 
-	msg.hostToConnection = make(map[string]sconn.ServerConnection, len(msg.activeConnections))
+	msg.hostToConnection = make(map[string]*sconn.ServerConnection, len(msg.activeConnections))
 	for _, cd := range msg.activeConnections {
-		msg.hostToConnection[cd.Host()] = cd
+		msg.hostToConnection[cd.Host] = cd
 	}
 
 	return msg.maybeTick()
 }
 
-func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
+func (tt *TopologyTransmogrifier) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	tt.EnqueueMsg(msg)
 }
 
-func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]sconn.ServerConnection) {
+func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	tt.EnqueueMsg(msg)
 }
 
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
+func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	if tt.EnqueueMsg(msg) {

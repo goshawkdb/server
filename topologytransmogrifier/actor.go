@@ -28,8 +28,8 @@ type TopologyTransmogrifier struct {
 	connectionManager connectionmanager.ConnectionManager
 	localConnection   *localconnection.LocalConnection
 	activeTopology    *configuration.Topology
-	hostToConnection  map[string]sconn.ServerConnection
-	activeConnections map[common.RMId]sconn.ServerConnection
+	hostToConnection  map[string]*sconn.ServerConnection
+	activeConnections map[common.RMId]*sconn.ServerConnection
 	migrations        map[uint32]map[common.RMId]*int32
 
 	currentTask Task

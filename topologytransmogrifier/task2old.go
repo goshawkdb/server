@@ -102,7 +102,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	hostsSurvived, hostsRemoved, hostsAdded :=
 		make(map[string]common.RMId),
 		make(map[string]common.RMId),
-		make(map[string]sconn.ServerConnection)
+		make(map[string]*sconn.ServerConnection)
 
 	allRemoteHosts := make([]string, 0, len(active.Hosts)+len(task.targetConfig.Hosts))
 
@@ -147,7 +147,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// map(old -> new)
 	rmIdsTranslation := make(map[common.RMId]common.RMId)
-	connsAdded := make([]sconn.ServerConnection, 0, len(hostsAdded))
+	connsAdded := make([]*sconn.ServerConnection, 0, len(hostsAdded))
 
 	// 3. Assume all old RMIds have been removed (so map to RMIdEmpty)
 	for _, rmId := range rmIdsOld {
@@ -168,9 +168,9 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	rmIdsSurvived := make([]common.RMId, 0, len(hostsSurvived))
 	for host, rmIdOld := range hostsSurvived {
 		cd, found := task.hostToConnection[host]
-		if found && rmIdOld != cd.RMId() {
+		if found && rmIdOld != cd.RMId {
 			// We have evidence the RMId has changed!
-			rmIdNew := cd.RMId()
+			rmIdNew := cd.RMId
 			rmIdsTranslation[rmIdOld] = rmIdNew
 			hostsAdded[host] = cd
 		} else {
@@ -193,9 +193,9 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		case rmIdNew == common.RMIdEmpty && len(connsAddedCopy) > 0: // removal of old, and we have conn added
 			cd := connsAddedCopy[0]
 			connsAddedCopy = connsAddedCopy[1:]
-			rmIdNew = cd.RMId()
+			rmIdNew = cd.RMId
 			rmIdsNew = append(rmIdsNew, rmIdNew)
-			hostsNew = append(hostsNew, cd.Host())
+			hostsNew = append(hostsNew, cd.Host)
 			if rmIdOld != common.RMIdEmpty { // old wasn't a gap (so conn added is replacing old)
 				hostsOldCopy = hostsOldCopy[1:]
 				rmIdsLost = append(rmIdsLost, rmIdOld)
@@ -223,8 +223,8 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// Finally, we may still have some new RMIds we never found space
 	// for.
 	for _, cd := range connsAddedCopy {
-		rmIdsNew = append(rmIdsNew, cd.RMId())
-		hostsNew = append(hostsNew, cd.Host())
+		rmIdsNew = append(rmIdsNew, cd.RMId)
+		hostsNew = append(hostsNew, cd.Host)
 	}
 
 	nextConfig := task.targetConfig.Configuration.Clone()
@@ -246,7 +246,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	rmIdsAdded := make([]common.RMId, len(connsAdded))
 	for idx, cd := range connsAdded {
-		rmIdsAdded[idx] = cd.RMId()
+		rmIdsAdded[idx] = cd.RMId
 	}
 	conds := calculateMigrationConditions(rmIdsAdded, rmIdsLost, rmIdsSurvived, task.activeTopology.Configuration, nextConfig)
 
@@ -294,7 +294,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 func (task *installTargetOld) verifyClusterUUIds(clusterUUId uint64, remoteHosts []string) (bool, error) {
 	for _, host := range remoteHosts {
 		if cd, found := task.hostToConnection[host]; found {
-			switch remoteClusterUUId := cd.ClusterUUId(); {
+			switch remoteClusterUUId := cd.ClusterUUId; {
 			case remoteClusterUUId == 0:
 				// they're joining
 			case clusterUUId == remoteClusterUUId:

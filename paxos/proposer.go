@@ -293,18 +293,18 @@ func (pab *proposerAwaitBallots) Abort() (bool, error) {
 	return false, nil
 }
 
-func (pab *proposerAwaitBallots) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
-	if conn, found := conns[pab.submitter]; !found || conn.BootCount() != pab.submitterBootCount {
+func (pab *proposerAwaitBallots) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
+	if conn, found := conns[pab.submitter]; !found || conn.BootCount != pab.submitterBootCount {
 		pab.maybeAbortRetry()
 	}
 }
-func (pab *proposerAwaitBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]sconn.ServerConnection) {
+func (pab *proposerAwaitBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
 	if rmId == pab.submitter {
 		pab.maybeAbortRetry()
 	}
 }
-func (pab *proposerAwaitBallots) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
-	if rmId == pab.submitter && conn.BootCount() != pab.submitterBootCount {
+func (pab *proposerAwaitBallots) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+	if rmId == pab.submitter && conn.BootCount != pab.submitterBootCount {
 		pab.maybeAbortRetry()
 	}
 	done()

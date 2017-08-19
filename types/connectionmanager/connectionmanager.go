@@ -1,19 +1,33 @@
 package connectionmanager
 
 import (
+	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
+	"goshawkdb.io/common/certs"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/types/connections/client"
-	"goshawkdb.io/server/types/connections/server"
+	cconn "goshawkdb.io/server/types/connections/client"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/types/topology"
 )
 
 type ConnectionManager interface {
-	server.ServerConnectionPublisher
+	sconn.ServerConnectionPublisher
 	topology.TopologyPublisher
-	ClientEstablished(connNumber uint32, conn client.ClientConnection) (map[common.RMId]server.ServerConnection, *client.ClientTxnMetrics)
-	ClientLost(connNumber uint32, conn client.ClientConnection)
-	GetClient(bootNumber, connNumber uint32) client.ClientConnection
+
+	ClientEstablished(connNumber uint32, conn cconn.ClientConnection) (map[common.RMId]*sconn.ServerConnection, *cconn.ClientTxnMetrics)
+	ClientLost(connNumber uint32, conn cconn.ClientConnection)
+	GetClient(bootNumber, connNumber uint32) cconn.ClientConnection
+
+	ServerEstablished(server *sconn.ServerConnection, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func())
+	ServerLost(server *sconn.ServerConnection, host string, rmId common.RMId, restarting bool)
+
+	LocalHost() string
+
 	ServerConnectionFlushed(sender common.RMId)
+
 	SetTopology(topology *configuration.Topology, callbacks map[topology.TopologyChangeSubscriberType]func(), localhost string, remoteHosts []string)
+
+	NodeCertificatePrivateKeyPair() *certs.NodeCertificatePrivateKeyPair
+
+	SetMetrics(client, server prometheus.Gauge, clientTxnMetrics *cconn.ClientTxnMetrics)
 }

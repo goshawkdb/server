@@ -11,10 +11,11 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/network"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/localconnection"
+	"goshawkdb.io/server/types/connectionmanager"
+	topo "goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
 	"math/rand"
 	"time"
 )
@@ -23,8 +24,8 @@ type StatsPublisher struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
 
-	localConnection   *client.LocalConnection
-	connectionManager *network.ConnectionManager
+	localConnection   *localconnection.LocalConnection
+	connectionManager connectionmanager.ConnectionManager
 	rng               *rand.Rand
 	configPublisher
 
@@ -36,7 +37,7 @@ type statsPublisherInner struct {
 	*actor.BasicServerInner
 }
 
-func NewStatsPublisher(cm *network.ConnectionManager, lc *client.LocalConnection, logger log.Logger) *StatsPublisher {
+func NewStatsPublisher(cm connectionmanager.ConnectionManager, lc *localconnection.LocalConnection, logger log.Logger) *StatsPublisher {
 	sp := &StatsPublisher{
 		localConnection:   lc,
 		connectionManager: cm,
@@ -68,6 +69,11 @@ func (sp *statsPublisherInner) Init(self *actor.Actor) (bool, error) {
 	return false, nil
 }
 
+func (sp *statsPublisherInner) HandleShutdown(err error) bool {
+	sp.connectionManager.RemoveTopologySubscriberAsync(topo.MiscSubscriber, &sp.configPublisher)
+	return sp.BasicServerInner.HandleShutdown(err)
+}
+
 type configPublisher struct {
 	*StatsPublisher
 	vsn        *common.TxnId
@@ -77,7 +83,7 @@ type configPublisher struct {
 func (cp *configPublisher) init(sp *StatsPublisher) {
 	cp.StatsPublisher = sp
 	cp.vsn = common.VersionZero
-	topology := cp.connectionManager.AddTopologySubscriber(eng.MiscSubscriber, cp)
+	topology := cp.connectionManager.AddTopologySubscriber(topo.MiscSubscriber, cp)
 	go cp.TopologyChanged(topology, func(bool) {})
 }
 
@@ -117,7 +123,7 @@ func (msg *configPublisherMsgTopologyChanged) Exec() (bool, error) {
 		root:            root,
 		topology:        msg.topology,
 		json:            json,
-		backoff:         server.NewBinaryBackoffEngine(msg.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+		backoff:         utils.NewBinaryBackoffEngine(msg.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 	}
 	return msg.publishing.Exec()
 }
@@ -137,7 +143,7 @@ type configPublisherMsg struct {
 	root     *configuration.Root
 	topology *configuration.Topology
 	json     []byte
-	backoff  *server.BinaryBackoffEngine
+	backoff  *utils.BinaryBackoffEngine
 }
 
 func (msg *configPublisherMsg) Exec() (bool, error) {
@@ -164,7 +170,7 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 	varPosMap := make(map[common.VarUUId]*common.Positions)
 	varPosMap[*msg.root.VarUUId] = msg.root.Positions
 
-	server.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json))
+	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json))
 
 	time.AfterFunc(2*time.Second, func() { msg.EnqueueMsg(msg) })
 
@@ -192,24 +198,24 @@ func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool,
 		return false, nil
 	} else if result.Which() == msgs.OUTCOME_COMMIT {
 		msg.publishing = nil
-		server.DebugLog(msg.inner.Logger, "debug", "Publishing Config committed.")
+		utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config committed.")
 		return false, nil
 	}
 
 	if retryAfterDelay {
-		server.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires resubmit.")
+		utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires resubmit.")
 		msg.backoff.Advance()
 		msg.backoff.After(func() { msg.EnqueueMsg(msg) })
 		return false, nil
 	}
 
-	server.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires rerun.")
+	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires rerun.")
 	updates := result.Abort().Rerun()
 	found := false
 	var value []byte
 	for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
 		update := updates.At(idx)
-		updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
+		updateActions := utils.TxnActionsFromData(update.Actions(), true).Actions()
 		for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
 			updateAction := updateActions.At(idy)
 			if found = bytes.Equal(msg.root.VarUUId[:], updateAction.VarId()); found {
@@ -235,11 +241,11 @@ func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool,
 			return false, err
 		} else if inDB.Version > msg.topology.Version {
 			msg.publishing = nil
-			server.DebugLog(msg.inner.Logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
+			utils.DebugLog(msg.inner.Logger, "debug", "Existing copy in database is ahead of us. Nothing more to do.")
 			return false, nil
 		} else if inDB.Version == msg.topology.Version {
 			msg.publishing = nil
-			server.DebugLog(msg.inner.Logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
+			utils.DebugLog(msg.inner.Logger, "debug", "Existing copy in database is at least as up to date as us. Nothing more to do.")
 			return false, nil
 		}
 	}

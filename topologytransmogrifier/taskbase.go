@@ -279,7 +279,7 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 			alloc := allocs.At(idy + offset)
 			alloc.SetRmId(uint32(rmId))
 			if idx == 0 {
-				alloc.SetActive(tt.activeConnections[rmId].BootCount())
+				alloc.SetActive(tt.activeConnections[rmId].BootCount)
 			} else {
 				alloc.SetActive(0)
 			}

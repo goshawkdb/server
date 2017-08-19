@@ -57,8 +57,8 @@ func (task *joinCluster) Tick() (bool, error) {
 			// connected to everyone mentioned in the config.
 			return false, nil
 		}
-		rmIds = append(rmIds, cd.RMId())
-		switch theirClusterUUId := cd.ClusterUUId(); {
+		rmIds = append(rmIds, cd.RMId)
+		switch theirClusterUUId := cd.ClusterUUId; {
 		case theirClusterUUId == 0:
 			// they're joining too
 		case clusterUUId == 0:

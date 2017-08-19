@@ -3,16 +3,39 @@ package tcpcapnproto
 import (
 	"fmt"
 	"github.com/go-kit/kit/log"
+	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
+	"goshawkdb.io/server/network"
+	"goshawkdb.io/server/router"
+	"goshawkdb.io/server/types/connectionmanager"
 	"net"
 )
+
+// we are dialing out to someone else
+func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm connectionmanager.ConnectionManager, logger log.Logger) *network.Connection {
+	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
+	phone := common.NewTCPDialer(nil, remoteHost, logger)
+	yesman := NewTLSCapnpHandshaker(phone, logger, 0, cm)
+	return network.NewConnection(yesman, cm, logger)
+}
+
+// the socket is already established - we got it from the TCP listener
+func (l *listenerInner) NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, count uint32) {
+	logger := log.With(l.parentLogger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
+	phone := common.NewTCPDialer(socket, "", logger)
+	yesman := NewTLSCapnpHandshaker(phone, logger, count, l.self, l.bootcount, l.router, l.connectionManager)
+	network.NewConnection(yesman, l.connectionManager, logger)
+}
 
 type Listener struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
 
 	parentLogger      log.Logger
-	connectionManager *ConnectionManager
+	self              common.RMId
+	bootcount         uint32
+	router            *router.Router
+	connectionManager connectionmanager.ConnectionManager
 	listenPort        uint16
 	listener          *net.TCPListener
 
@@ -24,9 +47,12 @@ type listenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewListener(listenPort uint16, cm *ConnectionManager, logger log.Logger) (*Listener, error) {
+func NewListener(listenPort uint16, rmId common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, logger log.Logger) (*Listener, error) {
 	l := &Listener{
 		parentLogger:      logger,
+		self:              rmId,
+		bootcount:         bootcount,
+		router:            router,
 		connectionManager: cm,
 		listenPort:        listenPort,
 	}
@@ -75,7 +101,7 @@ func (l *listenerInner) acceptLoop() {
 			connectionCount++
 			cc := connectionCount * 2
 			l.EnqueueFuncAsync(func() (bool, error) {
-				NewConnectionTCPTLSCapnpHandshaker(conn, l.connectionManager, cc, l.parentLogger)
+				l.NewConnectionTCPTLSCapnpHandshaker(conn, cc)
 				return false, nil
 			})
 

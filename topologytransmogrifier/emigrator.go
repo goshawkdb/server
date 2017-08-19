@@ -27,7 +27,7 @@ type emigrator struct {
 	connectionManager connectionmanager.ConnectionManager
 	activeBatches     map[common.RMId]*sendBatch
 	topology          *configuration.Topology
-	conns             map[common.RMId]sconn.ServerConnection
+	conns             map[common.RMId]*sconn.ServerConnection
 }
 
 func newEmigrator(task *migrate) *emigrator {
@@ -55,16 +55,16 @@ func (e *emigrator) TopologyChanged(topology *configuration.Topology, done func(
 	e.startBatches()
 }
 
-func (e *emigrator) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
+func (e *emigrator) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
 	e.conns = conns
 	e.startBatches()
 }
 
-func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]sconn.ServerConnection) {
+func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
 	delete(e.activeBatches, rmId)
 }
 
-func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
+func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
 	if rmId == e.self {
 		return
@@ -230,7 +230,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 	return result, nil
 }
 
-func (it *dbIterator) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
+func (it *dbIterator) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
 	defer it.connectionManager.RemoveServerConnectionSubscriber(it)
 
 	if atomic.LoadInt32(&it.stop) != 0 {
@@ -245,27 +245,27 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection)
 	bites := common.SegToBytes(seg)
 
 	for _, sb := range it.batch {
-		if conn, found := conns[sb.conn.RMId()]; found && sb.conn == conn {
+		if conn, found := conns[sb.conn.RMId]; found && sb.conn == conn {
 			// The connection has not changed since we started sending to
 			// it (because we cached it, you can discount the issue of
 			// memory reuse here - phew). Therefore, it's safe to send
 			// the completion msg. If it has changed, we rely on the
 			// ConnectionLost being called in the emigrator to do any
 			// necessary tidying up.
-			utils.DebugLog(it.logger, "debug", "Sending migration completion.", "recipient", conn.RMId())
+			utils.DebugLog(it.logger, "debug", "Sending migration completion.", "recipient", conn.RMId)
 			conn.Send(bites)
 		}
 	}
 }
-func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]sconn.ServerConnection) {}
-func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, servers map[common.RMId]sconn.ServerConnection, done func()) {
+func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
+func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	done()
 }
 
 type sendBatch struct {
 	logger  log.Logger
 	version uint32
-	conn    sconn.ServerConnection
+	conn    *sconn.ServerConnection
 	cond    configuration.Cond
 	elems   []*migrationElem
 }
@@ -275,7 +275,7 @@ type migrationElem struct {
 	vars []*msgs.Var
 }
 
-func (e *emigrator) newBatch(conn sconn.ServerConnection, cond configuration.Cond) *sendBatch {
+func (e *emigrator) newBatch(conn *sconn.ServerConnection, cond configuration.Cond) *sendBatch {
 	return &sendBatch{
 		logger:  e.logger,
 		version: e.topology.NextConfiguration.Version,
@@ -308,7 +308,7 @@ func (sb *sendBatch) flush() {
 	migration.SetElems(elems)
 	msg.SetMigration(migration)
 	bites := common.SegToBytes(seg)
-	utils.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId())
+	utils.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId)
 	sb.conn.Send(bites)
 	sb.elems = sb.elems[:0]
 }

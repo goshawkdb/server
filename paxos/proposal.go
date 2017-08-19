@@ -462,23 +462,23 @@ func (s *proposalSender) finished() {
 	}
 }
 
-func (s *proposalSender) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
+func (s *proposalSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
 	for _, rmId := range s.proposal.acceptors {
 		if conn, found := conns[rmId]; found {
 			conn.Send(s.msg)
 		}
 	}
 	for rmId, bootCount := range s.proposal.activeRMIds {
-		if conn, found := conns[rmId]; !found || conn.BootCount() != bootCount {
+		if conn, found := conns[rmId]; !found || conn.BootCount != bootCount {
 			s.ConnectionLost(rmId, conns)
 		}
 	}
-	if conn, found := conns[s.proposal.submitter]; !found || (conn.BootCount() != s.submitterBootCount && s.submitterBootCount > 0) {
+	if conn, found := conns[s.proposal.submitter]; !found || (conn.BootCount != s.submitterBootCount && s.submitterBootCount > 0) {
 		s.ConnectionLost(s.proposal.submitter, conns)
 	}
 }
 
-func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]sconn.ServerConnection) {
+func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
 	if !s.proposeAborts {
 		return
 	}
@@ -569,14 +569,14 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 	})
 }
 
-func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
+func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	for _, acc := range s.proposal.acceptors {
 		if acc == rmId {
 			conn.Send(s.msg)
 			break
 		}
 	}
-	if bootCount, found := s.proposal.activeRMIds[rmId]; found && bootCount != conn.BootCount() {
+	if bootCount, found := s.proposal.activeRMIds[rmId]; found && bootCount != conn.BootCount {
 		s.ConnectionLost(rmId, conns) // at worst, this just enqueues some functinos so nothing to worry about
 	}
 	done()

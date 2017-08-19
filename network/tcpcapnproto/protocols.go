@@ -12,29 +12,17 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/network"
+	"goshawkdb.io/server/router"
+	"goshawkdb.io/server/types/connectionmanager"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 	"net"
 	"time"
 )
-
-type Handshaker interface {
-	Dial() error
-	PerformHandshake(*configuration.Topology) (Protocol, error)
-	Restart() bool
-	InternalShutdown()
-}
-
-type Protocol interface {
-	Run(*Connection) error
-	TopologyChanged(*connectionMsgTopologyChanged) error
-	Restart() bool
-	InternalShutdown()
-}
 
 // TLS Capnp Handshaker
 
@@ -42,22 +30,28 @@ type TLSCapnpHandshaker struct {
 	*common.TLSCapnpHandshakerBase
 	logger            log.Logger
 	connectionNumber  uint32
+	self              common.RMId
+	bootcount         uint32
 	restartable       bool
-	connectionManager *ConnectionManager
+	router            *router.Router
+	connectionManager connectionmanager.ConnectionManager
 	topology          *configuration.Topology
 }
 
-func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, cm *ConnectionManager) *TLSCapnpHandshaker {
+func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager) *TLSCapnpHandshaker {
 	return &TLSCapnpHandshaker{
 		TLSCapnpHandshakerBase: common.NewTLSCapnpHandshakerBase(dialer),
 		logger:                 logger,
 		connectionNumber:       count,
+		self:                   rmId,
+		bootcount:              bootcount,
 		restartable:            count == 0,
+		router:                 router,
 		connectionManager:      cm,
 	}
 }
 
-func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology) (Protocol, error) {
+func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology) (network.Protocol, error) {
 	tch.topology = topology
 
 	helloSeg := tch.makeHello()
@@ -177,7 +171,7 @@ func (tch *TLSCapnpHandshaker) serverError(err error) error {
 type TLSCapnpServer struct {
 	*TLSCapnpHandshaker
 	logger            log.Logger
-	conn              *Connection
+	conn              *network.Connection
 	remoteHost        string
 	remoteRMId        common.RMId
 	remoteClusterUUId uint64
@@ -275,8 +269,8 @@ func (tcs *TLSCapnpServer) makeHelloServer() *capn.Segment {
 	hello := msgs.NewRootHelloServerFromServer(seg)
 	localHost := tcs.connectionManager.LocalHost()
 	hello.SetLocalHost(localHost)
-	hello.SetRmId(uint32(tcs.connectionManager.RMId))
-	hello.SetBootCount(tcs.connectionManager.BootCount)
+	hello.SetRmId(uint32(tcs.self))
+	hello.SetBootCount(tcs.bootcount)
 	hello.SetClusterId(tcs.topology.ClusterId)
 	hello.SetClusterUUId(tcs.topology.ClusterUUId)
 	return seg
@@ -291,7 +285,7 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 	return false
 }
 
-func (tcs *TLSCapnpServer) Run(conn *Connection) error {
+func (tcs *TLSCapnpServer) Run(conn *network.Connection) error {
 	tcs.conn = conn
 	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remoteHost, "remoteRMId", tcs.remoteRMId)
 
@@ -316,7 +310,7 @@ func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) err
 	topology := tc.topology
 	tcs.topology = topology
 
-	server.DebugLog(tcs.logger, "debug", "TopologyChanged.", "topology", topology)
+	utils.DebugLog(tcs.logger, "debug", "TopologyChanged.", "topology", topology)
 	if topology != nil && tcs.restartable {
 		if _, found := topology.RMsRemoved[tcs.remoteRMId]; found {
 			tcs.restartable = false
@@ -341,7 +335,7 @@ func (tcs *TLSCapnpServer) InternalShutdown() {
 	tcs.internalShutdown()
 	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
-	tcs.conn.shutdownCompleted()
+	tcs.conn.ShutdownCompleted()
 }
 
 func (tcs *TLSCapnpServer) internalShutdown() {
@@ -367,7 +361,7 @@ func (tcs *TLSCapnpServer) ReadAndHandleOneMsg() error {
 	case msgs.MESSAGE_CONNECTIONERROR:
 		return fmt.Errorf("Error received from %v: \"%s\"", tcs.remoteRMId, msg.ConnectionError())
 	default:
-		tcs.connectionManager.DispatchMessage(tcs.remoteRMId, which, msg)
+		tcs.router.Dispatch(tcs.remoteRMId, which, msg)
 		return nil
 	}
 }
@@ -391,7 +385,7 @@ func (tcs *TLSCapnpServer) createReader() {
 
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
-	*Connection
+	*network.Connection
 	remoteHost string
 	logger     log.Logger
 	peerCerts  []*x509.Certificate
@@ -445,8 +439,8 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], tcc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.connectionManager.BootCount)
-	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.TLSCapnpHandshaker.connectionManager.RMId))
+	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.bootcount)
+	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.self))
 	tcc.namespace = namespace
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(tcc.roots))
@@ -468,7 +462,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	return seg
 }
 
-func (tcc *TLSCapnpClient) Run(conn *Connection) error {
+func (tcc *TLSCapnpClient) Run(conn *network.Connection) error {
 	tcc.Connection = conn
 	servers, metrics := tcc.TLSCapnpHandshaker.connectionManager.ClientEstablished(tcc.connectionNumber, tcc)
 	if servers == nil {
@@ -484,7 +478,7 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, tcc.rootsVar, tcc.namespace,
+		tcc.submitter = client.NewClientTxnSubmitter(tcc.self, tcc.bootcount, tcc.rootsVar, tcc.namespace,
 			cm, tcc.Connection, tcc.logger, metrics)
 		if err := tcc.submitter.TopologyChanged(tcc.topology); err != nil {
 			return err
@@ -497,26 +491,26 @@ func (tcc *TLSCapnpClient) Run(conn *Connection) error {
 	}
 }
 
-func (tcc *TLSCapnpClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+func (tcc *TLSCapnpClient) TopologyChanged(tc *network.ConnectionMsgTopologyChanged) error {
 	defer tc.MustClose()
-	topology := tc.topology
+	topology := tc.Topology
 	tcc.topology = topology
 
-	server.DebugLog(tcc.logger, "debug", "TopologyChanged", "topology", topology)
+	utils.DebugLog(tcc.logger, "debug", "TopologyChanged", "topology", topology)
 
 	if topology != nil {
 		if authenticated, _, roots := tcc.topology.VerifyPeerCerts(tcc.peerCerts); !authenticated {
-			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
+			utils.DebugLog(tcc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
 			return errors.New("Client connection closed: No client certificate known")
 		} else if len(roots) == len(tcc.roots) {
 			for name, capsOld := range tcc.roots {
 				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
-					server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
+					utils.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
 					return errors.New("Client connection closed: roots have changed")
 				}
 			}
 		} else {
-			server.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
+			utils.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
 			return errors.New("Client connection closed: roots have changed")
 		}
 	}
@@ -538,7 +532,7 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 	cont := func() {
 		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
 		tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
-		tcc.shutdownCompleted()
+		tcc.ShutdownCompleted()
 	}
 	if tcc.submitter == nil {
 		cont()
@@ -552,7 +546,7 @@ func (tcc *TLSCapnpClient) String() string {
 	return fmt.Sprintf("TLSCapnpClient %d from %s", tcc.connectionNumber, tcc.remoteHost)
 }
 
-func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) {
 	tcc.EnqueueFuncAsync(func() (bool, error) {
 		return false, tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 	})
@@ -561,7 +555,7 @@ func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *en
 type serverConnectionsChanged struct {
 	actor.MsgSyncQuery
 	submitter *client.ClientTxnSubmitter
-	servers   map[common.RMId]paxos.Connection
+	servers   map[common.RMId]*sconn.ServerConnection
 }
 
 func (msg *serverConnectionsChanged) Exec() (bool, error) {
@@ -569,19 +563,19 @@ func (msg *serverConnectionsChanged) Exec() (bool, error) {
 	return false, msg.submitter.ServerConnectionsChanged(msg.servers)
 }
 
-func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
+func (tcc *TLSCapnpClient) ConnectedRMs(servers map[common.RMId]*sconn.ServerConnection) {
 	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
 	msg.InitMsg(tcc)
 	tcc.EnqueueMsg(msg)
 }
 
-func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
+func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]*sconn.ServerConnection) {
 	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
 	msg.InitMsg(tcc)
 	tcc.EnqueueMsg(msg)
 }
 
-func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
 	msg.InitMsg(tcc)
 	if tcc.EnqueueMsg(msg) {

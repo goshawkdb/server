@@ -4,21 +4,35 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-kit/kit/log"
-	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
 	"math/rand"
-	"net"
 	"time"
 )
+
+type Handshaker interface {
+	Dial() error
+	PerformHandshake(*configuration.Topology) (Protocol, error)
+	Restart() bool
+	InternalShutdown()
+}
+
+type Protocol interface {
+	Run(*Connection) error
+	TopologyChanged(*ConnectionMsgTopologyChanged) error
+	Restart() bool
+	InternalShutdown()
+}
 
 type Connection struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
 
-	connectionManager *ConnectionManager
+	connectionManager connectionmanager.ConnectionManager
 	shuttingDown      bool
 	handshaker        Handshaker
 	rng               *rand.Rand
@@ -37,23 +51,7 @@ type connectionInner struct {
 	previousState           connectionStateMachineComponent
 }
 
-// we are dialing out to someone else
-func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
-	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
-	phone := common.NewTCPDialer(nil, remoteHost, logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, 0, cm)
-	return NewConnection(yesman, cm, logger)
-}
-
-// the socket is already established - we got it from the TCP listener
-func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) {
-	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
-	phone := common.NewTCPDialer(socket, "", logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, count, cm)
-	NewConnection(yesman, cm, logger)
-}
-
-func NewConnection(yesman Handshaker, cm *ConnectionManager, logger log.Logger) *Connection {
+func NewConnection(yesman Handshaker, cm connectionmanager.ConnectionManager, logger log.Logger) *Connection {
 	c := &Connection{
 		connectionManager: cm,
 		handshaker:        yesman,
@@ -79,7 +77,7 @@ type connectionMsgInit struct {
 }
 
 func (msg connectionMsgInit) Exec() (bool, error) {
-	msg.topology = msg.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, msg.Connection)
+	msg.topology = msg.connectionManager.AddTopologySubscriber(topology.ConnectionSubscriber, msg.Connection)
 	if msg.topology == nil {
 		// Most likely is that the connection manager has shutdown due
 		// to some other error and so the sync enqueue failed.
@@ -90,18 +88,18 @@ func (msg connectionMsgInit) Exec() (bool, error) {
 	return false, nil
 }
 
-func (c *Connection) shutdownCompleted() {
+func (c *Connection) ShutdownCompleted() {
 	c.EnqueueMsg(actor.MsgShutdown{})
 }
 
-type connectionMsgTopologyChanged struct {
+type ConnectionMsgTopologyChanged struct {
 	actor.MsgSyncQuery
 	c        *Connection
-	topology *configuration.Topology
+	Topology *configuration.Topology
 }
 
-func (msg *connectionMsgTopologyChanged) Exec() (bool, error) {
-	msg.c.topology = msg.topology
+func (msg *ConnectionMsgTopologyChanged) Exec() (bool, error) {
+	msg.c.topology = msg.Topology
 	switch {
 	case msg.c.protocol != nil:
 		return false, msg.c.protocol.TopologyChanged(msg) // This calls msg.MustClose
@@ -112,7 +110,7 @@ func (msg *connectionMsgTopologyChanged) Exec() (bool, error) {
 }
 
 func (c *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	msg := &connectionMsgTopologyChanged{topology: topology, c: c}
+	msg := &ConnectionMsgTopologyChanged{Topology: topology, c: c}
 	msg.InitMsg(c)
 	if c.EnqueueMsg(msg) {
 		go func() {
@@ -126,7 +124,7 @@ func (c *Connection) TopologyChanged(topology *configuration.Topology, done func
 
 type connectionMsgStatus struct {
 	*Connection
-	sc *server.StatusConsumer
+	sc *utils.StatusConsumer
 }
 
 func (msg connectionMsgStatus) Exec() (bool, error) {
@@ -139,7 +137,7 @@ func (msg connectionMsgStatus) Exec() (bool, error) {
 	return false, nil
 }
 
-func (c *Connection) Status(sc *server.StatusConsumer) {
+func (c *Connection) Status(sc *utils.StatusConsumer) {
 	c.EnqueueMsg(connectionMsgStatus{Connection: c, sc: sc})
 }
 
@@ -162,7 +160,7 @@ func (c *connectionInner) Init(self *actor.Actor) (bool, error) {
 
 func (c *connectionInner) HandleShutdown(err error) bool {
 	if c.shuttingDown {
-		c.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, c)
+		c.connectionManager.RemoveTopologySubscriberAsync(topology.ConnectionSubscriber, c)
 		return c.BasicServerInner.HandleShutdown(err)
 	}
 
@@ -177,12 +175,12 @@ func (c *connectionInner) HandleShutdown(err error) bool {
 	}
 	c.shuttingDown = true
 	if c.protocol != nil {
-		c.protocol.InternalShutdown() // this will call shutdownCompleted
+		c.protocol.InternalShutdown() // this will call ShutdownCompleted
 	} else {
 		if c.handshaker != nil {
 			c.handshaker.InternalShutdown()
 		}
-		c.shutdownCompleted()
+		c.ShutdownCompleted()
 	}
 	c.currentState = nil
 	c.protocol = nil

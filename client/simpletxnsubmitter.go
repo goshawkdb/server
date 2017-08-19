@@ -26,7 +26,7 @@ type SimpleTxnSubmitter struct {
 	rmId                common.RMId
 	bootCount           uint32
 	disabledHashCodes   map[common.RMId]types.EmptyStruct
-	connections         map[common.RMId]sconn.ServerConnection
+	connections         map[common.RMId]*sconn.ServerConnection
 	connectionsBool     map[common.RMId]bool
 	connPub             sconn.ServerConnectionPublisher
 	outcomeConsumers    map[common.TxnId]txnOutcomeConsumer
@@ -226,7 +226,7 @@ func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology)
 	return sts.calculateDisabledHashcodes()
 }
 
-func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]sconn.ServerConnection) error {
+func (sts *SimpleTxnSubmitter) ServerConnectionsChanged(servers map[common.RMId]*sconn.ServerConnection) error {
 	utils.DebugLog(sts.logger, "debug", "STS ServerConnectionsChanged.", "servers", servers)
 	sts.connections = servers
 	sts.connectionsBool = make(map[common.RMId]bool, len(servers))
@@ -324,7 +324,7 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 			actionIndicesCap.Set(k, uint16(v))
 		}
 		if active {
-			allocation.SetActive(sts.connections[rmId].BootCount())
+			allocation.SetActive(sts.connections[rmId].BootCount)
 		} else {
 			allocation.SetActive(0)
 		}

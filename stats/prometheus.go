@@ -10,9 +10,12 @@ import (
 	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/network"
+	ghttp "goshawkdb.io/server/network/http"
 	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/router"
+	"goshawkdb.io/server/types/connectionmanager"
+	cconn "goshawkdb.io/server/types/connections/client"
+	"goshawkdb.io/server/types/topology"
 	"net/http"
 	"sync"
 )
@@ -21,8 +24,10 @@ type PrometheusListener struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
 
-	connectionManager   *network.ConnectionManager
-	mux                 *network.HttpListenerWithMux
+	self                common.RMId
+	connectionManager   connectionmanager.ConnectionManager
+	router              *router.Router
+	mux                 *ghttp.HttpListenerWithMux
 	topology            *configuration.Topology
 	topologyLock        sync.RWMutex
 	clientConnsVec      *prometheus.GaugeVec
@@ -44,8 +49,9 @@ type prometheusListenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewPrometheusListener(mux *network.HttpListenerWithMux, cm *network.ConnectionManager, logger log.Logger) *PrometheusListener {
+func NewPrometheusListener(rmId common.RMId, mux *ghttp.HttpListenerWithMux, cm connectionmanager.ConnectionManager, logger log.Logger) *PrometheusListener {
 	pl := &PrometheusListener{
+		self:              rmId,
 		connectionManager: cm,
 		mux:               mux,
 	}
@@ -95,7 +101,7 @@ func (pl *prometheusListenerInner) Init(self *actor.Actor) (bool, error) {
 
 	pl.initMetrics()
 
-	topology := pl.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, pl)
+	topology := pl.connectionManager.AddTopologySubscriber(topology.ConnectionSubscriber, pl)
 	pl.putTopology(topology)
 	pl.configureMux()
 
@@ -103,7 +109,7 @@ func (pl *prometheusListenerInner) Init(self *actor.Actor) (bool, error) {
 }
 
 func (pl *prometheusListenerInner) HandleShutdown(err error) bool {
-	pl.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, pl)
+	pl.connectionManager.RemoveTopologySubscriberAsync(topology.ConnectionSubscriber, pl)
 	return pl.BasicServerInner.HandleShutdown(err)
 }
 
@@ -114,7 +120,7 @@ func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
 
 	labels := prometheus.Labels{
 		"ClusterId": topology.ClusterId,
-		"RMId":      fmt.Sprint(pl.connectionManager.RMId),
+		"RMId":      fmt.Sprint(pl.self),
 	}
 
 	clientConns := pl.clientConnsVec.With(labels)
@@ -126,7 +132,7 @@ func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
 	txnRerun := pl.txnRerunVec.With(labels)
 
 	pl.connectionManager.SetMetrics(clientConns, serverConns,
-		&paxos.ClientTxnMetrics{
+		&cconn.ClientTxnMetrics{
 			TxnSubmit:   txnSubmit,
 			TxnLatency:  txnLatency,
 			TxnResubmit: txnResubmit,
@@ -135,7 +141,7 @@ func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
 
 	acceptorsGauge := pl.acceptorsVec.With(labels)
 	acceptorLifespan := pl.acceptorLifespanVec.With(labels)
-	pl.connectionManager.Dispatchers.AcceptorDispatcher.SetMetrics(
+	pl.router.AcceptorDispatcher.SetMetrics(
 		&paxos.AcceptorMetrics{
 			Gauge:    acceptorsGauge,
 			Lifespan: acceptorLifespan,
@@ -143,7 +149,7 @@ func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
 
 	proposersGauge := pl.proposersVec.With(labels)
 	proposerLifespan := pl.proposerLifespanVec.With(labels)
-	pl.connectionManager.Dispatchers.ProposerDispatcher.SetMetrics(
+	pl.router.ProposerDispatcher.SetMetrics(
 		&paxos.ProposerMetrics{
 			Gauge:    proposersGauge,
 			Lifespan: proposerLifespan,

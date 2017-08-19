@@ -7,6 +7,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/certs"
+	"goshawkdb.io/server/types/connectionmanager"
 	"net"
 	"net/http"
 	"sync"
@@ -16,12 +17,12 @@ import (
 type HttpListenerWithMux struct {
 	*sync.WaitGroup
 	*http.ServeMux
-	connectionManager *ConnectionManager
+	connectionManager connectionmanager.ConnectionManager
 	listener          *net.TCPListener
 	logger            log.Logger
 }
 
-func NewHttpListenerWithMux(listenPort uint16, cm *ConnectionManager, logger log.Logger, wg *sync.WaitGroup) (*HttpListenerWithMux, error) {
+func NewHttpListenerWithMux(listenPort uint16, cm connectionmanager.ConnectionManager, logger log.Logger, wg *sync.WaitGroup) (*HttpListenerWithMux, error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf(":%v", listenPort))
 	if err != nil {
 		return nil, err

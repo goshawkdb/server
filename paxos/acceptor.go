@@ -185,18 +185,18 @@ func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst
 	}
 }
 
-func (arb *acceptorReceiveBallots) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
-	if conn, found := conns[arb.txnSubmitter]; !found || (conn.BootCount() != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0) {
+func (arb *acceptorReceiveBallots) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
+	if conn, found := conns[arb.txnSubmitter]; !found || (conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0) {
 		arb.enqueueCreateTxnSender()
 	}
 }
-func (arb *acceptorReceiveBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]sconn.ServerConnection) {
+func (arb *acceptorReceiveBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
 	if rmId == arb.txnSubmitter {
 		arb.enqueueCreateTxnSender()
 	}
 }
-func (arb *acceptorReceiveBallots) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
-	if rmId == arb.txnSubmitter && conn.BootCount() != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
+func (arb *acceptorReceiveBallots) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+	if rmId == arb.txnSubmitter && conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
 		arb.enqueueCreateTxnSender()
 	}
 	done()
@@ -510,7 +510,7 @@ func newTwoBTxnVotesSender(logger log.Logger, outcome *msgs.Outcome, txnId *comm
 	}
 }
 
-func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
+func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
 	for _, rmId := range s.recipients {
 		if conn, found := conns[rmId]; found {
 			conn.Send(s.msg)
@@ -521,9 +521,9 @@ func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]sconn.ServerConn
 	}
 }
 
-func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]sconn.ServerConnection) {}
+func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
 
-func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
+func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
 	for _, recipient := range s.recipients {
 		if recipient == rmId {
