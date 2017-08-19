@@ -5,13 +5,15 @@ import (
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
+	"goshawkdb.io/server/localconnection"
+	"goshawkdb.io/server/router"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 	"math/rand"
 	"time"
 )
@@ -22,8 +24,9 @@ type TopologyTransmogrifier struct {
 
 	self              common.RMId
 	db                *db.Databases
-	connectionManager *ConnectionManager
-	localConnection   *client.LocalConnection
+	router            *router.Router
+	connectionManager connectionmanager.ConnectionManager
+	localConnection   *localconnection.LocalConnection
 	activeTopology    *configuration.Topology
 	hostToConnection  map[string]sconn.ServerConnection
 	activeConnections map[common.RMId]sconn.ServerConnection
@@ -33,7 +36,7 @@ type TopologyTransmogrifier struct {
 
 	listenPort        uint16
 	rng               *rand.Rand
-	shutdownSignaller ShutdownSignaller
+	shutdownSignaller actor.ShutdownableActor
 	localEstablished  chan struct{}
 
 	inner topologyTransmogrifierInner
@@ -45,7 +48,7 @@ type topologyTransmogrifierInner struct {
 	previousTask Task
 }
 
-func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, cm *ConnectionManager, lc *client.LocalConnection, listenPort uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, cm connectionmanager.ConnectionManager, lc *localconnection.LocalConnection, listenPort uint16, ss actor.ShutdownableActor, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
 
 	localEstablished := make(chan struct{})
 	tt := &TopologyTransmogrifier{
@@ -84,7 +87,7 @@ func (tt *topologyTransmogrifierInner) Init(self *actor.Actor) (bool, error) {
 	tt.connectionManager.AddServerConnectionSubscriber(tt.TopologyTransmogrifier)
 
 	subscriberInstalled := make(chan struct{})
-	tt.connectionManager.Dispatchers.VarDispatcher.ApplyToVar(func(v *eng.Var) {
+	tt.router.VarDispatcher.ApplyToVar(func(v *eng.Var) {
 		if v == nil {
 			panic("Unable to create topology var!")
 		}
@@ -95,7 +98,7 @@ func (tt *topologyTransmogrifierInner) Init(self *actor.Actor) (bool, error) {
 					if err != nil {
 						panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
 					}
-					server.DebugLog(tt.inner.Logger, "debug", "Observation enqueued.", "topology", topology)
+					utils.DebugLog(tt.inner.Logger, "debug", "Observation enqueued.", "topology", topology)
 					tt.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
 						TopologyTransmogrifier: tt.TopologyTransmogrifier,
 						topology:               topology,
@@ -128,7 +131,7 @@ func (tt *topologyTransmogrifierInner) HandleShutdown(err error) bool {
 	}
 	if err != nil {
 		tt.inner.Logger.Log("msg", "Fatal error.", "error", err)
-		tt.shutdownSignaller.SignalShutdown()
+		go tt.shutdownSignaller.ShutdownSync()
 	}
 	return tt.BasicServerInner.HandleShutdown(err)
 }

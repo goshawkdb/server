@@ -2,9 +2,9 @@ package topologyTransmogrifier
 
 import (
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/utils"
 	"sync/atomic"
 )
 
@@ -16,10 +16,10 @@ type topologyTransmogrifierMsgImmigrationReceived struct {
 
 func (msg topologyTransmogrifierMsgImmigrationReceived) Exec() (bool, error) {
 	version := msg.migration.Version()
-	if version <= msg.active.Version {
+	if version <= msg.activeTopology.Version {
 		// This topology change has been completed. Ignore this migration.
 		return false, nil
-	} else if next := msg.active.NextConfiguration; next != nil {
+	} else if next := msg.activeTopology.NextConfiguration; next != nil {
 		if version < next.Version {
 			// Whatever change that was for, it isn't happening any
 			// more. Ignore.
@@ -47,7 +47,7 @@ func (msg topologyTransmogrifierMsgImmigrationReceived) Exec() (bool, error) {
 	}
 	txnCount := int32(msg.migration.Elems().Len())
 	lsc := msg.newTxnLSC(txnCount, inprogressPtr)
-	msg.connectionManager.Dispatchers.ProposerDispatcher.ImmigrationReceived(msg.migration, lsc)
+	msg.router.ProposerDispatcher.ImmigrationReceived(msg.migration, lsc)
 	return false, nil
 }
 
@@ -68,10 +68,10 @@ type topologyTransmogrifierMsgImmigrationComplete struct {
 func (msg topologyTransmogrifierMsgImmigrationComplete) Exec() (bool, error) {
 	version := msg.complete.Version()
 	sender := msg.sender
-	server.DebugLog(msg.inner.Logger, "debug", "MCR received.", "sender", sender, "version", version)
+	utils.DebugLog(msg.inner.Logger, "debug", "MCR received.", "sender", sender, "version", version)
 	senders, found := msg.migrations[version]
 	if !found {
-		if version > msg.active.Version {
+		if version > msg.activeTopology.Version {
 			senders = make(map[common.RMId]*int32)
 			msg.migrations[version] = senders
 		} else {
@@ -132,4 +132,4 @@ func (mtlsc *immigrationTxnLocalStateChange) TxnLocallyComplete(txn *eng.Txn) {
 	}
 }
 
-func (mtlsc *migrationTxnLocalStateChange) TxnFinished(*eng.Txn) {}
+func (mtlsc *immigrationTxnLocalStateChange) TxnFinished(*eng.Txn) {}

@@ -1,25 +1,28 @@
 package router
 
 import (
+	"fmt"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/paxos"
-	"goshawkdb.io/server/topologytransmogrifier"
+	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
 )
 
 type Router struct {
+	RMId common.RMId
 	*paxos.Dispatchers
-	connectionManager *network.ConnectionManager
-	transmogrifier    *topologytransmogrifier.TopologyTransmogrifier
-	logger            *log.Logger
+	connectionManager connectionmanager.ConnectionManager
+	transmogrifier    topology.TopologyTransmogrifier
+	logger            log.Logger
 }
 
-func NewRouter(dispatchers *paxos.Dispatchers, connectionManager *network.ConnectionManager, transmogrifier *topologytransmogrifier.TopologyTransmogrifier, logger log.Logger) *Router {
+func NewRouter(rmId common.RMId, dispatchers *paxos.Dispatchers, connectionManager connectionmanager.ConnectionManager, transmogrifier topology.TopologyTransmogrifier, logger log.Logger) *Router {
 	return &Router{
+		RMId:              rmId,
 		Dispatchers:       dispatchers,
 		connectionManager: connectionManager,
 		transmogrifier:    transmogrifier,
@@ -68,7 +71,7 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 		tgc := msg.TxnGloballyComplete()
 		r.ProposerDispatcher.TxnGloballyCompleteReceived(sender, tgc)
 	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
-		if sender != cm.RMId {
+		if sender != r.RMId {
 			configCap := msg.TopologyChangeRequest()
 			config := configuration.ConfigurationFromCap(configCap)
 			r.transmogrifier.RequestConfigurationChange(config)

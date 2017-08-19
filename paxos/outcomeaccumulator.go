@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/utils"
 )
 
 // OutcomeAccumulator groups together all the different outcomes we've
@@ -78,7 +78,7 @@ func (oa *OutcomeAccumulator) TopologyChanged(topology *configuration.Topology) 
 	for rmId := range topology.RMsRemoved {
 		if acceptorOutcome, found := oa.acceptorOutcomes[rmId]; found {
 			delete(oa.acceptorOutcomes, rmId)
-			server.DebugLog(oa.logger, "debug", "TopologyChange. OutcomeAccumulator deleting acceptor.", "acceptor", rmId)
+			utils.DebugLog(oa.logger, "debug", "TopologyChange. OutcomeAccumulator deleting acceptor.", "acceptor", rmId)
 			oa.acceptors[acceptorOutcome.idx] = common.RMIdEmpty
 			if l := oa.acceptors.NonEmptyLen(); l < oa.fInc {
 				oa.logger.Log("warning", "Enough acceptors have been removed that this txn will now never complete. Sorry.")
@@ -150,7 +150,7 @@ func (oa *OutcomeAccumulator) BallotOutcomeReceived(acceptorId common.RMId, outc
 }
 
 func (oa *OutcomeAccumulator) TxnGloballyCompleteReceived(acceptorId common.RMId) bool {
-	server.DebugLog(oa.logger, "debug", "TGC received.", "sender", acceptorId, "pending", oa.pendingTGC)
+	utils.DebugLog(oa.logger, "debug", "TGC received.", "sender", acceptorId, "pending", oa.pendingTGC)
 	acceptorOutcome, found := oa.acceptorOutcomes[acceptorId]
 	if !found {
 		// It must have been removed due to a topology change. See notes
@@ -213,7 +213,7 @@ func (oa *OutcomeAccumulator) IsAllAborts() (acceptors []common.RMId) {
 	return acceptors
 }
 
-func (oa *OutcomeAccumulator) Status(sc *server.StatusConsumer) {
+func (oa *OutcomeAccumulator) Status(sc *utils.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- acceptor outcomes len: %v", len(oa.acceptorOutcomes)))
 	sc.Emit(fmt.Sprintf("- unique outcomes: %v", oa.allKnownOutcomes))
 	sc.Emit(fmt.Sprintf("- outcome decided? %v", oa.winningOutcome != nil))

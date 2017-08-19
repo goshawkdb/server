@@ -3,7 +3,7 @@ package topologyTransmogrifier
 import (
 	"fmt"
 	"goshawkdb.io/server/configuration"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/topology"
 )
 
 // quiet
@@ -60,8 +60,8 @@ func (task *quiet) Tick() (bool, error) {
 		// accepting client txns.
 		// 2: Install to the proposers again. This is to ensure that
 		// TLCs have been written to disk.
-		task.installTopology(task.activeTopology, map[eng.TopologyChangeSubscriberType]func() (bool, error){
-			eng.ProposerSubscriber: func() (bool, error) {
+		task.installTopology(task.activeTopology, map[topology.TopologyChangeSubscriberType]func() (bool, error){
+			topology.ProposerSubscriber: func() (bool, error) {
 				if activeNextConfig == task.installing {
 					if task.stage == 0 || task.stage == 2 {
 						task.stage++
@@ -76,8 +76,8 @@ func (task *quiet) Tick() (bool, error) {
 		// 1: Install to the varManagers. They only confirm back to us
 		// once they've banned rolls, and ensured all active txns are
 		// completed (though the TLC may not have gone to disk yet).
-		task.installTopology(task.activeTopology, map[eng.TopologyChangeSubscriberType]func() (bool, error){
-			eng.VarSubscriber: func() (bool, error) {
+		task.installTopology(task.activeTopology, map[topology.TopologyChangeSubscriberType]func() (bool, error){
+			topology.VarSubscriber: func() (bool, error) {
 				if activeNextConfig == task.installing && task.stage == 1 {
 					task.stage = 2
 				}

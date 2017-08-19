@@ -17,7 +17,7 @@ func (task *migrate) init(base *transmogrificationTask) {
 func (task *migrate) isValid() bool {
 	active := task.activeTopology
 	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
-		len(next.Pending) > 0
+		len(active.NextConfiguration.Pending) > 0
 }
 
 func (task *migrate) announce() {
@@ -92,12 +92,12 @@ func (task *migrate) Tick() (bool, error) {
 
 func (task *migrate) Abandon() {
 	task.ensureStopEmigrator()
-	task.targetConfig.Abandon()
+	task.transmogrificationTask.Abandon()
 }
 
 func (task *migrate) completed() (bool, error) {
 	task.ensureStopEmigrator()
-	return task.targetConfig.completed()
+	return task.transmogrificationTask.completed()
 }
 
 func (task *migrate) ensureEmigrator() {

@@ -12,17 +12,19 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
 	"sync/atomic"
 )
 
 type emigrator struct {
 	logger            log.Logger
 	stop              int32
-	rmId              common.RMId
+	self              common.RMId
 	db                *db.Databases
-	connectionManager *ConnectionManager
+	connectionManager connectionmanager.ConnectionManager
 	activeBatches     map[common.RMId]*sendBatch
 	topology          *configuration.Topology
 	conns             map[common.RMId]sconn.ServerConnection
@@ -31,12 +33,12 @@ type emigrator struct {
 func newEmigrator(task *migrate) *emigrator {
 	e := &emigrator{
 		logger:            task.inner.Logger,
-		self:              task.rmId,
+		self:              task.self,
 		db:                task.db,
 		connectionManager: task.connectionManager,
 		activeBatches:     make(map[common.RMId]*sendBatch),
 	}
-	e.topology = e.connectionManager.AddTopologySubscriber(eng.EmigratorSubscriber, e)
+	e.topology = e.connectionManager.AddTopologySubscriber(topology.EmigratorSubscriber, e)
 	e.connectionManager.AddServerConnectionSubscriber(e)
 	return e
 }
@@ -44,7 +46,7 @@ func newEmigrator(task *migrate) *emigrator {
 func (e *emigrator) stopAsync() {
 	atomic.StoreInt32(&e.stop, 1)
 	e.connectionManager.RemoveServerConnectionSubscriber(e)
-	e.connectionManager.RemoveTopologySubscriberAsync(eng.EmigratorSubscriber, e)
+	e.connectionManager.RemoveTopologySubscriberAsync(topology.EmigratorSubscriber, e)
 }
 
 func (e *emigrator) TopologyChanged(topology *configuration.Topology, done func(bool)) {
@@ -127,7 +129,7 @@ func (it *dbIterator) iterate() {
 				if txnBytes == nil {
 					return true
 				}
-				txn := eng.TxnReaderFromData(txnBytes)
+				txn := utils.TxnReaderFromData(txnBytes)
 				// So, we only need to send based on the vars that we have
 				// (in fact, we require the positions so we can only look
 				// at the vars we have). However, the txn var allocations
@@ -216,7 +218,7 @@ func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*m
 	result := make([]*msgs.Var, 0, len(varCaps)>>1)
 	for _, varCap := range varCaps {
 		pos := varCap.Positions()
-		server.DebugLog(it.logger, "debug", "Testing for condition.",
+		utils.DebugLog(it.logger, "debug", "Testing for condition.",
 			"VarUUId", common.MakeVarUUId(varCap.Id()), "positions", (*common.Positions)(&pos),
 			"condition", cond)
 		if b, err := cond.SatisfiedBy(it.configuration, (*common.Positions)(&pos), it.logger); err == nil && b {
@@ -250,7 +252,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection)
 			// the completion msg. If it has changed, we rely on the
 			// ConnectionLost being called in the emigrator to do any
 			// necessary tidying up.
-			server.DebugLog(it.logger, "debug", "Sending migration completion.", "recipient", conn.RMId())
+			utils.DebugLog(it.logger, "debug", "Sending migration completion.", "recipient", conn.RMId())
 			conn.Send(bites)
 		}
 	}
@@ -269,7 +271,7 @@ type sendBatch struct {
 }
 
 type migrationElem struct {
-	txn  *eng.TxnReader
+	txn  *utils.TxnReader
 	vars []*msgs.Var
 }
 
@@ -306,12 +308,12 @@ func (sb *sendBatch) flush() {
 	migration.SetElems(elems)
 	msg.SetMigration(migration)
 	bites := common.SegToBytes(seg)
-	server.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId())
+	utils.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId())
 	sb.conn.Send(bites)
 	sb.elems = sb.elems[:0]
 }
 
-func (sb *sendBatch) add(txn *eng.TxnReader, varCaps []*msgs.Var) {
+func (sb *sendBatch) add(txn *utils.TxnReader, varCaps []*msgs.Var) {
 	elem := &migrationElem{
 		txn:  txn,
 		vars: varCaps,

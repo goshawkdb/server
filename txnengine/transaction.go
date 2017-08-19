@@ -145,7 +145,7 @@ func (action localAction) String() string {
 	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
 }
 
-func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *utils.TxnReader, varCaps *msgs.Var_List, logger log.Logger) {
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *utils.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
 	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
 	txnActions := reader.Actions(true)
 	txn.localActions = make([]localAction, varCaps.Len())

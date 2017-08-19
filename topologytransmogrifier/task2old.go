@@ -1,11 +1,15 @@
 package topologyTransmogrifier
 
 import (
+	"errors"
 	"fmt"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
+	"time"
 )
 
 // installTargetOld
@@ -65,13 +69,13 @@ func (task *installTargetOld) Tick() (bool, error) {
 		task.runTxnMsg = &topologyTransmogrifierMsgCreateRoots{
 			transmogrificationTask: task.transmogrificationTask,
 			task:           task,
-			backoff:        server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+			backoff:        utils.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, time.Duration(len(task.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
 			rootsRequired:  rootsRequired,
 			targetTopology: targetTopology,
 			active:         active,
 			passive:        passive,
 		}
-		return task.Exec()
+		return task.runTxnMsg.Exec()
 	} else {
 		return task.installTargetOld(targetTopology, active, passive)
 	}
@@ -83,7 +87,7 @@ func (task *installTargetOld) installTargetOld(targetTopology *configuration.Top
 	// we've checked once above.
 	twoFInc := uint16(task.activeTopology.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.activeTopology, targetTopology, twoFInc, active, passive)
-	task.runTopologyTransaction(task, txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive)
 	return false, nil
 }
 
@@ -223,7 +227,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		hostsNew = append(hostsNew, cd.Host())
 	}
 
-	nextConfig := task.targetConfig.Clone()
+	nextConfig := task.targetConfig.Configuration.Clone()
 	nextConfig.RMs = rmIdsNew
 	// Note this means that the Hosts in the db config can differ from
 	// the hosts in the cmdline config.
@@ -231,12 +235,12 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	activeCloned := active.Clone()
 	// Pointer semantics, so we need to copy into our new set
-	removed := make(map[common.RMId]server.EmptyStruct)
+	removed := make(map[common.RMId]types.EmptyStruct)
 	for rmId := range activeCloned.RMsRemoved {
-		removed[rmId] = server.EmptyStructVal
+		removed[rmId] = types.EmptyStructVal
 	}
 	for _, rmId := range rmIdsLost {
-		removed[rmId] = server.EmptyStructVal
+		removed[rmId] = types.EmptyStructVal
 	}
 	nextConfig.RMsRemoved = removed
 
@@ -282,7 +286,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// ClusterUUId is non-0 and consistent down the chain. Of course,
 	// the txn will ensure only one such rewrite will win.
 	activeCloned.EnsureClusterUUId(0)
-	server.DebugLog(task.inner.Logger, "debug", "Set cluster uuid.", "uuid", activeCloned.ClusterUUId)
+	utils.DebugLog(task.inner.Logger, "debug", "Set cluster uuid.", "uuid", activeCloned.ClusterUUId)
 
 	return activeCloned, rootsRequired, false, nil
 }

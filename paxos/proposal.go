@@ -4,9 +4,10 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 )
 
 type proposal struct {
@@ -16,7 +17,7 @@ type proposal struct {
 	activeRMIds        map[common.RMId]uint32
 	twoFInc            int
 	fInc               int
-	txn                *eng.TxnReader
+	txn                *utils.TxnReader
 	submitter          common.RMId
 	submitterBootCount uint32
 	skipPhase1         bool
@@ -26,7 +27,7 @@ type proposal struct {
 	finished           bool
 }
 
-func NewProposal(pm *ProposerManager, txn *eng.TxnReader, twoFInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
+func NewProposal(pm *ProposerManager, txn *utils.TxnReader, twoFInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
 	txnCap := txn.Txn
 	allocs := txnCap.Allocations()
 	activeRMIds := make(map[common.RMId]uint32, allocs.Len())
@@ -111,11 +112,11 @@ func (p *proposal) maybeSendOneA() {
 		pi.addOneAToProposal(&proposal, sender)
 	}
 	sender.msg = common.SegToBytes(seg)
-	server.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 1A.", "TxnId", txnId)
+	utils.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 1A.", "TxnId", txnId)
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
-func (p *proposal) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
+func (p *proposal) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes msgs.OneBTxnVotes) {
 	promises := oneBTxnVotes.Promises()
 	for idx, l := 0, promises.Len(); idx < l; idx++ {
 		promise := promises.At(idx)
@@ -151,7 +152,7 @@ func (p *proposal) maybeSendTwoA() {
 	}
 	twoACap.SetTxn(p.txn.Data)
 	sender.msg = common.SegToBytes(seg)
-	server.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 2A.", "TxnId", p.txn.Id)
+	utils.DebugLog(p.proposerManager.logger, "debug", "Adding sender for 2A.", "TxnId", p.txn.Id)
 	p.proposerManager.AddServerConnectionSubscriber(sender)
 }
 
@@ -175,12 +176,12 @@ func (p *proposal) FinishProposing() []common.RMId {
 	for _, pi := range p.instances {
 		if sender := pi.oneASender; sender != nil {
 			pi.oneASender = nil
-			server.DebugLog(p.proposerManager.logger, "debug", "Finishing sender for 1A.", "TxnId", p.txn.Id)
+			utils.DebugLog(p.proposerManager.logger, "debug", "Finishing sender for 1A.", "TxnId", p.txn.Id)
 			sender.finished()
 		}
 		if sender := pi.twoASender; sender != nil {
 			pi.twoASender = nil
-			server.DebugLog(p.proposerManager.logger, "debug", "Finishing sender for 2A.", "TxnId", p.txn.Id,
+			utils.DebugLog(p.proposerManager.logger, "debug", "Finishing sender for 2A.", "TxnId", p.txn.Id,
 				"VarUUId", pi.ballot.VarUUId)
 			sender.finished()
 		}
@@ -188,7 +189,7 @@ func (p *proposal) FinishProposing() []common.RMId {
 	return p.abortInstances
 }
 
-func (p *proposal) Status(sc *server.StatusConsumer) {
+func (p *proposal) Status(sc *utils.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Proposal for %v-%v", p.txn.Id, p.instanceRMId))
 	sc.Emit(fmt.Sprintf("- Acceptors: %v", p.acceptors))
 	sc.Emit(fmt.Sprintf("- Instances: %v", len(p.instances)))
@@ -456,12 +457,12 @@ func (s *proposalSender) instanceComplete(pi *proposalInstance) {
 func (s *proposalSender) finished() {
 	if !s.done {
 		s.done = true
-		server.DebugLog(s.proposerManager.logger, "debug", "Removing proposal sender.")
+		utils.DebugLog(s.proposerManager.logger, "debug", "Removing proposal sender.")
 		s.proposerManager.RemoveServerConnectionSubscriber(s)
 	}
 }
 
-func (s *proposalSender) ConnectedRMs(conns map[common.RMId]Connection) {
+func (s *proposalSender) ConnectedRMs(conns map[common.RMId]sconn.ServerConnection) {
 	for _, rmId := range s.proposal.acceptors {
 		if conn, found := conns[rmId]; found {
 			conn.Send(s.msg)
@@ -477,7 +478,7 @@ func (s *proposalSender) ConnectedRMs(conns map[common.RMId]Connection) {
 	}
 }
 
-func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]Connection) {
+func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]sconn.ServerConnection) {
 	if !s.proposeAborts {
 		return
 	}
@@ -533,7 +534,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 						break
 					}
 					ballots := MakeAbortBallots(s.proposal.txn, &alloc)
-					server.DebugLog(s.proposerManager.logger, "debug", "Trying to abort due to lost submitter.",
+					utils.DebugLog(s.proposerManager.logger, "debug", "Trying to abort due to lost submitter.",
 						"TxnId", s.proposal.txn.Id, "RMId", rmId, "lost", lost, "actionCount", len(ballots))
 					s.proposal.abortInstances = append(s.proposal.abortInstances, rmId)
 					s.proposal.proposerManager.NewPaxosProposals(
@@ -559,7 +560,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 			}
 		}
 		ballots := MakeAbortBallots(s.proposal.txn, alloc)
-		server.DebugLog(s.proposerManager.logger, "debug", "Trying to abort.", "TxnId", s.proposal.txn.Id,
+		utils.DebugLog(s.proposerManager.logger, "debug", "Trying to abort.", "TxnId", s.proposal.txn.Id,
 			"lost", lost, "actionCount", len(ballots))
 		s.proposal.abortInstances = append(s.proposal.abortInstances, lost)
 		s.proposal.proposerManager.NewPaxosProposals(
@@ -568,7 +569,7 @@ func (s *proposalSender) ConnectionLost(lost common.RMId, conns map[common.RMId]
 	})
 }
 
-func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn Connection, conns map[common.RMId]Connection, done func()) {
+func (s *proposalSender) ConnectionEstablished(rmId common.RMId, conn sconn.ServerConnection, conns map[common.RMId]sconn.ServerConnection, done func()) {
 	for _, acc := range s.proposal.acceptors {
 		if acc == rmId {
 			conn.Send(s.msg)

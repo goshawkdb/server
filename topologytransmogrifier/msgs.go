@@ -3,9 +3,10 @@ package topologyTransmogrifier
 import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
-	"goshawkdb.io/server"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 )
 
 type topologyTransmogrifierMsgRequestConfigChange struct {
@@ -14,7 +15,7 @@ type topologyTransmogrifierMsgRequestConfigChange struct {
 }
 
 func (msg *topologyTransmogrifierMsgRequestConfigChange) Exec() (bool, error) {
-	server.DebugLog(msg.inner.Logger, "debug", "Topology change request.", "config", msg.config)
+	utils.DebugLog(msg.inner.Logger, "debug", "Topology change request.", "config", msg.config)
 	nonFatalErr := msg.setTarget(&configuration.NextConfiguration{Configuration: msg.config})
 	// because this is definitely not the cmd-line config, an error here is non-fatal
 	if nonFatalErr != nil {
@@ -76,14 +77,14 @@ type topologyTransmogrifierMsgTopologyObserved struct {
 }
 
 func (msg topologyTransmogrifierMsgTopologyObserved) Exec() (bool, error) {
-	server.DebugLog(msg.inner.Logger, "debug", "New topology observed.", "topology", msg.topology)
+	utils.DebugLog(msg.inner.Logger, "debug", "New topology observed.", "topology", msg.topology)
 	return msg.setActiveTopology(msg.topology)
 }
 
 type topologyTransmogrifierMsgRunTransaction struct {
 	*transmogrificationTask
 	task    Task
-	backoff *server.BinaryBackoffEngine
+	backoff *utils.BinaryBackoffEngine
 	txn     *msgs.Txn
 	active  common.RMIds
 	passive common.RMIds
@@ -94,8 +95,9 @@ func (msg *topologyTransmogrifierMsgRunTransaction) Exec() (bool, error) {
 		return false, nil
 	}
 	go msg.runTxn()
-	msg.createOrAdvanceBackoff()
+	msg.backoff.Advance()
 	msg.backoff.After(func() { msg.EnqueueMsg(msg) })
+	return false, nil
 }
 
 func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
@@ -112,15 +114,15 @@ func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
 			if msg.runTxnMsg == msg {
 				msg.runTxnMsg = nil
 			}
+			return false, nil
 		})
-		return false, nil
 	}
 }
 
 type topologyTransmogrifierMsgCreateRoots struct {
 	*transmogrificationTask
 	task           *installTargetOld
-	backoff        *server.BinaryBackoffEngine
+	backoff        *utils.BinaryBackoffEngine
 	rootsRequired  int
 	targetTopology *configuration.Topology
 	active         common.RMIds
@@ -132,8 +134,9 @@ func (msg *topologyTransmogrifierMsgCreateRoots) Exec() (bool, error) {
 		return false, nil
 	}
 	go msg.runTxn()
-	msg.createOrAdvanceBackoff()
+	msg.backoff.Advance()
 	msg.backoff.After(func() { msg.EnqueueMsg(msg) })
+	return false, nil
 }
 
 func (msg *topologyTransmogrifierMsgCreateRoots) runTxn() {

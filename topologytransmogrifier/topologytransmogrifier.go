@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	mdb "github.com/msackman/gomdb"
-	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	eng "goshawkdb.io/server/txnengine"
+	topo "goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
 )
 
 func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
@@ -18,7 +18,7 @@ func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
 }
 
 func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topology) (bool, error) {
-	server.DebugLog(tt.inner.Logger, "debug", "SetActiveTopology.", "topology", topology)
+	utils.DebugLog(tt.inner.Logger, "debug", "SetActiveTopology.", "topology", topology)
 	if tt.activeTopology != nil {
 		switch {
 		case tt.activeTopology.ClusterId != topology.ClusterId && len(tt.activeTopology.ClusterId) > 0:
@@ -69,14 +69,14 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 	}
 }
 
-func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[eng.TopologyChangeSubscriberType]func() (bool, error), localHost string, remoteHosts []string) {
-	server.DebugLog(tt.inner.Logger, "debug", "Installing topology to connection manager, et al.", "topology", topology)
+func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topology, callbacks map[topo.TopologyChangeSubscriberType]func() (bool, error), localHost string, remoteHosts []string) {
+	utils.DebugLog(tt.inner.Logger, "debug", "Installing topology to connection manager, et al.", "topology", topology)
 	if tt.localEstablished != nil {
 		if callbacks == nil {
-			callbacks = make(map[eng.TopologyChangeSubscriberType]func() (bool, error))
+			callbacks = make(map[topo.TopologyChangeSubscriberType]func() (bool, error))
 		}
-		origFun := callbacks[eng.ConnectionManagerSubscriber]
-		callbacks[eng.ConnectionManagerSubscriber] = func() (bool, error) {
+		origFun := callbacks[topo.ConnectionManagerSubscriber]
+		callbacks[topo.ConnectionManagerSubscriber] = func() (bool, error) {
 			if tt.localEstablished != nil {
 				close(tt.localEstablished)
 				tt.localEstablished = nil
@@ -88,7 +88,7 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 			}
 		}
 	}
-	wrapped := make(map[eng.TopologyChangeSubscriberType]func(), len(callbacks))
+	wrapped := make(map[topo.TopologyChangeSubscriberType]func(), len(callbacks))
 	for subType, cb := range callbacks {
 		cbCopy := cb
 		wrapped[subType] = func() { tt.EnqueueFuncAsync(cbCopy) }
@@ -103,13 +103,16 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConf
 	// targetConfig with that. Otherwise we compare with the
 	// activeTopology.
 
-	versus := tt.activeTopology
-	if tt.currentTask != nil {
-		versus = tt.currentTask.TargetConfig()
+	var versusConfig *configuration.Configuration
+	if tt.currentTask == nil {
+		if tt.activeTopology != nil {
+			versusConfig = tt.activeTopology.Configuration
+		}
+	} else {
+		versusConfig = tt.currentTask.TargetConfig().Configuration
 	}
 
-	if versus != nil {
-		versusConfig := versus.Configuration
+	if versusConfig != nil {
 		versusClusterUUId, targetClusterUUId := versusConfig.ClusterUUId, targetConfig.ClusterUUId
 		switch {
 		case targetConfig.ClusterId != versusConfig.ClusterId && len(versusConfig.ClusterId) > 0:
@@ -124,7 +127,7 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConf
 			return fmt.Errorf("Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
 
 		case targetConfig.Configuration.EqualExternally(versusConfig):
-			if versus == tt.activeTopology {
+			if tt.currentTask == nil {
 				tt.inner.Logger.Log("msg", "Config already reached.", "version", versusConfig.Version)
 			} else {
 				tt.inner.Logger.Log("msg", "Config already being targetted.", "version", versusConfig.Version)
@@ -146,7 +149,7 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConf
 		tt.currentTask.Abandon()
 	}
 
-	server.DebugLog(tt.inner.Logger, "debug", "Creating new task.")
+	utils.DebugLog(tt.inner.Logger, "debug", "Creating new task.")
 	tt.currentTask = tt.newTransmogrificationTask(targetConfig)
 	return nil
 }

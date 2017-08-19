@@ -10,7 +10,6 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
-	eng "goshawkdb.io/server/txnengine"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"time"
@@ -66,7 +65,7 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 	return base
 }
 
-func (tt *transmogrificationTask) selectStage() Task {
+func (tt *transmogrificationTask) selectStage() stage {
 	for _, s := range tt.stages {
 		if s.isValid() {
 			return s
@@ -151,7 +150,7 @@ func (tt *transmogrificationTask) Abandon() {
 func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) {
 	tt.runTxnMsg = &topologyTransmogrifierMsgRunTransaction{
 		transmogrificationTask: tt,
-		backoff:                server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+		backoff:                utils.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
 		task:                   tt.currentTask,
 		active:                 active,
 		passive:                passive,
@@ -303,12 +302,12 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 }
 
 func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration.Topology, error) {
-	empty, err := tt.connectionManager.Dispatchers.IsDatabaseEmpty()
+	empty, err := tt.router.IsDatabaseEmpty()
 	if empty || err != nil {
 		return nil, err
 	}
 
-	backoff := server.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
+	backoff := utils.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
 	for {
 		txn := tt.createTopologyTransaction(nil, nil, 1, []common.RMId{tt.self}, nil)
 
@@ -331,7 +330,7 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 		}
 		update := abortUpdates.At(0)
 		dbversion := common.MakeTxnId(update.TxnId())
-		updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
+		updateActions := utils.TxnActionsFromData(update.Actions(), true).Actions()
 		if updateActions.Len() != 1 {
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave multiple actions: %v", updateActions.Len())
 		}
@@ -371,18 +370,18 @@ func (tt *transmogrificationTask) createTopologyZero(config *configuration.NextC
 
 func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive common.RMIds) (bool, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
-	server.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
+	utils.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
 		return false, false, err
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
-		server.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
+		utils.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
 		return true, false, nil
 	}
 	abort := result.Abort()
-	server.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
+	utils.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
 		return false, true, nil
 	}
@@ -395,7 +394,7 @@ func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive
 	update := abortUpdates.At(0)
 	dbversion := common.MakeTxnId(update.TxnId())
 
-	updateActions := eng.TxnActionsFromData(update.Actions(), true).Actions()
+	updateActions := utils.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
 		return false, false,
 			fmt.Errorf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
@@ -418,7 +417,7 @@ func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive
 }
 
 func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {
-	server.DebugLog(tt.inner.Logger, "debug", "Creating Roots.", "count", rootCount)
+	utils.DebugLog(tt.inner.Logger, "debug", "Creating Roots.", "count", rootCount)
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
@@ -438,7 +437,7 @@ func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, confi
 	}
 	ctxn.SetActions(actions)
 	txnReader, result, err := tt.localConnection.RunClientTransaction(&ctxn, false, nil, nil)
-	server.DebugLog(tt.inner.Logger, "debug", "Created root.", "result", result, "error", err)
+	utils.DebugLog(tt.inner.Logger, "debug", "Created root.", "result", result, "error", err)
 	if err != nil {
 		return false, nil, err
 	}
@@ -460,7 +459,7 @@ func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, confi
 			positions := action.Create().Positions()
 			root.Positions = (*common.Positions)(&positions)
 		}
-		server.DebugLog(tt.inner.Logger, "debug", "Roots created.", "roots", roots)
+		utils.DebugLog(tt.inner.Logger, "debug", "Roots created.", "roots", roots)
 		return false, roots, nil
 	}
 	if result.Abort().Which() == msgs.OUTCOMEABORT_RESUBMIT {

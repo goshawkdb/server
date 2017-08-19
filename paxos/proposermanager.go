@@ -10,12 +10,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
 	"time"
 )
 
@@ -30,7 +33,7 @@ const ( //                  txnId  rmId
 type instanceIdPrefix [instanceIdPrefixLen]byte
 
 type ProposerManager struct {
-	ServerConnectionPublisher
+	sconn.ServerConnectionPublisher
 	logger        log.Logger
 	RMId          common.RMId
 	BootCount     uint32
@@ -49,9 +52,9 @@ type ProposerMetrics struct {
 	Lifespan prometheus.Observer
 }
 
-func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {
+func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {
 	pm := &ProposerManager{
-		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm, logger),
+		ServerConnectionPublisher: utils.NewServerConnectionPublisherProxy(exe, cm, logger),
 		logger:        logger, // proposerDispatcher creates the context
 		RMId:          rmId,
 		BootCount:     bootCount,
@@ -63,7 +66,7 @@ func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount ui
 		topology:      nil,
 	}
 	exe.EnqueueFuncAsync(func() (bool, error) {
-		pm.topology = cm.AddTopologySubscriber(eng.ProposerSubscriber, pm)
+		pm.topology = cm.AddTopologySubscriber(topology.ProposerSubscriber, pm)
 		return false, nil
 	})
 	return pm
@@ -152,11 +155,11 @@ func (pm *ProposerManager) SetMetrics(metrics *ProposerMetrics) {
 	pm.metrics = metrics
 }
 
-func (pm *ProposerManager) ImmigrationReceived(txn *eng.TxnReader, varCaps *msgs.Var_List, stateChange eng.TxnLocalStateChange) {
+func (pm *ProposerManager) ImmigrationReceived(txn *utils.TxnReader, varCaps msgs.Var_List, stateChange eng.TxnLocalStateChange) {
 	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txn, varCaps, pm.logger)
 }
 
-func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
+func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *utils.TxnReader) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other
 	// proposers will have created abort proposals on our behalf, and
@@ -165,7 +168,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 	txnId := txn.Id
 	txnCap := txn.Txn
 	if _, found := pm.proposers[*txnId]; !found {
-		server.DebugLog(pm.logger, "debug", "Received.", "TxnId", txnId)
+		utils.DebugLog(pm.logger, "debug", "Received.", "TxnId", txnId)
 		accept := true
 		if pm.topology != nil {
 			accept = pm.topology.Version == txnCap.TopologyVersion()
@@ -187,15 +190,15 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 						}
 					}
 					if !accept {
-						server.DebugLog(pm.logger, "debug", "Aborting received txn as it was submitted for an older version of us so we may have already voted on it.",
+						utils.DebugLog(pm.logger, "debug", "Aborting received txn as it was submitted for an older version of us so we may have already voted on it.",
 							"TxnId", txnId, "BootCount", pm.BootCount)
 					}
 				} else {
-					server.DebugLog(pm.logger, "debug", "Aborting received txn as sender has been removed from topology.",
+					utils.DebugLog(pm.logger, "debug", "Aborting received txn as sender has been removed from topology.",
 						"TxnId", txnId, "sender", sender, "topology", pm.topology)
 				}
 			} else {
-				server.DebugLog(pm.logger, "debug", "Aborting received txn due to non-matching topology.",
+				utils.DebugLog(pm.logger, "debug", "Aborting received txn due to non-matching topology.",
 					"TxnId", txnId, "topologyVersion", txnCap.TopologyVersion(), "isTopologyTxn", txnCap.IsTopology(), "topology", pm.topology)
 			}
 		}
@@ -218,14 +221,14 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
 	}
 }
 
-func (pm *ProposerManager) NewPaxosProposals(txn *eng.TxnReader, twoFInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
+func (pm *ProposerManager) NewPaxosProposals(txn *utils.TxnReader, twoFInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	txnId := txn.Id
 	copy(instIdSlice, txnId[:])
 	binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], uint32(rmId))
 	if _, found := pm.proposals[instId]; !found {
-		server.DebugLog(pm.logger, "debug", "NewPaxos.", "TxnId", txnId, "acceptors", acceptors, "instance", rmId)
+		utils.DebugLog(pm.logger, "debug", "NewPaxos.", "TxnId", txnId, "acceptors", acceptors, "instance", rmId)
 		prop := NewProposal(pm, txn, twoFInc, ballots, rmId, acceptors, skipPhase1)
 		pm.proposals[instId] = prop
 		prop.Start()
@@ -233,7 +236,7 @@ func (pm *ProposerManager) NewPaxosProposals(txn *eng.TxnReader, twoFInc int, ba
 }
 
 func (pm *ProposerManager) AddToPaxosProposals(txnId *common.TxnId, ballots []*eng.Ballot, rmId common.RMId) {
-	server.DebugLog(pm.logger, "debug", "Adding ballot to Paxos.", "TxnId", txnId, "instance", rmId)
+	utils.DebugLog(pm.logger, "debug", "Adding ballot to Paxos.", "TxnId", txnId, "instance", rmId)
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -246,8 +249,8 @@ func (pm *ProposerManager) AddToPaxosProposals(txnId *common.TxnId, ballots []*e
 }
 
 // from network
-func (pm *ProposerManager) OneBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneBTxnVotes *msgs.OneBTxnVotes) {
-	server.DebugLog(pm.logger, "debug", "1B received.", "TxnId", txnId, "sender", sender, "instance", common.RMId(oneBTxnVotes.RmId()))
+func (pm *ProposerManager) OneBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneBTxnVotes msgs.OneBTxnVotes) {
+	utils.DebugLog(pm.logger, "debug", "1B received.", "TxnId", txnId, "sender", sender, "instance", common.RMId(oneBTxnVotes.RmId()))
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -261,7 +264,7 @@ func (pm *ProposerManager) OneBTxnVotesReceived(sender common.RMId, txnId *commo
 }
 
 // from network
-func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, txn *eng.TxnReader, twoBTxnVotes *msgs.TwoBTxnVotes) {
+func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, txn *utils.TxnReader, twoBTxnVotes msgs.TwoBTxnVotes) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -269,7 +272,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 	switch twoBTxnVotes.Which() {
 	case msgs.TWOBTXNVOTES_FAILURES:
 		failures := twoBTxnVotes.Failures()
-		server.DebugLog(pm.logger, "debug", "2B failures received.", "TxnId", txnId, "sender", sender, "instance", common.RMId(failures.RmId()))
+		utils.DebugLog(pm.logger, "debug", "2B failures received.", "TxnId", txnId, "sender", sender, "instance", common.RMId(failures.RmId()))
 		binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], failures.RmId())
 		if prop, found := pm.proposals[instId]; found {
 			prop.TwoBFailuresReceived(sender, &failures)
@@ -280,7 +283,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 		outcome := twoBTxnVotes.Outcome()
 
 		if proposer, found := pm.proposers[*txnId]; found {
-			server.DebugLog(pm.logger, "debug", "2B outcome received. Known.", "TxnId", txnId, "sender", sender)
+			utils.DebugLog(pm.logger, "debug", "2B outcome received. Known.", "TxnId", txnId, "sender", sender)
 			proposer.BallotOutcomeReceived(sender, &outcome)
 			pm.checkAllDisk()
 			return
@@ -298,7 +301,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			// abort (abort proposers out there) or commit (we previously
 			// voted, and that vote got recorded, but we have since died
 			// and restarted).
-			server.DebugLog(pm.logger, "debug", "2B outcome received. Unknown Active.", "TxnId", txnId, "sender", sender)
+			utils.DebugLog(pm.logger, "debug", "2B outcome received. Unknown Active.", "TxnId", txnId, "sender", sender)
 
 			// There's a possibility the acceptor that sent us this 2B is
 			// one of only a few acceptors that got enough 2As to
@@ -308,7 +311,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 			// itself will detect any further absences and take care of
 			// them.
 			acceptors := GetAcceptorsFromTxn(txnCap)
-			server.DebugLog(pm.logger, "debug", "Starting abort proposals.", "TxnId", txnId, "acceptors", acceptors)
+			utils.DebugLog(pm.logger, "debug", "Starting abort proposals.", "TxnId", txnId, "acceptors", acceptors)
 			twoFInc := int(txnCap.TwoFInc())
 			ballots := MakeAbortBallots(txn, alloc)
 			pm.NewPaxosProposals(txn, twoFInc, ballots, acceptors, pm.RMId, false)
@@ -319,7 +322,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 		} else {
 			// Not active, so we are a learner
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
-				server.DebugLog(pm.logger, "debug", "2B outcome received. Unknown Learner.", "TxnId", txnId, "sender", sender)
+				utils.DebugLog(pm.logger, "debug", "2B outcome received. Unknown Learner.", "TxnId", txnId, "sender", sender)
 				// we must be a learner.
 				proposer := pm.createProposerStart(txn, ProposerPassiveLearner, pm.topology)
 				proposer.BallotOutcomeReceived(sender, &outcome)
@@ -331,11 +334,11 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// outcome. However, we must have since died and so lost
 				// that state/proposer. We should now immediately reply
 				// with a TLC.
-				server.DebugLog(pm.logger, "debug", "Sending immediate TLC for unknown abort learner.", "TxnId", txnId)
+				utils.DebugLog(pm.logger, "debug", "Sending immediate TLC for unknown abort learner.", "TxnId", txnId)
 				// We have no state here, and if we receive further 2Bs
 				// from the repeating sender at the acceptor then we will
 				// send further TLCs. So the use of OSS here is correct.
-				NewOneShotSender(pm.logger, MakeTxnLocallyCompleteMsg(txnId), pm, sender)
+				utils.NewOneShotSender(pm.logger, MakeTxnLocallyCompleteMsg(txnId), pm, sender)
 			}
 		}
 
@@ -352,24 +355,24 @@ func (pm *ProposerManager) TxnLocallyComplete(p *Proposer) {
 // from network
 func (pm *ProposerManager) TxnGloballyCompleteReceived(sender common.RMId, txnId *common.TxnId) {
 	if proposer, found := pm.proposers[*txnId]; found {
-		server.DebugLog(pm.logger, "debug", "TGC received. Proposer found.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(pm.logger, "debug", "TGC received. Proposer found.", "TxnId", txnId, "sender", sender)
 		proposer.TxnGloballyCompleteReceived(sender)
 	} else {
-		server.DebugLog(pm.logger, "debug", "TGC received. Ignored.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(pm.logger, "debug", "TGC received. Ignored.", "TxnId", txnId, "sender", sender)
 	}
 }
 
 // from network
 func (pm *ProposerManager) TxnSubmissionAbortReceived(sender common.RMId, txnId *common.TxnId) {
 	if proposer, found := pm.proposers[*txnId]; found {
-		server.DebugLog(pm.logger, "debug", "TSA received. Proposer found.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(pm.logger, "debug", "TSA received. Proposer found.", "TxnId", txnId, "sender", sender)
 		proposer.Abort()
 	} else {
-		server.DebugLog(pm.logger, "debug", "TSA received. Ignored.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(pm.logger, "debug", "TSA received. Ignored.", "TxnId", txnId, "sender", sender)
 	}
 }
 
-func (pm *ProposerManager) createProposerStart(txn *eng.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
+func (pm *ProposerManager) createProposerStart(txn *utils.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
 	if _, found := pm.proposers[*txn.Id]; found {
 		panic(fmt.Sprintf("ProposerManager createProposerStart: Proposer for %v already exists!", txn.Id))
 	}
@@ -415,7 +418,7 @@ func (pm *ProposerManager) FinishProposals(txnId *common.TxnId) {
 	}
 }
 
-func (pm *ProposerManager) Status(sc *server.StatusConsumer) {
+func (pm *ProposerManager) Status(sc *utils.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Live proposers: %v", len(pm.proposers)))
 	for _, prop := range pm.proposers {
 		prop.Status(sc.Fork())
@@ -479,7 +482,7 @@ func AllocForRMId(txn msgs.Txn, rmId common.RMId) *msgs.Allocation {
 	return nil
 }
 
-func MakeAbortBallots(txn *eng.TxnReader, alloc *msgs.Allocation) []*eng.Ballot {
+func MakeAbortBallots(txn *utils.TxnReader, alloc *msgs.Allocation) []*eng.Ballot {
 	actions := txn.Actions(true).Actions()
 	actionIndices := alloc.ActionIndices()
 	ballots := make([]*eng.Ballot, actionIndices.Len())

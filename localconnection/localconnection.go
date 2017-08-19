@@ -1,4 +1,4 @@
-package client
+package localconnection
 
 import (
 	"encoding/binary"
@@ -7,27 +7,30 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"math/rand"
 	"sync"
+	"time"
 )
 
 type LocalConnection struct {
 	*actor.Mailbox
 	*actor.BasicServerOuter
 
-	connectionManager paxos.ConnectionManager
+	connectionManager connectionmanager.ConnectionManager
 	lock              sync.Mutex
 	namespace         []byte
 	nextVarNumber     uint64
 	nextTxnNumber     uint64
-	submitter         *SimpleTxnSubmitter
+	rng               *rand.Rand
+	submitter         *client.SimpleTxnSubmitter
 
 	inner localConnectionInner
 }
@@ -37,7 +40,7 @@ type localConnectionInner struct {
 	*actor.BasicServerInner
 }
 
-func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionManager, logger log.Logger) *LocalConnection {
+func NewLocalConnection(rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, logger log.Logger) *LocalConnection {
 	namespace := make([]byte, common.KeyLen)
 	binary.BigEndian.PutUint32(namespace[12:16], bootCount)
 	binary.BigEndian.PutUint32(namespace[16:20], uint32(rmId))
@@ -49,8 +52,9 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm paxos.ConnectionM
 		namespace:         namespace,
 		nextTxnNumber:     0,
 		nextVarNumber:     0,
+		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	lc.submitter = NewSimpleTxnSubmitter(rmId, bootCount, cm, lc, logger)
+	lc.submitter = client.NewSimpleTxnSubmitter(rmId, bootCount, cm, lc, lc.rng, logger)
 
 	lci := &lc.inner
 	lci.LocalConnection = lc
@@ -97,7 +101,7 @@ func (lc *LocalConnection) NextVarUUId() *common.VarUUId {
 
 type localConnectionMsgStatus struct {
 	*LocalConnection
-	sc *server.StatusConsumer
+	sc *utils.StatusConsumer
 }
 
 func (msg localConnectionMsgStatus) Exec() (bool, error) {
@@ -107,7 +111,7 @@ func (msg localConnectionMsgStatus) Exec() (bool, error) {
 	return false, nil
 }
 
-func (lc *LocalConnection) Status(sc *server.StatusConsumer) {
+func (lc *LocalConnection) Status(sc *utils.StatusConsumer) {
 	lc.EnqueueMsg(localConnectionMsgStatus{LocalConnection: lc, sc: sc})
 }
 
@@ -119,7 +123,7 @@ type localConnectionMsgOutcomeReceived struct {
 }
 
 func (msg localConnectionMsgOutcomeReceived) Exec() (bool, error) {
-	server.DebugLog(msg.inner.Logger, "debug", "Received submission outcome.", "TxnId", msg.txn.Id)
+	utils.DebugLog(msg.inner.Logger, "debug", "Received submission outcome.", "TxnId", msg.txn.Id)
 	return false, msg.submitter.SubmissionOutcomeReceived(msg.sender, msg.txn, msg.outcome)
 }
 
@@ -177,7 +181,7 @@ func (msg *localConnectionMsgRunClientTxn) Exec() (bool, error) {
 	txn := msg.txn
 	txnId := msg.inner.nextTxnId()
 	txn.SetId(txnId[:])
-	server.DebugLog(msg.inner.Logger, "debug", "Starting client txn.", "TxnId", txnId)
+	utils.DebugLog(msg.inner.Logger, "debug", "Starting client txn.", "TxnId", txnId)
 	if varPosMap := msg.varPosMap; varPosMap != nil {
 		msg.submitter.EnsurePositions(varPosMap)
 	}
@@ -206,7 +210,7 @@ type localConnectionMsgRunTxn struct {
 	txn       *msgs.Txn
 	txnId     *common.TxnId
 	activeRMs []common.RMId
-	backoff   *server.BinaryBackoffEngine
+	backoff   *utils.BinaryBackoffEngine
 	txnReader *utils.TxnReader
 	outcome   *msgs.Outcome
 	err       error
@@ -227,13 +231,13 @@ func (msg *localConnectionMsgRunTxn) Exec() (bool, error) {
 		txnId = msg.inner.nextTxnId()
 		txn.SetId(txnId[:])
 	}
-	server.DebugLog(msg.inner.Logger, "debug", "Starting txn.", "TxnId", txnId)
+	utils.DebugLog(msg.inner.Logger, "debug", "Starting txn.", "TxnId", txnId)
 	msg.submitter.SubmitTransaction(txn, txnId, msg.activeRMs, msg.setOutcomeError, msg.backoff)
 	return false, nil
 }
 
 // txn must be root in its segment
-func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *server.BinaryBackoffEngine, activeRMs ...common.RMId) (*utils.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *utils.BinaryBackoffEngine, activeRMs ...common.RMId) (*utils.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunTxn{
 		LocalConnection: lc,
 		txn:             txn,
@@ -307,6 +311,6 @@ func (lc *localConnectionInner) HandleShutdown(err error) bool {
 func (lc *localConnectionInner) nextTxnId() *common.TxnId {
 	txnId := common.MakeTxnId(lc.namespace)
 	binary.BigEndian.PutUint64(txnId[0:8], lc.nextTxnNumber)
-	lc.nextTxnNumber += 1 + uint64(lc.submitter.rng.Intn(8))
+	lc.nextTxnNumber += 1 + uint64(lc.rng.Intn(8))
 	return txnId
 }
