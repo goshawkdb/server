@@ -170,13 +170,10 @@ func (tch *TLSCapnpHandshaker) serverError(err error) error {
 
 type TLSCapnpServer struct {
 	*TLSCapnpHandshaker
-	logger            log.Logger
-	conn              *network.Connection
-	remoteHost        string
-	remoteRMId        common.RMId
-	remoteClusterUUId uint64
-	remoteBootCount   uint32
-	reader            *common.SocketReader
+	remote *sconn.ServerConnection
+	logger log.Logger
+	conn   *network.Connection
+	reader *common.SocketReader
 }
 
 func (tcs *TLSCapnpServer) finishHandshake() error {
@@ -244,20 +241,22 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 
 	if seg, err := tcs.ReadOne(); err == nil {
 		hello := msgs.ReadRootHelloServerFromServer(seg)
-		tcs.remoteHost = hello.LocalHost()
-		tcs.remoteRMId = common.RMId(hello.RmId())
+		tcs.remote = &sconn.ServerConnection{
+			Host: hello.LocalHost(),
+			RMId: common.RMId(hello.RmId()),
+		}
 		if tcs.verifyTopology(&hello) {
-			if _, found := tcs.topology.RMsRemoved[tcs.remoteRMId]; found {
+			if _, found := tcs.topology.RMsRemoved[tcs.remote.RMId]; found {
 				tcs.restartable = false
 				return tcs.serverError(
-					fmt.Errorf("%v has been removed from topology and may not rejoin.", tcs.remoteRMId))
+					fmt.Errorf("%v has been removed from topology and may not rejoin.", tcs.remote.RMId))
 			}
 
-			tcs.remoteClusterUUId = hello.ClusterUUId()
-			tcs.remoteBootCount = hello.BootCount()
+			tcs.remote.ClusterUUId = hello.ClusterUUId()
+			tcs.remote.BootCount = hello.BootCount()
 			return nil
 		} else {
-			return fmt.Errorf("Unequal remote topology (%v, %v)", tcs.remoteHost, tcs.remoteRMId)
+			return fmt.Errorf("Unequal remote topology (%v, %v)", tcs.remote.Host, tcs.remote.RMId)
 		}
 	} else {
 		return err
@@ -287,7 +286,14 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 
 func (tcs *TLSCapnpServer) Run(conn *network.Connection) error {
 	tcs.conn = conn
-	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remoteHost, "remoteRMId", tcs.remoteRMId)
+	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remote.Host, "remoteRMId", tcs.remote.RMId)
+	tcs.remote.Send = tcs.Send
+	flushSeg := capn.NewBuffer(nil)
+	flushMsg := msgs.NewRootMessage(flushSeg)
+	flushMsg.SetFlushed()
+	flushBytes := common.SegToBytes(flushSeg)
+	tcs.remote.Flushed = func() { tcs.Send(flushBytes) }
+	tcs.remote.ShutdownSync = tcs.conn.ShutdownSync
 
 	seg := capn.NewBuffer(nil)
 	message := msgs.NewRootMessage(seg)
@@ -295,24 +301,20 @@ func (tcs *TLSCapnpServer) Run(conn *network.Connection) error {
 	tcs.CreateBeater(conn, common.SegToBytes(seg))
 	tcs.createReader()
 
-	flushSeg := capn.NewBuffer(nil)
-	flushMsg := msgs.NewRootMessage(flushSeg)
-	flushMsg.SetFlushed()
-	flushBytes := common.SegToBytes(flushSeg)
-	tcs.connectionManager.ServerEstablished(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteClusterUUId, func() { tcs.Send(flushBytes) })
+	tcs.connectionManager.ServerEstablished(tcs.remote)
 
 	return nil
 }
 
-func (tcs *TLSCapnpServer) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+func (tcs *TLSCapnpServer) TopologyChanged(tc *network.ConnectionMsgTopologyChanged) error {
 	defer tc.MustClose()
 
-	topology := tc.topology
+	topology := tc.Topology
 	tcs.topology = topology
 
 	utils.DebugLog(tcs.logger, "debug", "TopologyChanged.", "topology", topology)
 	if topology != nil && tcs.restartable {
-		if _, found := topology.RMsRemoved[tcs.remoteRMId]; found {
+		if _, found := topology.RMsRemoved[tcs.remote.RMId]; found {
 			tcs.restartable = false
 		}
 	}
@@ -326,14 +328,14 @@ func (tcs *TLSCapnpServer) Send(msg []byte) {
 
 func (tcs *TLSCapnpServer) Restart() bool {
 	tcs.internalShutdown()
-	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, tcs.restartable)
+	tcs.connectionManager.ServerLost(tcs.remote, tcs.restartable)
 
 	return tcs.TLSCapnpHandshaker.Restart()
 }
 
 func (tcs *TLSCapnpServer) InternalShutdown() {
 	tcs.internalShutdown()
-	tcs.connectionManager.ServerLost(tcs, tcs.remoteHost, tcs.remoteRMId, false)
+	tcs.connectionManager.ServerLost(tcs.remote, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
 	tcs.conn.ShutdownCompleted()
 }
@@ -359,18 +361,18 @@ func (tcs *TLSCapnpServer) ReadAndHandleOneMsg() error {
 	case msgs.MESSAGE_HEARTBEAT:
 		return nil // do nothing
 	case msgs.MESSAGE_CONNECTIONERROR:
-		return fmt.Errorf("Error received from %v: \"%s\"", tcs.remoteRMId, msg.ConnectionError())
+		return fmt.Errorf("Error received from %v: \"%s\"", tcs.remote.RMId, msg.ConnectionError())
 	default:
-		tcs.router.Dispatch(tcs.remoteRMId, which, msg)
+		tcs.router.Dispatch(tcs.remote.RMId, which, msg)
 		return nil
 	}
 }
 
 func (tcs *TLSCapnpServer) String() string {
 	if tcs.connectionNumber == 0 {
-		return fmt.Sprintf("TLSCapnpServer for %v(%d) to %s", tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteHost)
+		return fmt.Sprintf("TLSCapnpServer for %v(%d) to %s", tcs.remote.RMId, tcs.remote.BootCount, tcs.remote.Host)
 	} else {
-		return fmt.Sprintf("TLSCapnpServer for %v(%d) from %s", tcs.remoteRMId, tcs.remoteBootCount, tcs.remoteHost)
+		return fmt.Sprintf("TLSCapnpServer for %v(%d) from %s", tcs.remote.RMId, tcs.remote.BootCount, tcs.remote.Host)
 	}
 }
 
@@ -575,7 +577,7 @@ func (tcc *TLSCapnpClient) ConnectionLost(rmId common.RMId, servers map[common.R
 	tcc.EnqueueMsg(msg)
 }
 
-func (tcc *TLSCapnpClient) ConnectionEstablished(rmId common.RMId, c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
+func (tcc *TLSCapnpClient) ConnectionEstablished(c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &serverConnectionsChanged{submitter: tcc.submitter, servers: servers}
 	msg.InitMsg(tcc)
 	if tcc.EnqueueMsg(msg) {

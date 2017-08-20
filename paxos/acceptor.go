@@ -195,8 +195,8 @@ func (arb *acceptorReceiveBallots) ConnectionLost(rmId common.RMId, conns map[co
 		arb.enqueueCreateTxnSender()
 	}
 }
-func (arb *acceptorReceiveBallots) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
-	if rmId == arb.txnSubmitter && conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
+func (arb *acceptorReceiveBallots) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+	if conn.RMId == arb.txnSubmitter && conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
 		arb.enqueueCreateTxnSender()
 	}
 	done()
@@ -523,15 +523,15 @@ func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerCon
 
 func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
 
-func (s *twoBTxnVotesSender) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+func (s *twoBTxnVotesSender) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
 	for _, recipient := range s.recipients {
-		if recipient == rmId {
+		if recipient == conn.RMId {
 			conn.Send(s.msg)
 			break
 		}
 	}
-	if s.submitter == rmId {
+	if s.submitter == conn.RMId {
 		conn.Send(s.submitterMsg)
 	}
 }

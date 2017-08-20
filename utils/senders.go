@@ -45,10 +45,10 @@ func (oss *OneShotSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnec
 
 func (oss *OneShotSender) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
 
-func (oss *OneShotSender) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+func (oss *OneShotSender) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
-	if _, found := oss.remaining[rmId]; found {
-		delete(oss.remaining, rmId)
+	if _, found := oss.remaining[conn.RMId]; found {
+		delete(oss.remaining, conn.RMId)
 		conn.Send(oss.msg)
 		if len(oss.remaining) == 0 {
 			DebugLog(oss.logger, "debug", "Removing one shot sender.")
@@ -79,10 +79,10 @@ func (rs *RepeatingSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerConne
 
 func (rs *RepeatingSender) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
 
-func (rs *RepeatingSender) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+func (rs *RepeatingSender) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
 	for _, recipient := range rs.recipients {
-		if recipient == rmId {
+		if recipient == conn.RMId {
 			conn.Send(rs.msg)
 			return
 		}
@@ -107,7 +107,7 @@ func (ras *RepeatingAllSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerC
 
 func (ras *RepeatingAllSender) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
 
-func (ras *RepeatingAllSender) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+func (ras *RepeatingAllSender) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	conn.Send(ras.msg)
 	done()
 }

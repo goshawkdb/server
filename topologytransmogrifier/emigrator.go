@@ -64,9 +64,9 @@ func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]*scon
 	delete(e.activeBatches, rmId)
 }
 
-func (e *emigrator) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+func (e *emigrator) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
-	if rmId == e.self {
+	if conn.RMId == e.self {
 		return
 	}
 	e.conns = conns
@@ -258,7 +258,7 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection
 	}
 }
 func (it *dbIterator) ConnectionLost(common.RMId, map[common.RMId]*sconn.ServerConnection) {}
-func (it *dbIterator) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
+func (it *dbIterator) ConnectionEstablished(conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	done()
 }
 

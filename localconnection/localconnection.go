@@ -276,7 +276,7 @@ func (lc *LocalConnection) ConnectionLost(rmId common.RMId, servers map[common.R
 	lc.EnqueueMsg(msg)
 }
 
-func (lc *LocalConnection) ConnectionEstablished(rmId common.RMId, c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
+func (lc *LocalConnection) ConnectionEstablished(c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &localConnectionMsgServerConnectionsChanged{LocalConnection: lc, servers: servers}
 	msg.InitMsg(lc)
 	if lc.EnqueueMsg(msg) {

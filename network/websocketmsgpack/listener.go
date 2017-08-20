@@ -1,15 +1,18 @@
 package websocketmsgpack
 
 import (
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"github.com/go-kit/kit/log"
+	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/network"
 	ghttp "goshawkdb.io/server/network/http"
-	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/types/topology"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -20,6 +23,8 @@ type WebsocketListener struct {
 	*actor.BasicServerOuter
 
 	parentLogger      log.Logger
+	self              common.RMId
+	bootcount         uint32
 	connectionManager connectionmanager.ConnectionManager
 	mux               *ghttp.HttpListenerWithMux
 	topology          *configuration.Topology
@@ -33,9 +38,11 @@ type websocketListenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewWebsocketListener(mux *ghttp.HttpListenerWithMux, cm connectionmanager.ConnectionManager, logger log.Logger) *WebsocketListener {
+func NewWebsocketListener(mux *ghttp.HttpListenerWithMux, rmId common.RMId, bootcount uint32, cm connectionmanager.ConnectionManager, logger log.Logger) *WebsocketListener {
 	l := &WebsocketListener{
 		parentLogger:      logger,
+		self:              rmId,
+		bootcount:         bootcount,
 		connectionManager: cm,
 		mux:               mux,
 	}
@@ -98,14 +105,14 @@ func (l *websocketListenerInner) Init(self *actor.Actor) (bool, error) {
 	l.Mailbox = self.Mailbox
 	l.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
 
-	topology := l.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, l)
+	topology := l.connectionManager.AddTopologySubscriber(topology.ConnectionSubscriber, l)
 	l.putTopology(topology)
 	l.configureMux()
 	return false, nil
 }
 
 func (l *websocketListenerInner) HandleShutdown(err error) bool {
-	l.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, l)
+	l.connectionManager.RemoveTopologySubscriberAsync(topology.ConnectionSubscriber, l)
 	return l.BasicServerInner.HandleShutdown(err)
 }
 
@@ -127,11 +134,34 @@ func (l *websocketListenerInner) configureMux() {
 		if authenticated, hashsum, roots := l.getTopology().VerifyPeerCerts(peerCerts); authenticated {
 			connNumber := 2*atomic.AddUint32(&connCount, 1) + 1
 			l.Logger.Log("type", "client", "authentication", "success", "fingerprint", hex.EncodeToString(hashsum[:]), "connNumber", connNumber)
-			wsHandler(l.connectionManager, connNumber, w, req, peerCerts, roots, l.parentLogger)
+			l.wsHandler(connNumber, w, req, peerCerts, roots)
 		} else {
 			l.Logger.Log("type", "client", "authentication", "failure")
 			w.WriteHeader(http.StatusForbidden)
 		}
 	})
 	l.mux.Done()
+}
+
+func (l *websocketListenerInner) wsHandler(connNumber uint32, w http.ResponseWriter, r *http.Request, peerCerts []*x509.Certificate, roots map[string]*common.Capability) {
+	logger := log.With(l.parentLogger, "subsystem", "connection", "dir", "incoming", "protocol", "websocket", "type", "client", "connNumber", connNumber)
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err == nil {
+		logger.Log("msg", "WSS upgrade success.", "remoteHost", c.RemoteAddr())
+		yesman := &wssMsgPackClient{
+			logger:            logger,
+			remoteHost:        fmt.Sprintf("%v", c.RemoteAddr()),
+			connectionNumber:  connNumber,
+			self:              l.self,
+			bootcount:         l.bootcount,
+			socket:            c,
+			peerCerts:         peerCerts,
+			roots:             roots,
+			connectionManager: l.connectionManager,
+		}
+		network.NewConnection(yesman, l.connectionManager, logger)
+
+	} else {
+		logger.Log("msg", "WSS upgrade failure.", "remoteHost", r.RemoteAddr, "error", err)
+	}
 }

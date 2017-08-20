@@ -18,8 +18,8 @@ type ConnectionManager interface {
 	ClientLost(connNumber uint32, conn cconn.ClientConnection)
 	GetClient(bootNumber, connNumber uint32) cconn.ClientConnection
 
-	ServerEstablished(server *sconn.ServerConnection, host string, rmId common.RMId, bootCount uint32, clusterUUId uint64, flushCallback func())
-	ServerLost(server *sconn.ServerConnection, host string, rmId common.RMId, restarting bool)
+	ServerEstablished(server *sconn.ServerConnection)
+	ServerLost(server *sconn.ServerConnection, restarting bool)
 
 	LocalHost() string
 

@@ -12,10 +12,10 @@ import (
 )
 
 // we are dialing out to someone else
-func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm connectionmanager.ConnectionManager, logger log.Logger) *network.Connection {
+func NewConnectionTCPTLSCapnpDialer(remoteHost string, self common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, logger log.Logger) *network.Connection {
 	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
 	phone := common.NewTCPDialer(nil, remoteHost, logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, 0, cm)
+	yesman := NewTLSCapnpHandshaker(phone, logger, 0, self, bootcount, router, cm)
 	return network.NewConnection(yesman, cm, logger)
 }
 

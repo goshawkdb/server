@@ -13,14 +13,13 @@ import (
 	"goshawkdb.io/common/actor"
 	capcmsgs "goshawkdb.io/common/capnp"
 	cmsgs "goshawkdb.io/common/msgpack"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/network"
-	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types/connectionmanager"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 	"net/http"
 	"time"
 )
@@ -30,31 +29,13 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-func wsHandler(cm connectionmanager.ConnectionManager, connNumber uint32, w http.ResponseWriter, r *http.Request, peerCerts []*x509.Certificate, roots map[string]*common.Capability, logger log.Logger) {
-	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "websocket", "type", "client", "connNumber", connNumber)
-	c, err := upgrader.Upgrade(w, r, nil)
-	if err == nil {
-		logger.Log("msg", "WSS upgrade success.", "remoteHost", c.RemoteAddr())
-		yesman := &wssMsgPackClient{
-			logger:            logger,
-			remoteHost:        fmt.Sprintf("%v", c.RemoteAddr()),
-			connectionNumber:  connNumber,
-			socket:            c,
-			peerCerts:         peerCerts,
-			roots:             roots,
-			connectionManager: cm,
-		}
-		network.NewConnection(yesman, cm, logger)
-
-	} else {
-		logger.Log("msg", "WSS upgrade failure.", "remoteHost", r.RemoteAddr, "error", err)
-	}
-}
-
 type wssMsgPackClient struct {
+	*network.Connection
 	logger            log.Logger
 	remoteHost        string
 	connectionNumber  uint32
+	self              common.RMId
+	bootcount         uint32
 	socket            *websocket.Conn
 	peerCerts         []*x509.Certificate
 	roots             map[string]*common.Capability
@@ -94,7 +75,7 @@ func (wmpc *wssMsgPackClient) Dial() error {
 	return nil
 }
 
-func (wmpc *wssMsgPackClient) PerformHandshake(topology *configuration.Topology) (Protocol, error) {
+func (wmpc *wssMsgPackClient) PerformHandshake(topology *configuration.Topology) (network.Protocol, error) {
 	wmpc.topology = topology
 
 	hello := &cmsgs.Hello{
@@ -140,8 +121,8 @@ func (wmpc *wssMsgPackClient) verifyHello(hello *cmsgs.Hello) bool {
 func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], wmpc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], wmpc.connectionManager.BootCount)
-	binary.BigEndian.PutUint32(namespace[8:], uint32(wmpc.connectionManager.RMId))
+	binary.BigEndian.PutUint32(namespace[4:8], wmpc.bootcount)
+	binary.BigEndian.PutUint32(namespace[8:], uint32(wmpc.self))
 	wmpc.namespace = namespace
 
 	roots := make([]*cmsgs.Root, 0, len(wmpc.roots))
@@ -171,7 +152,7 @@ func (wmpc *wssMsgPackClient) Restart() bool {
 	return false // client connections are never restarted
 }
 
-func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
+func (wmpc *wssMsgPackClient) Run(conn *network.Connection) error {
 	wmpc.Connection = conn
 	servers, metrics := wmpc.connectionManager.ClientEstablished(wmpc.connectionNumber, wmpc)
 	if servers == nil {
@@ -183,40 +164,39 @@ func (wmpc *wssMsgPackClient) Run(conn *Connection) error {
 		wmpc.createBeater()
 		wmpc.createReader()
 
-		cm := wmpc.connectionManager
-		wmpc.submitter = client.NewClientTxnSubmitter(cm.RMId, cm.BootCount, wmpc.rootsVar, wmpc.namespace,
-			cm, wmpc.Connection, wmpc.logger, metrics)
+		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.self, wmpc.bootcount, wmpc.rootsVar, wmpc.namespace,
+			wmpc.connectionManager, wmpc.Connection, wmpc.logger, metrics)
 		if err := wmpc.submitter.TopologyChanged(wmpc.topology); err != nil {
 			return err
 		}
 		if err := wmpc.submitter.ServerConnectionsChanged(servers); err != nil {
 			return err
 		}
-		cm.AddServerConnectionSubscriber(wmpc)
+		wmpc.connectionManager.AddServerConnectionSubscriber(wmpc)
 		return nil
 	}
 }
 
-func (wmpc *wssMsgPackClient) TopologyChanged(tc *connectionMsgTopologyChanged) error {
+func (wmpc *wssMsgPackClient) TopologyChanged(tc *network.ConnectionMsgTopologyChanged) error {
 	defer tc.Close()
-	topology := tc.topology
+	topology := tc.Topology
 	wmpc.topology = topology
 
-	server.DebugLog(wmpc.logger, "debug", "TopologyChanged", "topology", topology)
+	utils.DebugLog(wmpc.logger, "debug", "TopologyChanged", "topology", topology)
 
 	if topology != nil {
 		if authenticated, _, roots := wmpc.topology.VerifyPeerCerts(wmpc.peerCerts); !authenticated {
-			server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
+			utils.DebugLog(wmpc.logger, "debug", "TopologyChanged. Client Unauthed.", "topology", topology)
 			return errors.New("WSS Client connection closed: No client certificate known")
 		} else if len(roots) == len(wmpc.roots) {
 			for name, capsOld := range wmpc.roots {
 				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
-					server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
+					utils.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
 					return errors.New("WSS Client connection closed: roots have changed")
 				}
 			}
 		} else {
-			server.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
+			utils.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
 			return errors.New("WSS Client connection closed: roots have changed")
 		}
 	}
@@ -234,7 +214,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	cont := func() {
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
 		wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
-		wmpc.shutdownCompleted()
+		wmpc.ShutdownCompleted()
 	}
 	if wmpc.submitter == nil {
 		cont()
@@ -251,25 +231,36 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	}
 }
 
-func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *eng.TxnReader, outcome *msgs.Outcome) {
+func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) {
 	wmpc.EnqueueFuncAsync(func() (bool, error) {
 		return false, wmpc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 	})
 }
 
-func (wmpc *wssMsgPackClient) ConnectedRMs(servers map[common.RMId]paxos.Connection) {
+type serverConnectionsChanged struct {
+	actor.MsgSyncQuery
+	submitter *client.ClientTxnSubmitter
+	servers   map[common.RMId]*sconn.ServerConnection
+}
+
+func (msg *serverConnectionsChanged) Exec() (bool, error) {
+	defer msg.MustClose()
+	return false, msg.submitter.ServerConnectionsChanged(msg.servers)
+}
+
+func (wmpc *wssMsgPackClient) ConnectedRMs(servers map[common.RMId]*sconn.ServerConnection) {
 	msg := &serverConnectionsChanged{submitter: wmpc.submitter, servers: servers}
 	msg.InitMsg(wmpc)
 	wmpc.EnqueueMsg(msg)
 }
 
-func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]paxos.Connection) {
+func (wmpc *wssMsgPackClient) ConnectionLost(rmId common.RMId, servers map[common.RMId]*sconn.ServerConnection) {
 	msg := &serverConnectionsChanged{submitter: wmpc.submitter, servers: servers}
 	msg.InitMsg(wmpc)
 	wmpc.EnqueueMsg(msg)
 }
 
-func (wmpc *wssMsgPackClient) ConnectionEstablished(rmId common.RMId, c paxos.Connection, servers map[common.RMId]paxos.Connection, done func()) {
+func (wmpc *wssMsgPackClient) ConnectionEstablished(c *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &serverConnectionsChanged{submitter: wmpc.submitter, servers: servers}
 	msg.InitMsg(wmpc)
 	if wmpc.EnqueueMsg(msg) {

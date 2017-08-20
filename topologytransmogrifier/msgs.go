@@ -58,7 +58,7 @@ func (tt *TopologyTransmogrifier) ConnectionLost(rmId common.RMId, conns map[com
 	tt.EnqueueMsg(msg)
 }
 
-func (tt *TopologyTransmogrifier) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+func (tt *TopologyTransmogrifier) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	msg := &topologyTransmogrifierMsgSetActiveConnections{TopologyTransmogrifier: tt, servers: conns}
 	msg.InitMsg(tt)
 	if tt.EnqueueMsg(msg) {

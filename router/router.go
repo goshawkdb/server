@@ -82,9 +82,16 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 	case msgs.MESSAGE_MIGRATIONCOMPLETE:
 		migrationComplete := msg.MigrationComplete()
 		r.transmogrifier.ImmigrationCompleteReceived(sender, migrationComplete)
-	case msgs.MESSAGE_FLUSHED:
+	case msgs.MESSAGE_FLUSHED: // coming from a remote - i.e. we've been flushed through the remote.
 		r.connectionManager.ServerConnectionFlushed(sender)
 	default:
 		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
 	}
+}
+
+func (r Router) Status(sc *utils.StatusConsumer) {
+	r.VarDispatcher.Status(sc.Fork())
+	r.ProposerDispatcher.Status(sc.Fork())
+	r.AcceptorDispatcher.Status(sc.Fork())
+	sc.Join()
 }

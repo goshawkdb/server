@@ -64,7 +64,6 @@ func (proxy *serverConnectionPublisherProxy) ConnectionLost(lost common.RMId, se
 
 type scppConnectionEstablished struct {
 	proxy   *serverConnectionPublisherProxy
-	gained  common.RMId
 	conn    *sconn.ServerConnection
 	servers map[common.RMId]*sconn.ServerConnection
 	wg      *common.ChannelWaitGroup
@@ -74,17 +73,16 @@ func (msg *scppConnectionEstablished) Exec() (bool, error) {
 	msg.proxy.servers = msg.servers
 	for sub := range msg.proxy.subs {
 		msg.wg.Add(1)
-		sub.ConnectionEstablished(msg.gained, msg.conn, msg.servers, msg.wg.Done)
+		sub.ConnectionEstablished(msg.conn, msg.servers, msg.wg.Done)
 	}
 	DebugLog(msg.proxy.logger, "debug", "ServerConnEstablished Proxy expecting callbacks.")
 	msg.wg.Done() // see comment below
 	return false, nil
 }
 
-func (proxy *serverConnectionPublisherProxy) ConnectionEstablished(gained common.RMId, conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, onDone func()) {
+func (proxy *serverConnectionPublisherProxy) ConnectionEstablished(conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, onDone func()) {
 	msg := &scppConnectionEstablished{
 		proxy:   proxy,
-		gained:  gained,
 		conn:    conn,
 		servers: servers,
 		wg:      common.NewChannelWaitGroup(),

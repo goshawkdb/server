@@ -303,8 +303,8 @@ func (pab *proposerAwaitBallots) ConnectionLost(rmId common.RMId, conns map[comm
 		pab.maybeAbortRetry()
 	}
 }
-func (pab *proposerAwaitBallots) ConnectionEstablished(rmId common.RMId, conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
-	if rmId == pab.submitter && conn.BootCount != pab.submitterBootCount {
+func (pab *proposerAwaitBallots) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+	if conn.RMId == pab.submitter && conn.BootCount != pab.submitterBootCount {
 		pab.maybeAbortRetry()
 	}
 	done()
