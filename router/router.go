@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
@@ -15,20 +16,17 @@ import (
 )
 
 type Router struct {
-	RMId common.RMId
+	self common.RMId
 	*paxos.Dispatchers
-	connectionManager connectionmanager.ConnectionManager
-	transmogrifier    topology.TopologyTransmogrifier
+	ConnectionManager connectionmanager.ConnectionManager
+	Transmogrifier    topology.TopologyTransmogrifier
 	logger            log.Logger
 }
 
-func NewRouter(rmId common.RMId, dispatchers *paxos.Dispatchers, connectionManager connectionmanager.ConnectionManager, transmogrifier topology.TopologyTransmogrifier, logger log.Logger) *Router {
+func NewRouter(rmId common.RMId, logger log.Logger) *Router {
 	return &Router{
-		RMId:              rmId,
-		Dispatchers:       dispatchers,
-		connectionManager: connectionManager,
-		transmogrifier:    transmogrifier,
-		logger:            logger,
+		self:   rmId,
+		logger: logger,
 	}
 }
 
@@ -42,9 +40,9 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 		txnId := txn.Id
 		connNumber := txnId.ConnectionCount()
 		bootNumber := txnId.BootCount()
-		if conn := r.connectionManager.GetClient(bootNumber, connNumber); conn == nil {
+		if conn := r.ConnectionManager.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.connectionManager, sender)
+			senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.ConnectionManager, sender)
 		} else {
 			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
 		}
@@ -73,19 +71,19 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 		tgc := msg.TxnGloballyComplete()
 		r.ProposerDispatcher.TxnGloballyCompleteReceived(sender, tgc)
 	case msgs.MESSAGE_TOPOLOGYCHANGEREQUEST:
-		if sender != r.RMId {
+		if sender != r.self {
 			configCap := msg.TopologyChangeRequest()
 			config := configuration.ConfigurationFromCap(configCap)
-			r.transmogrifier.RequestConfigurationChange(config)
+			r.Transmogrifier.RequestConfigurationChange(config)
 		}
 	case msgs.MESSAGE_MIGRATION:
 		migration := msg.Migration()
-		r.transmogrifier.ImmigrationReceived(sender, migration)
+		r.Transmogrifier.ImmigrationReceived(sender, migration)
 	case msgs.MESSAGE_MIGRATIONCOMPLETE:
 		migrationComplete := msg.MigrationComplete()
-		r.transmogrifier.ImmigrationCompleteReceived(sender, migrationComplete)
+		r.Transmogrifier.ImmigrationCompleteReceived(sender, migrationComplete)
 	case msgs.MESSAGE_FLUSHED: // coming from a remote - i.e. we've been flushed through the remote.
-		r.connectionManager.ServerConnectionFlushed(sender)
+		r.ConnectionManager.ServerConnectionFlushed(sender)
 	default:
 		panic(fmt.Sprintf("Unexpected message received from %v (%v)", sender, msgType))
 	}
@@ -96,4 +94,13 @@ func (r Router) Status(sc *status.StatusConsumer) {
 	r.ProposerDispatcher.Status(sc.Fork())
 	r.AcceptorDispatcher.Status(sc.Fork())
 	sc.Join()
+}
+
+func (r Router) Send(b []byte) {
+	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
+	if err != nil {
+		panic(fmt.Sprintf("Error in capnproto decode when sending to self! %v", err))
+	}
+	msg := msgs.ReadRootMessage(seg)
+	r.Dispatch(r.self, msg.Which(), msg)
 }

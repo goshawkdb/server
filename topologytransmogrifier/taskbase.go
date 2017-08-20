@@ -1,4 +1,4 @@
-package topologyTransmogrifier
+package topologytransmogrifier
 
 import (
 	"bytes"

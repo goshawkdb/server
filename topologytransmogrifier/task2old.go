@@ -1,4 +1,4 @@
-package topologyTransmogrifier
+package topologytransmogrifier
 
 import (
 	"errors"
@@ -253,7 +253,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// now figure out which roots have survived and how many new ones
 	// we need to create.
-	oldNamesList := activeCloned.Roots
+	oldNamesList := active.Roots
 	oldNamesCount := len(oldNamesList)
 	oldNames := make(map[string]uint32, oldNamesCount)
 	for idx, name := range oldNamesList {
@@ -270,6 +270,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 			rootsRequired++
 		}
 	}
+	fmt.Println(active.Roots, activeCloned.RootVarUUIds)
 	activeCloned.RootVarUUIds = activeCloned.RootVarUUIds[:oldNamesCount]
 
 	activeCloned.NextConfiguration = &configuration.NextConfiguration{

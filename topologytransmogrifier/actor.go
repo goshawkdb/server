@@ -1,4 +1,4 @@
-package topologyTransmogrifier
+package topologytransmogrifier
 
 import (
 	"fmt"
@@ -48,12 +48,13 @@ type topologyTransmogrifierInner struct {
 	previousTask Task
 }
 
-func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, cm connectionmanager.ConnectionManager, lc *localconnection.LocalConnection, listenPort uint16, ss actor.ShutdownableActor, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
+func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, router *router.Router, cm connectionmanager.ConnectionManager, lc *localconnection.LocalConnection, listenPort uint16, ss actor.ShutdownableActor, config *configuration.Configuration, logger log.Logger) (*TopologyTransmogrifier, <-chan struct{}) {
 
 	localEstablished := make(chan struct{})
 	tt := &TopologyTransmogrifier{
 		self:              self,
 		db:                db,
+		router:            router,
 		connectionManager: cm,
 		localConnection:   lc,
 		migrations:        make(map[uint32]map[common.RMId]*int32),
@@ -62,6 +63,7 @@ func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, cm connection
 		shutdownSignaller: ss,
 		localEstablished:  localEstablished,
 	}
+	router.Transmogrifier = tt
 	tt.currentTask = tt.newTransmogrificationTask(&configuration.NextConfiguration{Configuration: config})
 	tti := &tt.inner
 	tti.TopologyTransmogrifier = tt

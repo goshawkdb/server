@@ -1,4 +1,4 @@
-package network
+package connectionmanager
 
 import (
 	"fmt"
@@ -89,22 +89,17 @@ func NewConnectionManager(rmId common.RMId, bootcount uint32, certificate []byte
 		panic(err) // "impossible"
 	}
 
+	cm.ServerEstablished(&sconn.ServerConnection{
+		RMId:      rmId,
+		BootCount: bootcount,
+		Sender:    router,
+	})
+
 	// this remaining initialisation work must be done in this thread
 	// because we need connectionManager actually working for this
 	// (e.g. localConnection creation requires sync calls to
 	// connectionManager!).
 	/*
-		cd := &connectionManagerMsgServerEstablished{
-			send:        cmi.send,
-			host:        cm.localHost,
-			rmId:        cm.self,
-			bootcount:   cm.bootcount,
-			established: true,
-			cm:          cm,
-		}
-		cm.rmToServer[cd.rmId] = cd
-		cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
-
 		cm.localConnection = client.NewLocalConnection(cm.self, cm.bootcount, cm, cm.parentLogger)
 		cm.Dispatchers = paxos.NewDispatchers(cm, cm.self, cm.bootcount, procs, db, cm.localConnection, cm.parentLogger)
 		transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
@@ -112,7 +107,7 @@ func NewConnectionManager(rmId common.RMId, bootcount uint32, certificate []byte
 		<-localEstablished
 		return cm, transmogrifier, cm.localConnection
 	*/
-	return nil
+	return cm
 }
 
 type connectionManagerMsgServerEstablished struct {
@@ -135,7 +130,7 @@ func (msg *connectionManagerMsgServerEstablished) Exec() (terminate bool, error 
 		cm.serverConnsGauge.Inc()
 	}
 
-	if msg.RMId == cm.self {
+	if msg.RMId == cm.self && len(cm.rmToServer) > 0 {
 		cm.inner.Logger.Log("msg", "RMId collision with ourself detected.", "RMId", msg.RMId, "remoteHost", msg.Host)
 		go msg.ShutdownSync()
 		return
@@ -651,18 +646,6 @@ func (cm *ConnectionManager) cloneRMToServer() map[common.RMId]*sconn.ServerConn
 	}
 	return rmToServerCopy
 }
-
-/* TODO - suspect this moves to router.
-// paxos.Connection interface to allow sending to ourself.
-func (cm *connectionManagerInner) send(b []byte) {
-	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
-	if err != nil {
-		panic(fmt.Sprintf("Error in capnproto decode when sending to self! %v", err))
-	}
-	msg := msgs.ReadRootMessage(seg)
-	cm.DispatchMessage(cm.self, msg.Which(), msg)
-}
-*/
 
 func (cm *connectionManagerInner) Init(self *actor.Actor) (bool, error) {
 	terminate, err := cm.BasicServerInner.Init(self)

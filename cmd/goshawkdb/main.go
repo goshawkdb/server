@@ -13,9 +13,16 @@ import (
 	"goshawkdb.io/common/certs"
 	goshawk "goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/connectionmanager"
 	"goshawkdb.io/server/db"
-	"goshawkdb.io/server/network"
-	"goshawkdb.io/server/stats"
+	"goshawkdb.io/server/localconnection"
+	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/router"
+	//	"goshawkdb.io/server/stats"
+	"goshawkdb.io/server/topologytransmogrifier"
+	"goshawkdb.io/server/types"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -25,7 +32,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
-	"sync"
+	//	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -144,7 +151,7 @@ func newServer(logger log.Logger) (*server, error) {
 		dataDir:      dataDir,
 		port:         uint16(port),
 		onShutdown:   []func(){},
-		shutdownChan: make(chan goshawk.EmptyStruct),
+		shutdownChan: make(chan types.EmptyStruct),
 		wssPort:      uint16(wssPort),
 		promPort:     uint16(promPort),
 		httpProf:     httpProf,
@@ -171,12 +178,12 @@ type server struct {
 	httpProf          bool
 	rmId              common.RMId
 	bootCount         uint32
-	connectionManager *network.ConnectionManager
-	transmogrifier    *network.TopologyTransmogrifier
+	connectionManager *connectionmanager.ConnectionManager
+	transmogrifier    *topologytransmogrifier.TopologyTransmogrifier
 	profileFile       *os.File
 	traceFile         *os.File
 	onShutdown        []func()
-	shutdownChan      chan goshawk.EmptyStruct
+	shutdownChan      chan types.EmptyStruct
 	shutdownCounter   int32
 }
 
@@ -203,50 +210,61 @@ func (s *server) start() {
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, uint8(procs), db, s.certificate, s.port, s, commandLineConfig, s.logger)
-	s.certificate = nil
-	s.addOnShutdown(transmogrifier.ShutdownSync)
-	sp := stats.NewStatsPublisher(cm, lc, s.logger)
-	s.addOnShutdown(sp.ShutdownSync)
-	s.addOnShutdown(cm.ShutdownSync)
-	s.connectionManager = cm
-	s.transmogrifier = transmogrifier
-
+	router := router.NewRouter(s.rmId, s.logger)
+	cm := connectionmanager.NewConnectionManager(s.rmId, s.bootCount, s.certificate, router, s.logger)
+	router.ConnectionManager = cm
 	go s.signalHandler()
+	localConnection := localconnection.NewLocalConnection(s.rmId, s.bootCount, cm, s.logger)
+	dispatchers := paxos.NewDispatchers(cm, s.rmId, s.bootCount, uint8(procs), db, localConnection, s.logger)
+	router.Dispatchers = dispatchers
+	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.rmId, db, router, cm, localConnection, s.port, nil, commandLineConfig, s.logger)
+	s.transmogrifier = transmogrifier
+	<-localEstablished
+	s.logger.Log("msg", "Startup complete.")
+	/*
+		//cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, uint8(procs), db, s.certificate, s.port, s, commandLineConfig, s.logger)
+		s.certificate = nil
+		s.addOnShutdown(transmogrifier.ShutdownSync)
+		sp := stats.NewStatsPublisher(cm, lc, s.logger)
+		s.addOnShutdown(sp.ShutdownSync)
+		s.addOnShutdown(cm.ShutdownSync)
+		s.connectionManager = cm
+		s.transmogrifier = transmogrifier
 
-	listener, err := network.NewListener(s.port, cm, s.logger)
-	s.maybeShutdown(err)
-	s.addOnShutdown(listener.ShutdownSync)
 
-	var wssMux, promMux *network.HttpListenerWithMux
-	var wssWG, promWG *sync.WaitGroup
-	if s.wssPort != 0 {
-		wssWG := new(sync.WaitGroup)
-		if s.wssPort == s.promPort {
-			wssWG.Add(2)
-		} else {
-			wssWG.Add(1)
-		}
-		wssMux, err = network.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
+		listener, err := network.NewListener(s.port, cm, s.logger)
 		s.maybeShutdown(err)
-		wssListener := network.NewWebsocketListener(wssMux, cm, s.logger)
-		s.addOnShutdown(wssListener.ShutdownSync)
-	}
+		s.addOnShutdown(listener.ShutdownSync)
 
-	if s.promPort != 0 {
-		if s.wssPort == s.promPort {
-			promWG = wssWG
-			promMux = wssMux
-		} else {
-			promWG = new(sync.WaitGroup)
-			promWG.Add(1)
-			promMux, err = network.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
+		var wssMux, promMux *network.HttpListenerWithMux
+		var wssWG, promWG *sync.WaitGroup
+		if s.wssPort != 0 {
+			wssWG := new(sync.WaitGroup)
+			if s.wssPort == s.promPort {
+				wssWG.Add(2)
+			} else {
+				wssWG.Add(1)
+			}
+			wssMux, err = network.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 			s.maybeShutdown(err)
+			wssListener := network.NewWebsocketListener(wssMux, cm, s.logger)
+			s.addOnShutdown(wssListener.ShutdownSync)
 		}
-		promListener := stats.NewPrometheusListener(promMux, cm, s.logger)
-		s.addOnShutdown(promListener.ShutdownSync)
-	}
 
+		if s.promPort != 0 {
+			if s.wssPort == s.promPort {
+				promWG = wssWG
+				promMux = wssMux
+			} else {
+				promWG = new(sync.WaitGroup)
+				promWG.Add(1)
+				promMux, err = network.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
+				s.maybeShutdown(err)
+			}
+			promListener := stats.NewPrometheusListener(promMux, cm, s.logger)
+			s.addOnShutdown(promListener.ShutdownSync)
+		}
+	*/
 	defer s.shutdown(nil)
 	<-s.shutdownChan
 }
@@ -322,17 +340,18 @@ func (s *server) SignalShutdown() {
 	// this may fail if stdout has died
 	s.logger.Log("msg", "Shutdown requested.")
 	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
-		s.shutdownChan <- goshawk.EmptyStructVal
+		s.shutdownChan <- types.EmptyStructVal
 	}
 }
 
 func (s *server) signalStatus() {
-	sc := goshawk.NewStatusConsumer()
-	go sc.Consume(func(str string) {
+	sc := status.NewStatusConsumer()
+	go func() {
+		str := sc.Wait()
 		s.logger.Log("msg", "System Status Start", "RMId", s.rmId)
 		os.Stderr.WriteString(str + "\n")
 		s.logger.Log("msg", "System Status End", "RMId", s.rmId)
-	})
+	}()
 	sc.Emit(fmt.Sprintf("Configuration File: %v", s.configFile))
 	sc.Emit(fmt.Sprintf("Data Directory: %v", s.dataDir))
 	sc.Emit(fmt.Sprintf("Port: %v", s.port))
@@ -369,22 +388,22 @@ func (s *server) signalDumpStacks() {
 
 func (s *server) signalToggleCpuProfile() {
 	memFile, err := ioutil.TempFile("", common.ProductName+"_Mem_Profile_")
-	if goshawk.CheckWarn(err, s.logger) {
+	if utils.CheckWarn(err, s.logger) {
 		return
 	}
-	if goshawk.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0), s.logger) {
+	if utils.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0), s.logger) {
 		return
 	}
-	if !goshawk.CheckWarn(memFile.Close(), s.logger) {
+	if !utils.CheckWarn(memFile.Close(), s.logger) {
 		s.logger.Log("msg", "Memory profile written.", "file", memFile.Name())
 	}
 
 	if s.profileFile == nil {
 		profFile, err := ioutil.TempFile("", common.ProductName+"_CPU_Profile_")
-		if goshawk.CheckWarn(err, s.logger) {
+		if utils.CheckWarn(err, s.logger) {
 			return
 		}
-		if goshawk.CheckWarn(pprof.StartCPUProfile(profFile), s.logger) {
+		if utils.CheckWarn(pprof.StartCPUProfile(profFile), s.logger) {
 			return
 		}
 		s.profileFile = profFile
@@ -392,7 +411,7 @@ func (s *server) signalToggleCpuProfile() {
 
 	} else {
 		pprof.StopCPUProfile()
-		if !goshawk.CheckWarn(s.profileFile.Close(), s.logger) {
+		if !utils.CheckWarn(s.profileFile.Close(), s.logger) {
 			s.logger.Log("msg", "Profiling stopped.", "file", s.profileFile.Name())
 		}
 		s.profileFile = nil
@@ -402,10 +421,10 @@ func (s *server) signalToggleCpuProfile() {
 func (s *server) signalToggleTrace() {
 	if s.traceFile == nil {
 		traceFile, err := ioutil.TempFile("", common.ProductName+"_Trace_")
-		if goshawk.CheckWarn(err, s.logger) {
+		if utils.CheckWarn(err, s.logger) {
 			return
 		}
-		if goshawk.CheckWarn(trace.Start(traceFile), s.logger) {
+		if utils.CheckWarn(trace.Start(traceFile), s.logger) {
 			return
 		}
 		s.traceFile = traceFile
@@ -413,7 +432,7 @@ func (s *server) signalToggleTrace() {
 
 	} else {
 		trace.Stop()
-		if !goshawk.CheckWarn(s.traceFile.Close(), s.logger) {
+		if !utils.CheckWarn(s.traceFile.Close(), s.logger) {
 			s.logger.Log("msg", "Tracing stopped.", "file", s.traceFile.Name())
 		}
 		s.traceFile = nil
