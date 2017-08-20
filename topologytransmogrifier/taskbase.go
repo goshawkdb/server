@@ -189,12 +189,16 @@ func (tt *transmogrificationTask) formActivePassive(activeCandidates, extraPassi
 }
 
 func (tt *transmogrificationTask) firstLocalHost(config *configuration.Configuration) (localHost string, err error) {
-	for config != nil {
+	for config != nil && err == nil {
 		localHost, _, err = config.LocalRemoteHosts(tt.listenPort)
-		if err == nil {
+		if err == nil && len(localHost) > 0 {
 			return localHost, err
 		}
-		config = config.NextConfiguration.Configuration
+		if config.NextConfiguration == nil {
+			break
+		} else {
+			config = config.NextConfiguration.Configuration
+		}
 	}
 	return "", err
 }
@@ -351,8 +355,7 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 }
 
 func (tt *transmogrificationTask) createTopologyZero(config *configuration.NextConfiguration) (*configuration.Topology, error) {
-	topology := configuration.BlankTopology()
-	topology.NextConfiguration = config
+	topology := configuration.BlankTopology(config.ClusterId, tt.self, tt.listenPort, config.MaxRMCount)
 	txn := tt.createTopologyTransaction(nil, topology, 1, []common.RMId{tt.self}, nil)
 	txnId := topology.DBVersion
 	txn.SetId(txnId[:])

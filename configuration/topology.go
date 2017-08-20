@@ -38,9 +38,9 @@ type Root struct {
 	Positions *common.Positions
 }
 
-func BlankTopology() *Topology {
+func BlankTopology(clusterId string, self common.RMId, port uint16, maxRMCount uint16) *Topology {
 	return &Topology{
-		Configuration: BlankConfiguration(),
+		Configuration: BlankConfiguration(clusterId, self, port, maxRMCount),
 		FInc:          0,
 		TwoFInc:       0,
 		DBVersion:     VersionOne,

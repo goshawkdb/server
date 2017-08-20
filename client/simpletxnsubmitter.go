@@ -213,7 +213,7 @@ func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.T
 }
 
 func (sts *SimpleTxnSubmitter) TopologyChanged(topology *configuration.Topology) error {
-	utils.DebugLog(sts.logger, "debug", "STS Topology Changed.", "topology", topology)
+	utils.DebugLog(sts.logger, "debug", "STS Topology Changed.", "topology", topology, "blank", topology.IsBlank())
 	if topology.IsBlank() {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.

@@ -99,6 +99,13 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		terminate, err := task.fatal(err)
 		return nil, 0, terminate, err
 	}
+	if len(localHost) == 0 { // we must be joining
+		localHost, err = task.firstLocalHost(task.targetConfig.Configuration)
+		if err != nil {
+			terminate, err := task.fatal(err)
+			return nil, 0, terminate, err
+		}
+	}
 
 	hostsSurvived, hostsRemoved, hostsAdded :=
 		make(map[string]common.RMId),

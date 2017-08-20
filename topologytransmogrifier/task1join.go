@@ -88,11 +88,9 @@ func (task *joinCluster) Tick() (bool, error) {
 
 func (task *joinCluster) allJoining(allRMIds common.RMIds) (bool, error) {
 	// NB: active never gets installed to the DB itself.
-	config := task.targetConfig.Configuration.Clone()
-	config.RMs = allRMIds
-
 	active := task.activeTopology.Clone()
-	active.SetConfiguration(config)
+	active.ClusterId = task.targetConfig.ClusterId
+	active.RMs = common.RMIds{task.self}
 
 	return task.setActiveTopology(active)
 }

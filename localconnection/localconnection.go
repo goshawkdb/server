@@ -2,7 +2,6 @@ package localconnection
 
 import (
 	"encoding/binary"
-	"errors"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
@@ -80,7 +79,7 @@ type localConnectionMsgInit struct {
 func (msg localConnectionMsgInit) Exec() (bool, error) {
 	servers, _ := msg.connectionManager.ClientEstablished(0, msg.LocalConnection)
 	if servers == nil {
-		return false, errors.New("LocalConnection failed to register with ConnectionManager!")
+		panic("LocalConnection failed to register with ConnectionManager!")
 	}
 	topology := msg.connectionManager.AddTopologySubscriber(topo.ConnectionSubscriber, msg.LocalConnection)
 	if err := msg.submitter.TopologyChanged(topology); err != nil {

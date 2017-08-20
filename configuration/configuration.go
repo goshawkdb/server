@@ -37,16 +37,16 @@ type Configuration struct {
 	NextConfiguration *NextConfiguration
 }
 
-func BlankConfiguration() *Configuration {
+func BlankConfiguration(clusterId string, self common.RMId, port uint16, maxRMCount uint16) *Configuration {
 	return &Configuration{
-		ClusterId:   "",
+		ClusterId:   clusterId,
 		ClusterUUId: 0,
 		Version:     0,
-		Hosts:       []string{},
+		Hosts:       []string{fmt.Sprintf("localhost:%d", port)},
 		F:           0,
-		MaxRMCount:  0,
+		MaxRMCount:  maxRMCount,
 		NoSync:      false,
-		RMs:         []common.RMId{},
+		RMs:         common.RMIds{self},
 	}
 }
 
@@ -208,6 +208,9 @@ func (config *Configuration) VerifyPeerCerts(peerCerts []*x509.Certificate) (aut
 
 // Also checks we are in there somewhere
 func (config *Configuration) LocalRemoteHosts(listenPort uint16) (string, []string, error) {
+	if len(config.Hosts) == 0 {
+		return "", nil, nil
+	}
 	listenPortStr := fmt.Sprint(listenPort)
 	localIPs, err := LocalAddresses()
 	if err != nil {
