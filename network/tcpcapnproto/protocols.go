@@ -20,6 +20,7 @@ import (
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/txnreader"
 	"net"
 	"time"
 )
@@ -36,9 +37,10 @@ type TLSCapnpHandshaker struct {
 	router            *router.Router
 	connectionManager connectionmanager.ConnectionManager
 	topology          *configuration.Topology
+	serverRemote      *sconn.ServerConnection
 }
 
-func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager) *TLSCapnpHandshaker {
+func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection) *TLSCapnpHandshaker {
 	return &TLSCapnpHandshaker{
 		TLSCapnpHandshakerBase: common.NewTLSCapnpHandshakerBase(dialer),
 		logger:                 logger,
@@ -48,6 +50,7 @@ func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32
 		restartable:            count == 0,
 		router:                 router,
 		connectionManager:      cm,
+		serverRemote:           serverRemote,
 	}
 }
 
@@ -62,6 +65,9 @@ func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology
 	if seg, err := tch.ReadExactlyOne(); err == nil {
 		hello := cmsgs.ReadRootHello(seg)
 		if tch.verifyHello(&hello) {
+			if tch.connectionNumber == 0 && hello.IsClient() { // we dialed, so it had better be a server.
+				return nil, errors.New("Received erroneous hello from peer: expected to find server, but found client.")
+			}
 			if hello.IsClient() {
 				tcc := tch.newTLSCapnpClient()
 				return tcc, tcc.finishHandshake()
@@ -130,6 +136,7 @@ func (tch *TLSCapnpHandshaker) newTLSCapnpServer() *TLSCapnpServer {
 	return &TLSCapnpServer{
 		TLSCapnpHandshaker: tch,
 		logger:             log.With(tch.logger, "type", "server"),
+		remote:             tch.serverRemote,
 	}
 }
 
@@ -241,10 +248,8 @@ func (tcs *TLSCapnpServer) finishHandshake() error {
 
 	if seg, err := tcs.ReadOne(); err == nil {
 		hello := msgs.ReadRootHelloServerFromServer(seg)
-		tcs.remote = &sconn.ServerConnection{
-			Host: hello.LocalHost(),
-			RMId: common.RMId(hello.RmId()),
-		}
+		tcs.remote.Host = hello.LocalHost()
+		tcs.remote.RMId = common.RMId(hello.RmId())
 		if tcs.verifyTopology(&hello) {
 			if _, found := tcs.topology.RMsRemoved[tcs.remote.RMId]; found {
 				tcs.restartable = false
@@ -287,13 +292,14 @@ func (tcs *TLSCapnpServer) verifyTopology(remote *msgs.HelloServerFromServer) bo
 func (tcs *TLSCapnpServer) Run(conn *network.Connection) error {
 	tcs.conn = conn
 	tcs.logger.Log("msg", "Connection established.", "remoteHost", tcs.remote.Host, "remoteRMId", tcs.remote.RMId)
-	tcs.remote.Send = tcs.Send
+	tcs.remote.Sender = tcs
 	flushSeg := capn.NewBuffer(nil)
 	flushMsg := msgs.NewRootMessage(flushSeg)
 	flushMsg.SetFlushed()
 	flushBytes := common.SegToBytes(flushSeg)
 	tcs.remote.Flushed = func() { tcs.Send(flushBytes) }
 	tcs.remote.ShutdownSync = tcs.conn.ShutdownSync
+	tcs.remote.Status = tcs.conn.Status
 
 	seg := capn.NewBuffer(nil)
 	message := msgs.NewRootMessage(seg)
@@ -548,7 +554,7 @@ func (tcc *TLSCapnpClient) String() string {
 	return fmt.Sprintf("TLSCapnpClient %d from %s", tcc.connectionNumber, tcc.remoteHost)
 }
 
-func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) {
+func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	tcc.EnqueueFuncAsync(func() (bool, error) {
 		return false, tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 	})

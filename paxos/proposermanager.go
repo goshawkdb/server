@@ -19,6 +19,10 @@ import (
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/proxy"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -54,7 +58,7 @@ type ProposerMetrics struct {
 
 func NewProposerManager(exe *dispatcher.Executor, rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerManager {
 	pm := &ProposerManager{
-		ServerConnectionPublisher: utils.NewServerConnectionPublisherProxy(exe, cm, logger),
+		ServerConnectionPublisher: proxy.NewServerConnectionPublisherProxy(exe, cm, logger),
 		logger:        logger, // proposerDispatcher creates the context
 		RMId:          rmId,
 		BootCount:     bootCount,
@@ -155,11 +159,11 @@ func (pm *ProposerManager) SetMetrics(metrics *ProposerMetrics) {
 	pm.metrics = metrics
 }
 
-func (pm *ProposerManager) ImmigrationReceived(txn *utils.TxnReader, varCaps msgs.Var_List, stateChange eng.TxnLocalStateChange) {
+func (pm *ProposerManager) ImmigrationReceived(txn *txnreader.TxnReader, varCaps msgs.Var_List, stateChange eng.TxnLocalStateChange) {
 	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txn, varCaps, pm.logger)
 }
 
-func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *utils.TxnReader) {
+func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *txnreader.TxnReader) {
 	// Due to failures, we can actually receive outcomes (2Bs) first,
 	// before we get the txn to vote on it - due to failures, other
 	// proposers will have created abort proposals on our behalf, and
@@ -221,7 +225,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *utils.TxnReader)
 	}
 }
 
-func (pm *ProposerManager) NewPaxosProposals(txn *utils.TxnReader, twoFInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
+func (pm *ProposerManager) NewPaxosProposals(txn *txnreader.TxnReader, twoFInc int, ballots []*eng.Ballot, acceptors []common.RMId, rmId common.RMId, skipPhase1 bool) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	txnId := txn.Id
@@ -264,7 +268,7 @@ func (pm *ProposerManager) OneBTxnVotesReceived(sender common.RMId, txnId *commo
 }
 
 // from network
-func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, txn *utils.TxnReader, twoBTxnVotes msgs.TwoBTxnVotes) {
+func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, txn *txnreader.TxnReader, twoBTxnVotes msgs.TwoBTxnVotes) {
 	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -338,7 +342,7 @@ func (pm *ProposerManager) TwoBTxnVotesReceived(sender common.RMId, txnId *commo
 				// We have no state here, and if we receive further 2Bs
 				// from the repeating sender at the acceptor then we will
 				// send further TLCs. So the use of OSS here is correct.
-				utils.NewOneShotSender(pm.logger, MakeTxnLocallyCompleteMsg(txnId), pm, sender)
+				senders.NewOneShotSender(pm.logger, MakeTxnLocallyCompleteMsg(txnId), pm, sender)
 			}
 		}
 
@@ -372,7 +376,7 @@ func (pm *ProposerManager) TxnSubmissionAbortReceived(sender common.RMId, txnId 
 	}
 }
 
-func (pm *ProposerManager) createProposerStart(txn *utils.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
+func (pm *ProposerManager) createProposerStart(txn *txnreader.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
 	if _, found := pm.proposers[*txn.Id]; found {
 		panic(fmt.Sprintf("ProposerManager createProposerStart: Proposer for %v already exists!", txn.Id))
 	}
@@ -418,7 +422,7 @@ func (pm *ProposerManager) FinishProposals(txnId *common.TxnId) {
 	}
 }
 
-func (pm *ProposerManager) Status(sc *utils.StatusConsumer) {
+func (pm *ProposerManager) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Live proposers: %v", len(pm.proposers)))
 	for _, prop := range pm.proposers {
 		prop.Status(sc.Fork())
@@ -482,7 +486,7 @@ func AllocForRMId(txn msgs.Txn, rmId common.RMId) *msgs.Allocation {
 	return nil
 }
 
-func MakeAbortBallots(txn *utils.TxnReader, alloc *msgs.Allocation) []*eng.Ballot {
+func MakeAbortBallots(txn *txnreader.TxnReader, alloc *msgs.Allocation) []*eng.Ballot {
 	actions := txn.Actions(true).Actions()
 	actionIndices := alloc.ActionIndices()
 	ballots := make([]*eng.Ballot, actionIndices.Len())

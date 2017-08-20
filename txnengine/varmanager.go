@@ -13,6 +13,7 @@ import (
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 	"time"
 )
 
@@ -185,7 +186,7 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 	}
 }
 
-func (vm *VarManager) Status(sc *utils.StatusConsumer) {
+func (vm *VarManager) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Active Vars: %v", len(vm.active)))
 	sc.Emit(fmt.Sprintf("- Callbacks: %v", vm.tw.Length()))
 	sc.Emit(fmt.Sprintf("- Beater live? %v", vm.beaterTerminator != nil))

@@ -6,7 +6,8 @@ import (
 	"goshawkdb.io/common/actor"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/types/connections/server"
-	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type ClientTxnMetrics struct {
@@ -19,6 +20,6 @@ type ClientTxnMetrics struct {
 type ClientConnection interface {
 	actor.ShutdownableActor
 	server.ServerConnectionSubscriber
-	Status(*utils.StatusConsumer)
-	SubmissionOutcomeReceived(common.RMId, *utils.TxnReader, *msgs.Outcome)
+	Status(*status.StatusConsumer)
+	SubmissionOutcomeReceived(common.RMId, *txnreader.TxnReader, *msgs.Outcome)
 }

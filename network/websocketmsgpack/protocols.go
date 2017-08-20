@@ -20,6 +20,7 @@ import (
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/txnreader"
 	"net/http"
 	"time"
 )
@@ -231,7 +232,7 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	}
 }
 
-func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) {
+func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	wmpc.EnqueueFuncAsync(func() (bool, error) {
 		return false, wmpc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
 	})

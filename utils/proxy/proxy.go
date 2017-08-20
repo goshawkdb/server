@@ -1,4 +1,4 @@
-package utils
+package proxy
 
 import (
 	"github.com/go-kit/kit/log"
@@ -6,6 +6,7 @@ import (
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/actor"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 )
 
 type serverConnectionPublisherProxy struct {
@@ -75,7 +76,7 @@ func (msg *scppConnectionEstablished) Exec() (bool, error) {
 		msg.wg.Add(1)
 		sub.ConnectionEstablished(msg.conn, msg.servers, msg.wg.Done)
 	}
-	DebugLog(msg.proxy.logger, "debug", "ServerConnEstablished Proxy expecting callbacks.")
+	utils.DebugLog(msg.proxy.logger, "debug", "ServerConnEstablished Proxy expecting callbacks.")
 	msg.wg.Done() // see comment below
 	return false, nil
 }

@@ -12,7 +12,8 @@ import (
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types/connectionmanager"
-	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type ProposerDispatcher struct {
@@ -36,7 +37,7 @@ func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm c
 	return pd
 }
 
-func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *utils.TxnReader) {
+func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *txnreader.TxnReader) {
 	txnId := txn.Id
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txn) })
 }
@@ -48,12 +49,12 @@ func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVo
 
 func (pd *ProposerDispatcher) TwoBTxnVotesReceived(sender common.RMId, twoBTxnVotes msgs.TwoBTxnVotes) {
 	var txnId *common.TxnId
-	var txn *utils.TxnReader
+	var txn *txnreader.TxnReader
 	switch twoBTxnVotes.Which() {
 	case msgs.TWOBTXNVOTES_FAILURES:
 		txnId = common.MakeTxnId(twoBTxnVotes.Failures().TxnId())
 	case msgs.TWOBTXNVOTES_OUTCOME:
-		txn = utils.TxnReaderFromData(twoBTxnVotes.Outcome().Txn())
+		txn = txnreader.TxnReaderFromData(twoBTxnVotes.Outcome().Txn())
 		txnId = txn.Id
 	default:
 		panic(fmt.Sprintf("Unexpected 2BVotes type: %v", twoBTxnVotes.Which()))
@@ -76,7 +77,7 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration msgs.Migration, stat
 	elemsCount := elemsList.Len()
 	for idx := 0; idx < elemsCount; idx++ {
 		elem := elemsList.At(idx)
-		txn := utils.TxnReaderFromData(elem.Txn())
+		txn := txnreader.TxnReaderFromData(elem.Txn())
 		txnId := txn.Id
 		varCaps := elem.Vars()
 		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txn, varCaps, stateChange) })
@@ -93,7 +94,7 @@ func (pd *ProposerDispatcher) SetMetrics(metrics *ProposerMetrics) {
 	}
 }
 
-func (pd *ProposerDispatcher) Status(sc *utils.StatusConsumer) {
+func (pd *ProposerDispatcher) Status(sc *status.StatusConsumer) {
 	sc.Emit("Proposers")
 	for idx, exe := range pd.Executors {
 		s := sc.Fork()

@@ -9,7 +9,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/types/connectionmanager"
 	"goshawkdb.io/server/types/topology"
-	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 	"math/rand"
 	"time"
 )
@@ -124,7 +124,7 @@ func (c *Connection) TopologyChanged(topology *configuration.Topology, done func
 
 type connectionMsgStatus struct {
 	*Connection
-	sc *utils.StatusConsumer
+	sc *status.StatusConsumer
 }
 
 func (msg connectionMsgStatus) Exec() (bool, error) {
@@ -137,7 +137,7 @@ func (msg connectionMsgStatus) Exec() (bool, error) {
 	return false, nil
 }
 
-func (c *Connection) Status(sc *utils.StatusConsumer) {
+func (c *Connection) Status(sc *status.StatusConsumer) {
 	c.EnqueueMsg(connectionMsgStatus{Connection: c, sc: sc})
 }
 

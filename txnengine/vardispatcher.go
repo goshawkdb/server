@@ -10,7 +10,8 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/types/topology"
-	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type VarDispatcher struct {
@@ -35,7 +36,7 @@ func (vd *VarDispatcher) ApplyToVar(fun func(*Var), createIfMissing bool, vUUId 
 	vd.withVarManager(vUUId, func(vm *VarManager) { vm.ApplyToVar(fun, createIfMissing, vUUId) })
 }
 
-func (vd *VarDispatcher) Status(sc *utils.StatusConsumer) {
+func (vd *VarDispatcher) Status(sc *status.StatusConsumer) {
 	sc.Emit("Vars")
 	for idx, exe := range vd.Executors {
 		s := sc.Fork()
@@ -59,8 +60,9 @@ func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarMana
 	})
 }
 
+// TODO fix these
 type TranslationCallback func(*cmsgs.ClientAction, *msgs.Action, []common.RMId, map[common.RMId]bool) error
 type LocalConnection interface {
-	RunClientTransaction(*cmsgs.ClientTxn, bool, map[common.VarUUId]*common.Positions, TranslationCallback) (*utils.TxnReader, *msgs.Outcome, error)
-	Status(*utils.StatusConsumer)
+	RunClientTransaction(*cmsgs.ClientTxn, bool, map[common.VarUUId]*common.Positions, TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error)
+	Status(*status.StatusConsumer)
 }

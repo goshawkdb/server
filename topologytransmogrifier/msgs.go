@@ -7,6 +7,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
 )
 
 type topologyTransmogrifierMsgRequestConfigChange struct {
@@ -84,7 +85,7 @@ func (msg topologyTransmogrifierMsgTopologyObserved) Exec() (bool, error) {
 type topologyTransmogrifierMsgRunTransaction struct {
 	*transmogrificationTask
 	task    Task
-	backoff *utils.BinaryBackoffEngine
+	backoff *binarybackoff.BinaryBackoffEngine
 	txn     *msgs.Txn
 	active  common.RMIds
 	passive common.RMIds
@@ -122,7 +123,7 @@ func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
 type topologyTransmogrifierMsgCreateRoots struct {
 	*transmogrificationTask
 	task           *installTargetOld
-	backoff        *utils.BinaryBackoffEngine
+	backoff        *binarybackoff.BinaryBackoffEngine
 	rootsRequired  int
 	targetTopology *configuration.Topology
 	active         common.RMIds

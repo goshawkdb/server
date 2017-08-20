@@ -2,16 +2,22 @@ package server
 
 import (
 	"goshawkdb.io/common"
+	"goshawkdb.io/server/utils/status"
 )
 
 type ServerConnection struct {
-	Host         string
-	RMId         common.RMId
-	BootCount    uint32
-	ClusterUUId  uint64
-	Send         func(msg []byte)
+	Host        string
+	RMId        common.RMId
+	BootCount   uint32
+	ClusterUUId uint64
+	Sender
 	Flushed      func()
 	ShutdownSync func()
+	Status       func(*status.StatusConsumer)
+}
+
+type Sender interface {
+	Send(msg []byte)
 }
 
 type ServerConnectionSubscriber interface {

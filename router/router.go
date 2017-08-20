@@ -9,7 +9,9 @@ import (
 	"goshawkdb.io/server/paxos"
 	"goshawkdb.io/server/types/connectionmanager"
 	"goshawkdb.io/server/types/topology"
-	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type Router struct {
@@ -33,16 +35,16 @@ func NewRouter(rmId common.RMId, dispatchers *paxos.Dispatchers, connectionManag
 func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msgs.Message) {
 	switch msgType {
 	case msgs.MESSAGE_TXNSUBMISSION:
-		r.ProposerDispatcher.TxnReceived(sender, utils.TxnReaderFromData(msg.TxnSubmission()))
+		r.ProposerDispatcher.TxnReceived(sender, txnreader.TxnReaderFromData(msg.TxnSubmission()))
 	case msgs.MESSAGE_SUBMISSIONOUTCOME:
 		outcome := msg.SubmissionOutcome()
-		txn := utils.TxnReaderFromData(outcome.Txn())
+		txn := txnreader.TxnReaderFromData(outcome.Txn())
 		txnId := txn.Id
 		connNumber := txnId.ConnectionCount()
 		bootNumber := txnId.BootCount()
 		if conn := r.connectionManager.GetClient(bootNumber, connNumber); conn == nil {
 			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			utils.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.connectionManager, sender)
+			senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.connectionManager, sender)
 		} else {
 			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
 		}
@@ -89,7 +91,7 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 	}
 }
 
-func (r Router) Status(sc *utils.StatusConsumer) {
+func (r Router) Status(sc *status.StatusConsumer) {
 	r.VarDispatcher.Status(sc.Fork())
 	r.ProposerDispatcher.Status(sc.Fork())
 	r.AcceptorDispatcher.Status(sc.Fork())

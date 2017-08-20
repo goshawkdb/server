@@ -1,4 +1,4 @@
-package utils
+package binarybackoff
 
 import (
 	"math/rand"

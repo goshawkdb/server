@@ -12,6 +12,9 @@ import (
 	"goshawkdb.io/server/configuration"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -105,7 +108,7 @@ func (tt *transmogrificationTask) ensureShareGoalWithAll() {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	msg.SetTopologyChangeRequest(tt.targetConfig.AddToSegAutoRoot(seg))
-	tt.sender = utils.NewRepeatingAllSender(common.SegToBytes(seg))
+	tt.sender = senders.NewRepeatingAllSender(common.SegToBytes(seg))
 	tt.connectionManager.AddServerConnectionSubscriber(tt.sender)
 }
 
@@ -150,7 +153,7 @@ func (tt *transmogrificationTask) Abandon() {
 func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) {
 	tt.runTxnMsg = &topologyTransmogrifierMsgRunTransaction{
 		transmogrificationTask: tt,
-		backoff:                utils.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+		backoff:                binarybackoff.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
 		task:                   tt.currentTask,
 		active:                 active,
 		passive:                passive,
@@ -307,7 +310,7 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 		return nil, err
 	}
 
-	backoff := utils.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
+	backoff := binarybackoff.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
 	for {
 		txn := tt.createTopologyTransaction(nil, nil, 1, []common.RMId{tt.self}, nil)
 
@@ -330,7 +333,7 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 		}
 		update := abortUpdates.At(0)
 		dbversion := common.MakeTxnId(update.TxnId())
-		updateActions := utils.TxnActionsFromData(update.Actions(), true).Actions()
+		updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 		if updateActions.Len() != 1 {
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave multiple actions: %v", updateActions.Len())
 		}
@@ -394,7 +397,7 @@ func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive
 	update := abortUpdates.At(0)
 	dbversion := common.MakeTxnId(update.TxnId())
 
-	updateActions := utils.TxnActionsFromData(update.Actions(), true).Actions()
+	updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
 		return false, false,
 			fmt.Errorf("Internal error: readwrite of topology gave update with %v actions instead of 1!",

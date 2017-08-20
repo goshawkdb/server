@@ -9,6 +9,7 @@ import (
 	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
 	"time"
 )
 
@@ -69,7 +70,7 @@ func (task *installTargetOld) Tick() (bool, error) {
 		task.runTxnMsg = &topologyTransmogrifierMsgCreateRoots{
 			transmogrificationTask: task.transmogrificationTask,
 			task:           task,
-			backoff:        utils.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, time.Duration(len(task.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+			backoff:        binarybackoff.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, time.Duration(len(task.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
 			rootsRequired:  rootsRequired,
 			targetTopology: targetTopology,
 			active:         active,

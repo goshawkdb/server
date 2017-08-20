@@ -8,6 +8,8 @@ import (
 	eng "goshawkdb.io/server/txnengine"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type proposal struct {
@@ -17,7 +19,7 @@ type proposal struct {
 	activeRMIds        map[common.RMId]uint32
 	twoFInc            int
 	fInc               int
-	txn                *utils.TxnReader
+	txn                *txnreader.TxnReader
 	submitter          common.RMId
 	submitterBootCount uint32
 	skipPhase1         bool
@@ -27,7 +29,7 @@ type proposal struct {
 	finished           bool
 }
 
-func NewProposal(pm *ProposerManager, txn *utils.TxnReader, twoFInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
+func NewProposal(pm *ProposerManager, txn *txnreader.TxnReader, twoFInc int, ballots []*eng.Ballot, instanceRMId common.RMId, acceptors []common.RMId, skipPhase1 bool) *proposal {
 	txnCap := txn.Txn
 	allocs := txnCap.Allocations()
 	activeRMIds := make(map[common.RMId]uint32, allocs.Len())
@@ -189,7 +191,7 @@ func (p *proposal) FinishProposing() []common.RMId {
 	return p.abortInstances
 }
 
-func (p *proposal) Status(sc *utils.StatusConsumer) {
+func (p *proposal) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Proposal for %v-%v", p.txn.Id, p.instanceRMId))
 	sc.Emit(fmt.Sprintf("- Acceptors: %v", p.acceptors))
 	sc.Emit(fmt.Sprintf("- Instances: %v", len(p.instances)))

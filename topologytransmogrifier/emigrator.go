@@ -16,6 +16,7 @@ import (
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/txnreader"
 	"sync/atomic"
 )
 
@@ -129,7 +130,7 @@ func (it *dbIterator) iterate() {
 				if txnBytes == nil {
 					return true
 				}
-				txn := utils.TxnReaderFromData(txnBytes)
+				txn := txnreader.TxnReaderFromData(txnBytes)
 				// So, we only need to send based on the vars that we have
 				// (in fact, we require the positions so we can only look
 				// at the vars we have). However, the txn var allocations
@@ -271,7 +272,7 @@ type sendBatch struct {
 }
 
 type migrationElem struct {
-	txn  *utils.TxnReader
+	txn  *txnreader.TxnReader
 	vars []*msgs.Var
 }
 
@@ -313,7 +314,7 @@ func (sb *sendBatch) flush() {
 	sb.elems = sb.elems[:0]
 }
 
-func (sb *sendBatch) add(txn *utils.TxnReader, varCaps []*msgs.Var) {
+func (sb *sendBatch) add(txn *txnreader.TxnReader, varCaps []*msgs.Var) {
 	elem := &migrationElem{
 		txn:  txn,
 		vars: varCaps,

@@ -8,22 +8,23 @@ import (
 	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/router"
 	"goshawkdb.io/server/types/connectionmanager"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"net"
 )
 
 // we are dialing out to someone else
-func NewConnectionTCPTLSCapnpDialer(remoteHost string, self common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, logger log.Logger) *network.Connection {
+func NewConnectionTCPTLSCapnpDialer(self common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection, logger log.Logger) {
 	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
-	phone := common.NewTCPDialer(nil, remoteHost, logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, 0, self, bootcount, router, cm)
-	return network.NewConnection(yesman, cm, logger)
+	phone := common.NewTCPDialer(nil, serverRemote.Host, logger)
+	yesman := NewTLSCapnpHandshaker(phone, logger, 0, self, bootcount, router, cm, serverRemote)
+	network.NewConnection(yesman, cm, logger)
 }
 
 // the socket is already established - we got it from the TCP listener
 func (l *listenerInner) NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, count uint32) {
 	logger := log.With(l.parentLogger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
 	phone := common.NewTCPDialer(socket, "", logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, count, l.self, l.bootcount, l.router, l.connectionManager)
+	yesman := NewTLSCapnpHandshaker(phone, logger, count, l.self, l.bootcount, l.router, l.connectionManager, &sconn.ServerConnection{})
 	network.NewConnection(yesman, l.connectionManager, logger)
 }
 

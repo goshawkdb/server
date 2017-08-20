@@ -8,12 +8,14 @@ import (
 	"goshawkdb.io/common/actor"
 	"goshawkdb.io/common/certs"
 	"goshawkdb.io/server/configuration"
-	"goshawkdb.io/server/db"
+	"goshawkdb.io/server/network/tcpcapnproto"
+	"goshawkdb.io/server/router"
 	"goshawkdb.io/server/types"
 	cconn "goshawkdb.io/server/types/connections/client"
 	sconn "goshawkdb.io/server/types/connections/server"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 	"net"
 	"sync"
 )
@@ -28,10 +30,11 @@ type ConnectionManager struct {
 
 	lock                          sync.RWMutex
 	parentLogger                  log.Logger
+	self                          common.RMId
 	localHost                     string
-	RMId                          common.RMId
-	BootCount                     uint32
+	bootcount                     uint32
 	certificate                   []byte
+	router                        *router.Router
 	nodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
 	topology                      *configuration.Topology
 	servers                       map[string][]*connectionManagerMsgServerEstablished
@@ -53,14 +56,14 @@ type connectionManagerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *db.Databases, certificate []byte, port uint16, ss ShutdownSignaller, config *configuration.Configuration, logger log.Logger) *ConnectionManager {
+func NewConnectionManager(rmId common.RMId, bootcount uint32, certificate []byte, router *router.Router, logger log.Logger) *ConnectionManager {
 
 	cm := &ConnectionManager{
 		parentLogger:      logger,
-		localHost:         "",
-		RMId:              rmId,
-		BootCount:         bootCount,
+		self:              rmId,
+		bootcount:         bootcount,
 		certificate:       certificate,
+		router:            router,
 		servers:           make(map[string][]*connectionManagerMsgServerEstablished),
 		rmToServer:        make(map[common.RMId]*connectionManagerMsgServerEstablished),
 		flushedServers:    make(map[common.RMId]types.EmptyStruct),
@@ -94,16 +97,16 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, procs uint8, db *d
 		cd := &connectionManagerMsgServerEstablished{
 			send:        cmi.send,
 			host:        cm.localHost,
-			rmId:        cm.RMId,
-			bootCount:   cm.BootCount,
+			rmId:        cm.self,
+			bootcount:   cm.bootcount,
 			established: true,
 			cm:          cm,
 		}
 		cm.rmToServer[cd.rmId] = cd
 		cm.servers[cm.localHost] = []*connectionManagerMsgServerEstablished{cd}
 
-		cm.localConnection = client.NewLocalConnection(cm.RMId, cm.BootCount, cm, cm.parentLogger)
-		cm.Dispatchers = paxos.NewDispatchers(cm, cm.RMId, cm.BootCount, procs, db, cm.localConnection, cm.parentLogger)
+		cm.localConnection = client.NewLocalConnection(cm.self, cm.bootcount, cm, cm.parentLogger)
+		cm.Dispatchers = paxos.NewDispatchers(cm, cm.self, cm.bootcount, procs, db, cm.localConnection, cm.parentLogger)
 		transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
 
 		<-localEstablished
@@ -132,7 +135,7 @@ func (msg *connectionManagerMsgServerEstablished) Exec() (terminate bool, error 
 		cm.serverConnsGauge.Inc()
 	}
 
-	if msg.RMId == cm.RMId {
+	if msg.RMId == cm.self {
 		cm.inner.Logger.Log("msg", "RMId collision with ourself detected.", "RMId", msg.RMId, "remoteHost", msg.Host)
 		go msg.ShutdownSync()
 		return
@@ -339,7 +342,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn cconn.ClientConn
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) cconn.ClientConnection {
-	if bootNumber != cm.BootCount && bootNumber != 0 {
+	if bootNumber != cm.bootcount && bootNumber != 0 {
 		return nil
 	}
 	cm.lock.RLock()
@@ -387,14 +390,14 @@ func (msg *connectionManagerMsgSetTopology) Exec() (bool, error) {
 	cm.topology = msg.topology
 	cm.topologySubscribers.TopologyChanged(cm.topology, msg.callbacks)
 	cm.inner.checkFlushed()
-	cd := cm.rmToServer[cm.RMId]
+	cd := cm.rmToServer[cm.self]
 	if clusterUUId := cm.topology.ClusterUUId; cd.ClusterUUId == 0 && clusterUUId != 0 {
 		// we now have a clusterUUId so we need to announce that
 		delete(cm.rmToServer, cd.RMId)
 		cm.serverConnSubscribers.ServerConnLost(cd.RMId)
 		cd = cd.clone()
 		cd.ClusterUUId = clusterUUId
-		cm.rmToServer[cm.RMId] = cd
+		cm.rmToServer[cm.self] = cd
 		// do *not* change this localHost to cd.Host - localhost change is taken care of later on
 		cm.servers[cm.localHost][0] = cd
 		cm.serverConnSubscribers.ServerConnEstablished(cd, func() { cm.ServerConnectionFlushed(cd.RMId) })
@@ -421,7 +424,7 @@ func (msg *connectionManagerMsgSetTopology) Exec() (bool, error) {
 		cm.nodeCertificatePrivateKeyPair = nodeCertPrivKeyPair
 		cm.lock.Unlock()
 
-		cd := cm.rmToServer[cm.RMId]
+		cd := cm.rmToServer[cm.self]
 		delete(cm.rmToServer, cd.RMId)
 		delete(cm.servers, oldLocalHost)
 		cm.serverConnSubscribers.ServerConnLost(cd.RMId)
@@ -439,9 +442,11 @@ func (msg *connectionManagerMsgSetTopology) Exec() (bool, error) {
 		if cds, found := cm.servers[host]; !found || len(cds) == 0 || cds[0] == nil {
 			// In all cases, we need to start a dialer
 			cd := &connectionManagerMsgServerEstablished{
-				Connection: NewConnectionTCPTLSCapnpDialer(host, cm, cm.parentLogger),
-				host:       host,
+				ServerConnection: &sconn.ServerConnection{
+					Host: host,
+				},
 			}
+			tcpcapnproto.NewConnectionTCPTLSCapnpDialer(cm.self, cm.bootcount, cm.router, cm, cd.ServerConnection, cm.parentLogger)
 			if !found || len(cds) == 0 {
 				cds := make([]*connectionManagerMsgServerEstablished, 1, 2)
 				cds[0] = cd
@@ -538,12 +543,12 @@ func (cm *ConnectionManager) RemoveTopologySubscriberAsync(subType topo.Topology
 
 type connectionManagerMsgStatus struct {
 	*ConnectionManager
-	sc *utils.StatusConsumer
+	sc *status.StatusConsumer
 }
 
 func (msg *connectionManagerMsgStatus) Exec() (bool, error) {
 	sc := msg.sc
-	sc.Emit(fmt.Sprintf("Boot Count: %v", msg.BootCount))
+	sc.Emit(fmt.Sprintf("Boot Count: %v", msg.bootcount))
 	sc.Emit(fmt.Sprintf("Address: %v", msg.localHost))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", msg.topology))
 	if msg.topology != nil && msg.topology.NextConfiguration != nil {
@@ -568,8 +573,8 @@ func (msg *connectionManagerMsgStatus) Exec() (bool, error) {
 	sc.Emit(fmt.Sprintf("Desired Server Connections: %v", msg.desired))
 	for _, cds := range msg.servers {
 		for _, cd := range cds {
-			if cd != nil && cd.ServerConnection != nil { // TODO - really?!
-				cd.ServerConnection.Status(sc.Fork()) // TODO - doesn't exist!
+			if cd != nil && cd.Status != nil {
+				cd.Status(sc.Fork())
 			}
 		}
 	}
@@ -583,7 +588,7 @@ func (msg *connectionManagerMsgStatus) Exec() (bool, error) {
 	return false, nil
 }
 
-func (cm *ConnectionManager) Status(sc *utils.StatusConsumer) {
+func (cm *ConnectionManager) Status(sc *status.StatusConsumer) {
 	cm.EnqueueMsg(&connectionManagerMsgStatus{ConnectionManager: cm, sc: sc})
 }
 
@@ -633,7 +638,7 @@ func (cm *connectionManagerInner) checkFlushed() {
 			}
 		}
 		if requiredFlushed <= 0 {
-			cm.Logger.Log("msg", "Ready for client connections.", "RMId", cm.RMId)
+			cm.Logger.Log("msg", "Ready for client connections.", "RMId", cm.self)
 			cm.flushedServers = nil
 		}
 	}
@@ -655,7 +660,7 @@ func (cm *connectionManagerInner) send(b []byte) {
 		panic(fmt.Sprintf("Error in capnproto decode when sending to self! %v", err))
 	}
 	msg := msgs.ReadRootMessage(seg)
-	cm.DispatchMessage(cm.RMId, msg.Which(), msg)
+	cm.DispatchMessage(cm.self, msg.Which(), msg)
 }
 */
 

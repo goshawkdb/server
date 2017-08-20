@@ -9,13 +9,17 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
-	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/paxos"
 	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/actor"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	ch "goshawkdb.io/server/utils/consistenthash"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"math/rand"
 	"sort"
 	"sync/atomic"
@@ -39,8 +43,8 @@ type SimpleTxnSubmitter struct {
 	actor               actor.EnqueueActor
 }
 
-type txnOutcomeConsumer func(common.RMId, *utils.TxnReader, *msgs.Outcome) error
-type TxnCompletionConsumer func(*utils.TxnReader, *msgs.Outcome, error) error
+type txnOutcomeConsumer func(common.RMId, *txnreader.TxnReader, *msgs.Outcome) error
+type TxnCompletionConsumer func(*txnreader.TxnReader, *msgs.Outcome, error) error
 
 func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger) *SimpleTxnSubmitter {
 	cache := ch.NewCache(nil, rng)
@@ -61,7 +65,7 @@ func NewSimpleTxnSubmitter(rmId common.RMId, bootCount uint32, connPub sconn.Ser
 	return sts
 }
 
-func (sts *SimpleTxnSubmitter) Status(sc *utils.StatusConsumer) {
+func (sts *SimpleTxnSubmitter) Status(sc *status.StatusConsumer) {
 	txnIds := make([]common.TxnId, 0, len(sts.outcomeConsumers))
 	for txnId := range sts.outcomeConsumers {
 		txnIds = append(txnIds, txnId)
@@ -81,19 +85,19 @@ func (sts *SimpleTxnSubmitter) EnsurePositions(varPosMap map[common.VarUUId]*com
 	}
 }
 
-func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) error {
+func (sts *SimpleTxnSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	txnId := txn.Id
 	if consumer, found := sts.outcomeConsumers[*txnId]; found {
 		return consumer(sender, txn, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
-		utils.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
+		senders.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, sender)
 		return nil
 	}
 }
 
 // txnCap must be a root
-func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay *utils.BinaryBackoffEngine) {
+func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common.TxnId, activeRMs []common.RMId, continuation TxnCompletionConsumer, delay *binarybackoff.BinaryBackoffEngine) {
 	if sts.shutdownRequested != nil {
 		continuation(nil, nil, errors.New("Shutdown in progress"))
 		return
@@ -103,7 +107,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	msg.SetTxnSubmission(common.SegToBytes(txnCap.Segment))
 
 	utils.DebugLog(sts.logger, "debug", "Submitting txn.", "TxnId", txnId, "active", activeRMs)
-	txnSender := utils.NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
+	txnSender := senders.NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
 	removeNeeded := uint32(0)
 	sleeping := delay != nil && delay.Cur > 0
 	if sleeping {
@@ -138,7 +142,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 		// exiting, this informs acceptors that we don't care about the
 		// answer so they shouldn't hang around waiting for the node to
 		// return. Of course, it's best effort.
-		utils.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
+		senders.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), sts.connPub, acceptors...)
 		retry := txnCap.Retry()
 		if completed || retry { // need to stop the txnSender
 			if sleeping {
@@ -156,7 +160,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 			// observe our death and tidy up anyway. If it's just this
 			// connection shutting down then there should be no
 			// problem with these msgs getting to the proposers.
-			utils.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
+			senders.NewOneShotSender(sts.logger, paxos.MakeTxnSubmissionAbortMsg(txnId), sts.connPub, activeRMs...)
 		}
 		if !completed {
 			// We're shutting down, there's really nothing sensible we can
@@ -170,7 +174,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	sts.onShutdown[shutdownFunPtr] = types.EmptyStructVal
 
 	outcomeAccumulator := paxos.NewOutcomeAccumulator(int(txnCap.TwoFInc()), acceptors, sts.logger)
-	consumer := func(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) error {
+	consumer := func(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 		if outcome, _ = outcomeAccumulator.BallotOutcomeReceived(sender, outcome); outcome != nil {
 			delete(sts.onShutdown, shutdownFunPtr)
 			shutdownFun(true)
@@ -187,7 +191,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *utils.BinaryBackoffEngine, isTopologyTxn bool, vc *versionCache) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *binarybackoff.BinaryBackoffEngine, isTopologyTxn bool, vc *versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() {
 		fun := func() error {

@@ -5,8 +5,8 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/utils"
-	vc "goshawkdb.io/server/vectorclock"
+	"goshawkdb.io/server/utils/txnreader"
+	vc "goshawkdb.io/server/utils/vectorclock"
 )
 
 type Vote msgs.Vote_Which
@@ -98,7 +98,7 @@ func (ballot *BallotBuilder) buildSeg() (*capn.Segment, msgs.Ballot) {
 	return seg, ballotCap
 }
 
-func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *utils.TxnActions) *Ballot {
+func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *txnreader.TxnActions) *Ballot {
 	ballot.Vote = AbortBadRead
 	seg, ballotCap := ballot.buildSeg()
 

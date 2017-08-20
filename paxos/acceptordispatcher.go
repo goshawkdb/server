@@ -11,7 +11,8 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/types/connectionmanager"
-	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type AcceptorDispatcher struct {
@@ -42,7 +43,7 @@ func (ad *AcceptorDispatcher) OneATxnVotesReceived(sender common.RMId, oneATxnVo
 }
 
 func (ad *AcceptorDispatcher) TwoATxnVotesReceived(sender common.RMId, twoATxnVotes msgs.TwoATxnVotes) {
-	txn := utils.TxnReaderFromData(twoATxnVotes.Txn())
+	txn := txnreader.TxnReaderFromData(twoATxnVotes.Txn())
 	txnId := txn.Id
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TwoATxnVotesReceived(sender, txn, twoATxnVotes) })
 }
@@ -67,7 +68,7 @@ func (ad *AcceptorDispatcher) SetMetrics(metrics *AcceptorMetrics) {
 	}
 }
 
-func (ad *AcceptorDispatcher) Status(sc *utils.StatusConsumer) {
+func (ad *AcceptorDispatcher) Status(sc *status.StatusConsumer) {
 	sc.Emit("Acceptors")
 	for idx, executor := range ad.Executors {
 		s := sc.Fork()

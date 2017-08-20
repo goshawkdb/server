@@ -15,6 +15,9 @@ import (
 	sconn "goshawkdb.io/server/types/connections/server"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"math/rand"
 	"sync"
 	"time"
@@ -101,7 +104,7 @@ func (lc *LocalConnection) NextVarUUId() *common.VarUUId {
 
 type localConnectionMsgStatus struct {
 	*LocalConnection
-	sc *utils.StatusConsumer
+	sc *status.StatusConsumer
 }
 
 func (msg localConnectionMsgStatus) Exec() (bool, error) {
@@ -111,14 +114,14 @@ func (msg localConnectionMsgStatus) Exec() (bool, error) {
 	return false, nil
 }
 
-func (lc *LocalConnection) Status(sc *utils.StatusConsumer) {
+func (lc *LocalConnection) Status(sc *status.StatusConsumer) {
 	lc.EnqueueMsg(localConnectionMsgStatus{LocalConnection: lc, sc: sc})
 }
 
 type localConnectionMsgOutcomeReceived struct {
 	*LocalConnection
 	sender  common.RMId
-	txn     *utils.TxnReader
+	txn     *txnreader.TxnReader
 	outcome *msgs.Outcome
 }
 
@@ -127,7 +130,7 @@ func (msg localConnectionMsgOutcomeReceived) Exec() (bool, error) {
 	return false, msg.submitter.SubmissionOutcomeReceived(msg.sender, msg.txn, msg.outcome)
 }
 
-func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *utils.TxnReader, outcome *msgs.Outcome) {
+func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	lc.EnqueueMsg(localConnectionMsgOutcomeReceived{
 		LocalConnection: lc,
 		sender:          sender,
@@ -164,12 +167,12 @@ type localConnectionMsgRunClientTxn struct {
 	isTopologyTxn       bool
 	varPosMap           map[common.VarUUId]*common.Positions
 	translationCallback eng.TranslationCallback
-	txnReader           *utils.TxnReader
+	txnReader           *txnreader.TxnReader
 	outcome             *msgs.Outcome
 	err                 error
 }
 
-func (msg *localConnectionMsgRunClientTxn) setOutcomeError(txn *utils.TxnReader, outcome *msgs.Outcome, err error) error {
+func (msg *localConnectionMsgRunClientTxn) setOutcomeError(txn *txnreader.TxnReader, outcome *msgs.Outcome, err error) error {
 	msg.txnReader = txn
 	msg.outcome = outcome
 	msg.err = err
@@ -188,7 +191,7 @@ func (msg *localConnectionMsgRunClientTxn) Exec() (bool, error) {
 	return false, msg.submitter.SubmitClientTransaction(msg.translationCallback, txn, txnId, msg.setOutcomeError, nil, msg.isTopologyTxn, nil)
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*utils.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunClientTxn{
 		LocalConnection:     lc,
 		txn:                 txn,
@@ -210,13 +213,13 @@ type localConnectionMsgRunTxn struct {
 	txn       *msgs.Txn
 	txnId     *common.TxnId
 	activeRMs []common.RMId
-	backoff   *utils.BinaryBackoffEngine
-	txnReader *utils.TxnReader
+	backoff   *binarybackoff.BinaryBackoffEngine
+	txnReader *txnreader.TxnReader
 	outcome   *msgs.Outcome
 	err       error
 }
 
-func (msg *localConnectionMsgRunTxn) setOutcomeError(txn *utils.TxnReader, outcome *msgs.Outcome, err error) error {
+func (msg *localConnectionMsgRunTxn) setOutcomeError(txn *txnreader.TxnReader, outcome *msgs.Outcome, err error) error {
 	msg.txnReader = txn
 	msg.outcome = outcome
 	msg.err = err
@@ -237,7 +240,7 @@ func (msg *localConnectionMsgRunTxn) Exec() (bool, error) {
 }
 
 // txn must be root in its segment
-func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *utils.BinaryBackoffEngine, activeRMs ...common.RMId) (*utils.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *binarybackoff.BinaryBackoffEngine, activeRMs ...common.RMId) (*txnreader.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunTxn{
 		LocalConnection: lc,
 		txn:             txn,

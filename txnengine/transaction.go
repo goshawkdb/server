@@ -9,7 +9,9 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/utils"
-	vc "goshawkdb.io/server/vectorclock"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	vc "goshawkdb.io/server/utils/vectorclock"
 	"sync/atomic"
 	"time"
 )
@@ -27,7 +29,7 @@ type Txn struct {
 	writes       []*common.VarUUId
 	localActions []localAction
 	voter        bool
-	TxnReader    *utils.TxnReader
+	TxnReader    *txnreader.TxnReader
 	exe          *dispatcher.Executor
 	vd           *VarDispatcher
 	stateChange  TxnLocalStateChange
@@ -58,7 +60,7 @@ type localAction struct {
 	ballot          *Ballot
 	frame           *frame
 	readVsn         *common.TxnId
-	writeTxnActions *utils.TxnActions
+	writeTxnActions *txnreader.TxnActions
 	writeAction     *msgs.Action
 	createPositions *common.Positions
 	roll            bool
@@ -89,7 +91,7 @@ func (action *localAction) VoteDeadlock(clock *vc.VectorClockMutable) {
 	}
 }
 
-func (action *localAction) VoteBadRead(clock *vc.VectorClockMutable, txnId *common.TxnId, actions *utils.TxnActions) {
+func (action *localAction) VoteBadRead(clock *vc.VectorClockMutable, txnId *common.TxnId, actions *txnreader.TxnActions) {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadBallot(txnId, actions)
 		action.voteCast(action.ballot, true)
@@ -145,7 +147,7 @@ func (action localAction) String() string {
 	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
 }
 
-func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *utils.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
 	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
 	txnActions := reader.Actions(true)
 	txn.localActions = make([]localAction, varCaps.Len())
@@ -189,7 +191,7 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 	}
 }
 
-func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *utils.TxnReader, logger log.Logger) *Txn {
+func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, logger log.Logger) *Txn {
 	txnId := reader.Id
 	actions := reader.Actions(true)
 	actionsList := actions.Actions()
@@ -218,7 +220,7 @@ func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnL
 	return txn
 }
 
-func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action_List, actions *utils.TxnActions) {
+func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action_List, actions *txnreader.TxnActions) {
 	localActions := make([]localAction, actionIndices.Len())
 	txn.localActions = localActions
 	var action *localAction
@@ -350,7 +352,7 @@ func (txn *Txn) String() string {
 	return txn.Id.String()
 }
 
-func (txn *Txn) Status(sc *utils.StatusConsumer) {
+func (txn *Txn) Status(sc *status.StatusConsumer) {
 	sc.Emit(txn.Id.String())
 	sc.Emit(fmt.Sprintf("- Local Actions: %v", txn.localActions))
 	sc.Emit(fmt.Sprintf("- Current State: %v", txn.currentState))

@@ -13,6 +13,9 @@ import (
 	cconn "goshawkdb.io/server/types/connections/client"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"math/rand"
 	"time"
 )
@@ -24,7 +27,7 @@ type ClientTxnSubmitter struct {
 	versionCache *versionCache
 	txnLive      bool
 	rng          *rand.Rand
-	backoff      *utils.BinaryBackoffEngine
+	backoff      *binarybackoff.BinaryBackoffEngine
 	metrics      *cconn.ClientTxnMetrics
 }
 
@@ -36,12 +39,12 @@ func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.
 		versionCache:       NewVersionCache(roots, namespace),
 		txnLive:            false,
 		rng:                rng,
-		backoff:            utils.NewBinaryBackoffEngine(rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+		backoff:            binarybackoff.NewBinaryBackoffEngine(rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 		metrics:            metrics,
 	}
 }
 
-func (cts *ClientTxnSubmitter) Status(sc *utils.StatusConsumer) {
+func (cts *ClientTxnSubmitter) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("ClientTxnSubmitter: txnLive? %v", cts.txnLive))
 	cts.SimpleTxnSubmitter.Status(sc.Fork())
 	sc.Join()
@@ -70,7 +73,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	cts.backoff.Shrink(server.SubmissionMinSubmitDelay)
 
 	var cont TxnCompletionConsumer
-	cont = func(txn *utils.TxnReader, outcome *msgs.Outcome, err error) error {
+	cont = func(txn *txnreader.TxnReader, outcome *msgs.Outcome, err error) error {
 		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
 			return continuation(nil, err)
@@ -137,7 +140,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, ctxnCap, curTxnId, cont, cts.backoff, false, cts.versionCache)
 }
 
-func (cts *ClientTxnSubmitter) addCreatesToCache(txn *utils.TxnReader) {
+func (cts *ClientTxnSubmitter) addCreatesToCache(txn *txnreader.TxnReader) {
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)

@@ -9,13 +9,15 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/utils"
-	"goshawkdb.io/server/vectorclock"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	"goshawkdb.io/server/utils/vectorclock"
 	"sort"
 )
 
 type BallotAccumulator struct {
 	logger         log.Logger
-	txn            *utils.TxnReader
+	txn            *txnreader.TxnReader
 	vUUIdToBallots map[common.VarUUId]*varBallot
 	outcome        *outcomeEqualId
 	incompleteVars int
@@ -26,7 +28,7 @@ type BallotAccumulator struct {
 // paxos instance namespace is {rmId,varId}. So for each var, we
 // expect to see ballots from fInc distinct rms.
 
-func NewBallotAccumulator(txn *utils.TxnReader, logger log.Logger) *BallotAccumulator {
+func NewBallotAccumulator(txn *txnreader.TxnReader, logger log.Logger) *BallotAccumulator {
 	actions := txn.Actions(true).Actions()
 	ba := &BallotAccumulator{
 		logger:         logger,
@@ -86,7 +88,7 @@ type rmBallot struct {
 	roundNumber  paxosNumber
 }
 
-func BallotAccumulatorFromData(txn *utils.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
+func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
 	ba := NewBallotAccumulator(txn, logger)
 	ba.outcome = outcome
 
@@ -118,7 +120,7 @@ func BallotAccumulatorFromData(txn *utils.TxnReader, outcome *outcomeEqualId, in
 
 // For every vUUId involved in this txn, we should see fInc * ballots:
 // one from each RM voting for each vUUId.
-func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *utils.TxnReader) *outcomeEqualId {
+func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) *outcomeEqualId {
 	ba.txn = ba.txn.Combine(txn)
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
@@ -250,7 +252,7 @@ func (ba *BallotAccumulator) AddInstancesToSeg(seg *capn.Segment) msgs.Instances
 	return instances
 }
 
-func (ba *BallotAccumulator) Status(sc *utils.StatusConsumer) {
+func (ba *BallotAccumulator) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Ballot Accumulator for %v", ba.txn.Id))
 	sc.Emit(fmt.Sprintf("- incomplete var count: %v", ba.incompleteVars))
 	sc.Emit(fmt.Sprintf("- retry? %v", ba.txn.Txn.Retry()))
@@ -353,7 +355,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 	badRead := rmBal.ballot.VoteCap.AbortBadRead()
 	clock := rmBal.ballot.Clock
 	txnId := common.MakeTxnId(badRead.TxnId())
-	actions := utils.TxnActionsFromData(badRead.TxnActions(), true).Actions()
+	actions := txnreader.TxnActionsFromData(badRead.TxnActions(), true).Actions()
 
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)

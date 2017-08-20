@@ -11,6 +11,9 @@ import (
 	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -27,7 +30,7 @@ type Acceptor struct {
 	acceptorDeleteFromDisk
 }
 
-func NewAcceptor(txn *utils.TxnReader, am *AcceptorManager) *Acceptor {
+func NewAcceptor(txn *txnreader.TxnReader, am *AcceptorManager) *Acceptor {
 	a := &Acceptor{
 		txnId:           txn.Id,
 		acceptorManager: am,
@@ -39,7 +42,7 @@ func NewAcceptor(txn *utils.TxnReader, am *AcceptorManager) *Acceptor {
 
 func AcceptorFromData(txnId *common.TxnId, outcome *msgs.Outcome, sendToAll bool, instances *msgs.InstancesForVar_List, am *AcceptorManager) *Acceptor {
 	outcomeEqualId := (*outcomeEqualId)(outcome)
-	txn := utils.TxnReaderFromData(outcome.Txn())
+	txn := txnreader.TxnReaderFromData(outcome.Txn())
 	a := NewAcceptor(txn, am)
 	a.ballotAccumulator = BallotAccumulatorFromData(txn, outcomeEqualId, instances, a)
 	a.outcome = outcomeEqualId
@@ -57,7 +60,7 @@ func (a *Acceptor) Log(keyvals ...interface{}) error {
 	return a.logger.Log(keyvals...)
 }
 
-func (a *Acceptor) init(txn *utils.TxnReader) {
+func (a *Acceptor) init(txn *txnreader.TxnReader) {
 	a.acceptorReceiveBallots.init(a, txn)
 	a.acceptorWriteToDisk.init(a, txn)
 	a.acceptorAwaitLocallyComplete.init(a, txn)
@@ -76,7 +79,7 @@ func (a *Acceptor) Start() {
 	a.currentState.start()
 }
 
-func (a *Acceptor) Status(sc *utils.StatusConsumer) {
+func (a *Acceptor) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Acceptor for %v", a.txnId))
 	sc.Emit(fmt.Sprintf("- Born: %v", a.birthday))
 	sc.Emit(fmt.Sprintf("- Created from disk: %v", a.createdFromDisk))
@@ -111,7 +114,7 @@ func (a *Acceptor) nextState(requestedState acceptorStateMachineComponent) {
 }
 
 type acceptorStateMachineComponent interface {
-	init(*Acceptor, *utils.TxnReader)
+	init(*Acceptor, *txnreader.TxnReader)
 	start()
 	acceptorStateMachineComponentWitness()
 }
@@ -122,13 +125,13 @@ type acceptorReceiveBallots struct {
 	*Acceptor
 	ballotAccumulator     *BallotAccumulator
 	outcome               *outcomeEqualId
-	txn                   *utils.TxnReader
+	txn                   *txnreader.TxnReader
 	txnSubmitter          common.RMId
 	txnSubmitterBootCount uint32
-	txnSender             *utils.RepeatingSender
+	txnSender             *senders.RepeatingSender
 }
 
-func (arb *acceptorReceiveBallots) init(a *Acceptor, txn *utils.TxnReader) {
+func (arb *acceptorReceiveBallots) init(a *Acceptor, txn *txnreader.TxnReader) {
 	arb.Acceptor = a
 	arb.ballotAccumulator = NewBallotAccumulator(txn, arb.Acceptor)
 	arb.txn = txn
@@ -171,7 +174,7 @@ func (arb *acceptorReceiveBallots) String() string {
 	return "acceptorReceiveBallots"
 }
 
-func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *utils.TxnReader) {
+func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) {
 	// We can accept a ballot from instanceRMId at any point up until
 	// we've received a TLC from instanceRMId (see notes in ALC re
 	// retry). Note an acceptor can change it's mind!
@@ -223,7 +226,7 @@ func (arb *acceptorReceiveBallots) createTxnSender() (bool, error) {
 			}
 		}
 		utils.DebugLog(arb, "debug", "Starting extra txn sender.", "actives", activeRMs)
-		arb.txnSender = utils.NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
+		arb.txnSender = senders.NewRepeatingSender(common.SegToBytes(seg), activeRMs...)
 		arb.acceptorManager.AddServerConnectionSubscriber(arb.txnSender)
 	}
 	return false, nil
@@ -238,7 +241,7 @@ type acceptorWriteToDisk struct {
 	sendToAllOnDisk bool
 }
 
-func (awtd *acceptorWriteToDisk) init(a *Acceptor, txn *utils.TxnReader) {
+func (awtd *acceptorWriteToDisk) init(a *Acceptor, txn *txnreader.TxnReader) {
 	awtd.Acceptor = a
 }
 
@@ -308,7 +311,7 @@ type acceptorAwaitLocallyComplete struct {
 	txnSubmitter  common.RMId
 }
 
-func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *utils.TxnReader) {
+func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *txnreader.TxnReader) {
 	aalc.Acceptor = a
 	aalc.tlcsReceived = make(map[common.RMId]types.EmptyStruct, aalc.ballotAccumulator.txn.Txn.Allocations().Len())
 	aalc.txnSubmitter = txn.Id.RMId(a.acceptorManager.RMId)
@@ -428,7 +431,7 @@ type acceptorDeleteFromDisk struct {
 	*Acceptor
 }
 
-func (adfd *acceptorDeleteFromDisk) init(a *Acceptor, txn *utils.TxnReader) {
+func (adfd *acceptorDeleteFromDisk) init(a *Acceptor, txn *txnreader.TxnReader) {
 	adfd.Acceptor = a
 }
 
@@ -470,7 +473,7 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() (bool, error) {
 		utils.DebugLog(adfd, "debug", "Sending TGC.", "destination", adfd.tgcRecipients)
 		// If this gets lost it doesn't matter - the TLC will eventually
 		// get resent and we'll then send out another TGC.
-		utils.NewOneShotSender(adfd.logger, common.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
+		senders.NewOneShotSender(adfd.logger, common.SegToBytes(seg), adfd.acceptorManager, adfd.tgcRecipients...)
 	}
 	return false, nil
 }

@@ -16,6 +16,8 @@ import (
 	"goshawkdb.io/server/types/connectionmanager"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/txnreader"
 	"math/rand"
 	"time"
 )
@@ -123,7 +125,7 @@ func (msg *configPublisherMsgTopologyChanged) Exec() (bool, error) {
 		root:            root,
 		topology:        msg.topology,
 		json:            json,
-		backoff:         utils.NewBinaryBackoffEngine(msg.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+		backoff:         binarybackoff.NewBinaryBackoffEngine(msg.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 	}
 	return msg.publishing.Exec()
 }
@@ -143,7 +145,7 @@ type configPublisherMsg struct {
 	root     *configuration.Root
 	topology *configuration.Topology
 	json     []byte
-	backoff  *utils.BinaryBackoffEngine
+	backoff  *binarybackoff.BinaryBackoffEngine
 }
 
 func (msg *configPublisherMsg) Exec() (bool, error) {
@@ -215,7 +217,7 @@ func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool,
 	var value []byte
 	for idx, l := 0, updates.Len(); idx < l && !found; idx++ {
 		update := updates.At(idx)
-		updateActions := utils.TxnActionsFromData(update.Actions(), true).Actions()
+		updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 		for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
 			updateAction := updateActions.At(idy)
 			if found = bytes.Equal(msg.root.VarUUId[:], updateAction.VarId()); found {

@@ -1,10 +1,11 @@
-package utils
+package senders
 
 import (
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
 )
 
 type OneShotSender struct {
@@ -25,7 +26,7 @@ func NewOneShotSender(logger log.Logger, msg []byte, connPub sconn.ServerConnect
 		connPub:   connPub,
 		remaining: remaining,
 	}
-	DebugLog(oss.logger, "debug", "Adding one shot sender.", "recipients", recipients)
+	utils.DebugLog(oss.logger, "debug", "Adding one shot sender.", "recipients", recipients)
 	connPub.AddServerConnectionSubscriber(oss)
 	return oss
 }
@@ -38,7 +39,7 @@ func (oss *OneShotSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnec
 		}
 	}
 	if len(oss.remaining) == 0 {
-		DebugLog(oss.logger, "debug", "Removing one shot sender.")
+		utils.DebugLog(oss.logger, "debug", "Removing one shot sender.")
 		oss.connPub.RemoveServerConnectionSubscriber(oss)
 	}
 }
@@ -51,7 +52,7 @@ func (oss *OneShotSender) ConnectionEstablished(conn *sconn.ServerConnection, co
 		delete(oss.remaining, conn.RMId)
 		conn.Send(oss.msg)
 		if len(oss.remaining) == 0 {
-			DebugLog(oss.logger, "debug", "Removing one shot sender.")
+			utils.DebugLog(oss.logger, "debug", "Removing one shot sender.")
 			oss.connPub.RemoveServerConnectionSubscriber(oss)
 		}
 	}

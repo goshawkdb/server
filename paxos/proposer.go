@@ -11,6 +11,9 @@ import (
 	eng "goshawkdb.io/server/txnengine"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"os"
 	"time"
 )
@@ -48,7 +51,7 @@ type Proposer struct {
 // we receive outcomes before the txn itself, we do not vote. So you
 // can be active, but not a voter.
 
-func NewProposer(pm *ProposerManager, txn *utils.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
+func NewProposer(pm *ProposerManager, txn *txnreader.TxnReader, mode ProposerMode, topology *configuration.Topology) *Proposer {
 	txnCap := txn.Txn
 	p := &Proposer{
 		proposerManager: pm,
@@ -139,7 +142,7 @@ func (p *Proposer) Start() {
 	p.currentState.start()
 }
 
-func (p *Proposer) Status(sc *utils.StatusConsumer) {
+func (p *Proposer) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Proposer for %v", p.txnId))
 	sc.Emit(fmt.Sprintf("- Born: %v", p.birthday))
 	sc.Emit(fmt.Sprintf("- Created from disk: %v", p.createdFromDisk))
@@ -374,7 +377,7 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 			// goes missing, if the acceptor sends us further 2Bs then
 			// we'll send back further TLCs from proposer manager. So the
 			// use of OSS here is correct.
-			utils.NewOneShotSender(pro.Proposer, tlcMsg, pro.proposerManager, knownAcceptors...)
+			senders.NewOneShotSender(pro.Proposer, tlcMsg, pro.proposerManager, knownAcceptors...)
 			return
 		}
 	}
@@ -415,14 +418,14 @@ func (palc *proposerAwaitLocallyComplete) start() {
 		defer func() {
 			if r := recover(); r != nil {
 				palc.Log("msg", "Recovered!", "error", fmt.Sprint(r), "outcomeWhich", palc.outcome.Which())
-				sc := utils.NewStatusConsumer()
+				sc := status.NewStatusConsumer()
 				palc.outcomeAccumulator.Status(sc)
 				str := sc.Wait()
 				os.Stderr.WriteString(str + "\n")
 				panic("repanic")
 			}
 		}()
-		txn := utils.TxnReaderFromData(palc.outcome.Txn())
+		txn := txnreader.TxnReaderFromData(palc.outcome.Txn())
 		pm := palc.proposerManager
 		palc.txn = eng.TxnFromReader(pm.Exe, pm.VarDispatcher, palc.Proposer, pm.RMId, txn, palc.Proposer)
 		palc.txn.Start(false)
@@ -494,7 +497,7 @@ func (palc *proposerAwaitLocallyComplete) writeDone() (bool, error) {
 
 type proposerReceiveGloballyComplete struct {
 	*Proposer
-	tlcSender        *utils.RepeatingSender
+	tlcSender        *senders.RepeatingSender
 	locallyCompleted bool
 }
 
@@ -507,7 +510,7 @@ func (prgc *proposerReceiveGloballyComplete) start() {
 		prgc.locallyCompleted = true
 		prgc.mode = proposerTLCSender
 		tlcMsg := MakeTxnLocallyCompleteMsg(prgc.txnId)
-		prgc.tlcSender = utils.NewRepeatingSender(tlcMsg, prgc.acceptors...)
+		prgc.tlcSender = senders.NewRepeatingSender(tlcMsg, prgc.acceptors...)
 		utils.DebugLog(prgc, "debug", "Adding TLC Sender.", "acceptors", prgc.acceptors)
 		prgc.proposerManager.AddServerConnectionSubscriber(prgc.tlcSender)
 		prgc.proposerManager.TxnLocallyComplete(prgc.Proposer)

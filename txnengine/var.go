@@ -9,7 +9,10 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/utils"
-	vc "goshawkdb.io/server/vectorclock"
+	"goshawkdb.io/server/utils/poisson"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	vc "goshawkdb.io/server/utils/vectorclock"
 	"math/rand"
 	"time"
 )
@@ -22,7 +25,7 @@ type VarWriteSubscriber struct {
 type Var struct {
 	UUId            *common.VarUUId
 	positions       *common.Positions
-	poisson         *utils.Poisson
+	poisson         *poisson.Poisson
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
@@ -55,7 +58,7 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
 	}).ResultError(); err == nil && result != nil {
-		txn := utils.TxnReaderFromData(result.([]byte))
+		txn := txnreader.TxnReaderFromData(result.([]byte))
 		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
 		v.curFrameOnDisk = v.curFrame
 		v.varCap = &varCap
@@ -85,7 +88,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	return &Var{
 		UUId:            uuid,
 		positions:       nil,
-		poisson:         utils.NewPoisson(),
+		poisson:         poisson.NewPoisson(),
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
@@ -341,7 +344,7 @@ func (v *Var) applyToSelf(fun func()) {
 	})
 }
 
-func (v *Var) Status(sc *utils.StatusConsumer) {
+func (v *Var) Status(sc *status.StatusConsumer) {
 	sc.Emit(v.UUId.String())
 	if v.positions == nil {
 		sc.Emit("- Positions: unknown")

@@ -8,6 +8,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 )
 
 // OutcomeAccumulator groups together all the different outcomes we've
@@ -213,7 +214,7 @@ func (oa *OutcomeAccumulator) IsAllAborts() (acceptors []common.RMId) {
 	return acceptors
 }
 
-func (oa *OutcomeAccumulator) Status(sc *utils.StatusConsumer) {
+func (oa *OutcomeAccumulator) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- acceptor outcomes len: %v", len(oa.acceptorOutcomes)))
 	sc.Emit(fmt.Sprintf("- unique outcomes: %v", oa.allKnownOutcomes))
 	sc.Emit(fmt.Sprintf("- outcome decided? %v", oa.winningOutcome != nil))

@@ -12,7 +12,10 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
-	vc "goshawkdb.io/server/vectorclock"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	vc "goshawkdb.io/server/utils/vectorclock"
 	"sort"
 	"time"
 )
@@ -25,20 +28,20 @@ type frame struct {
 	child            *frame
 	v                *Var
 	frameTxnId       *common.TxnId
-	frameTxnActions  *utils.TxnActions
+	frameTxnActions  *txnreader.TxnActions
 	frameTxnClock    *vc.VectorClockMutable // the clock (including merge missing) of the frame txn
 	frameWritesClock *vc.VectorClockMutable // max elems from all writes of all txns in parent frame
 	readVoteClock    *vc.VectorClockMutable
 	positionsFound   bool
 	mask             *vc.VectorClockMutable
-	scheduleBackoff  *utils.BinaryBackoffEngine
+	scheduleBackoff  *binarybackoff.BinaryBackoffEngine
 	frameOpen
 	frameClosed
 	frameErase
 	currentState frameStateMachineComponent
 }
 
-func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *utils.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
+func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
 	f := &frame{
 		parent:           parent,
 		v:                v,
@@ -50,7 +53,7 @@ func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *utils.TxnA
 	}
 	if parent == nil {
 		f.mask = vc.NewVectorClock().AsMutable()
-		f.scheduleBackoff = utils.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
+		f.scheduleBackoff = binarybackoff.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
 	} else {
 		f.mask = parent.mask
 		f.scheduleBackoff = parent.scheduleBackoff
@@ -88,7 +91,7 @@ func (f *frame) String() string {
 	return fmt.Sprintf("%v Frame %v (%v) r%v w%v", f.v.UUId, f.frameTxnId, f.frameTxnClock.Len(), f.readVoteClock, f.writeVoteClock)
 }
 
-func (f *frame) Status(sc *utils.StatusConsumer) {
+func (f *frame) Status(sc *status.StatusConsumer) {
 	sc.Emit(f.String())
 	readHistogram := make([]int, 4)
 	for node := f.reads.First(); node != nil; node = node.Next() {

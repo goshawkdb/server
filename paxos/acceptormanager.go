@@ -20,6 +20,10 @@ import (
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/proxy"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -46,7 +50,7 @@ type AcceptorMetrics struct {
 
 func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm connectionmanager.ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {
 	am := &AcceptorManager{
-		ServerConnectionPublisher: utils.NewServerConnectionPublisherProxy(exe, cm, logger),
+		ServerConnectionPublisher: proxy.NewServerConnectionPublisherProxy(exe, cm, logger),
 		logger:    logger, // acceptorDispatcher creates the context for us
 		RMId:      rmId,
 		DB:        db,
@@ -80,7 +84,7 @@ func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceI
 	}
 }
 
-func (am *AcceptorManager) ensureAcceptor(txn *utils.TxnReader) *Acceptor {
+func (am *AcceptorManager) ensureAcceptor(txn *txnreader.TxnReader) *Acceptor {
 	txnId := txn.Id
 	aInst, found := am.acceptors[*txnId]
 	switch {
@@ -245,10 +249,10 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 	}
 
 	// The proposal senders are repeating, so this use of OSS is fine.
-	utils.NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
+	senders.NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
 }
 
-func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *utils.TxnReader, twoATxnVotes msgs.TwoATxnVotes) {
+func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *txnreader.TxnReader, twoATxnVotes msgs.TwoATxnVotes) {
 	instanceRMId := common.RMId(twoATxnVotes.RmId())
 	txnId := txn.Id
 	utils.DebugLog(am.logger, "debug", "2A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
@@ -296,7 +300,7 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *utils.T
 		}
 		utils.DebugLog(am.logger, "debug", "Sending 2B failures.", "TxnId", txnId, "recipient", sender, "instance", instanceRMId)
 		// The proposal senders are repeating, so this use of OSS is fine.
-		utils.NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
+		senders.NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
 	}
 }
 
@@ -319,7 +323,7 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		utils.DebugLog(am.logger, "debug", "Sending single TGC.", "TxnId", txnId, "recipient", sender)
 		// Use of OSS here is ok because this is the default action on
 		// not finding state.
-		utils.NewOneShotSender(am.logger, common.SegToBytes(seg), am, sender)
+		senders.NewOneShotSender(am.logger, common.SegToBytes(seg), am, sender)
 	}
 }
 
@@ -347,7 +351,7 @@ func (am *AcceptorManager) AcceptorFinished(txnId *common.TxnId) {
 	}
 }
 
-func (am *AcceptorManager) Status(sc *utils.StatusConsumer) {
+func (am *AcceptorManager) Status(sc *status.StatusConsumer) {
 	s := sc.Fork()
 	s.Emit(fmt.Sprintf("- Live Instances: %v", len(am.instances)))
 	for instId, inst := range am.instances {
@@ -460,7 +464,7 @@ func (i *instance) TwoATxnVotesReceived(roundNumber paxosNumber, ballot *eng.Bal
 	}
 }
 
-func (i *instance) status(instId instanceId, sc *utils.StatusConsumer) {
+func (i *instance) status(instId instanceId, sc *status.StatusConsumer) {
 	sc.Emit(instId.String())
 	sc.Emit(fmt.Sprintf("- Promise Number: %v", i.promiseNum))
 	sc.Emit(fmt.Sprintf("- Accepted Number: %v", i.acceptedNum))

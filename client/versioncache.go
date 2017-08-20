@@ -7,10 +7,10 @@ import (
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
-	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/types"
-	"goshawkdb.io/server/utils"
-	"goshawkdb.io/server/vectorclock"
+	ch "goshawkdb.io/server/utils/consistenthash"
+	"goshawkdb.io/server/utils/txnreader"
+	"goshawkdb.io/server/utils/vectorclock"
 )
 
 type versionCache struct {
@@ -164,7 +164,7 @@ func (vc *versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability
 	return true
 }
 
-func (vc *versionCache) UpdateFromCommit(txn *utils.TxnReader, outcome *msgs.Outcome) {
+func (vc *versionCache) UpdateFromCommit(txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	txnId := txn.Id
 	clock := vectorclock.VectorClockFromData(outcome.Commit(), false)
 	actions := txn.Actions(true).Actions()
@@ -248,7 +248,7 @@ func (vc *versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph
 		updateCap := updatesCap.At(idx)
 		txnId := common.MakeTxnId(updateCap.TxnId())
 		clock := vectorclock.VectorClockFromData(updateCap.Clock(), true)
-		actionsCap := utils.TxnActionsFromData(updateCap.Actions(), true).Actions()
+		actionsCap := txnreader.TxnActionsFromData(updateCap.Actions(), true).Actions()
 
 		for idy, m := 0, actionsCap.Len(); idy < m; idy++ {
 			actionCap := actionsCap.At(idy)

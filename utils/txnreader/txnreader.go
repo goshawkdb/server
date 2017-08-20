@@ -1,4 +1,4 @@
-package utils
+package txnreader
 
 import (
 	"fmt"

@@ -1,4 +1,4 @@
-package utils
+package poisson
 
 import (
 	"goshawkdb.io/server"
