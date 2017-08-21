@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
@@ -28,7 +27,9 @@ func (task *installTargetOld) init(base *transmogrificationTask) {
 
 func (task *installTargetOld) isValid() bool {
 	active := task.activeTopology
-	return active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version
+	return active != nil &&
+		active.Version < task.targetConfig.Version &&
+		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
 }
 
 func (task *installTargetOld) announce() {
@@ -70,7 +71,7 @@ func (task *installTargetOld) Tick() (bool, error) {
 		task.runTxnMsg = &topologyTransmogrifierMsgCreateRoots{
 			transmogrificationTask: task.transmogrificationTask,
 			task:           task,
-			backoff:        binarybackoff.NewBinaryBackoffEngine(task.rng, server.SubmissionMinSubmitDelay, time.Duration(len(task.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+			backoff:        binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
 			rootsRequired:  rootsRequired,
 			targetTopology: targetTopology,
 			active:         active,

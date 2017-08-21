@@ -15,7 +15,12 @@ func (task *installCompletion) init(base *transmogrificationTask) {
 
 func (task *installCompletion) isValid() bool {
 	active := task.activeTopology
-	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version
+	return active != nil &&
+		active.NextConfiguration != nil &&
+		active.NextConfiguration.Version == task.targetConfig.Version &&
+		active.NextConfiguration.InstalledOnNew &&
+		active.NextConfiguration.QuietRMIds[task.self] &&
+		len(active.NextConfiguration.Pending) == 0
 }
 
 func (task *installCompletion) announce() {

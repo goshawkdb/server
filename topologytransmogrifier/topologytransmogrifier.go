@@ -3,7 +3,6 @@ package topologytransmogrifier
 import (
 	"errors"
 	"fmt"
-	mdb "github.com/msackman/gomdb"
 	"goshawkdb.io/server/configuration"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
@@ -43,24 +42,7 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 
 	if tt.currentTask == nil {
 		if next := topology.NextConfiguration; next == nil {
-			localHost, remoteHosts, err := tt.activeTopology.LocalRemoteHosts(tt.listenPort)
-			if err != nil {
-				return false, err
-			}
-			tt.installTopology(topology, nil, localHost, remoteHosts)
-			tt.inner.Logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.self)
-
-			for version := range tt.migrations {
-				if version <= topology.Version {
-					delete(tt.migrations, version)
-				}
-			}
-
-			_, err = tt.db.WithEnv(func(env *mdb.Env) (interface{}, error) {
-				return nil, env.SetFlags(mdb.NOSYNC, topology.NoSync)
-			}).ResultError()
-			return false, err
-
+			return false, nil
 		} else {
 			return false, tt.setTarget(next)
 		}

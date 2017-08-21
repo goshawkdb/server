@@ -19,7 +19,9 @@ func (task *installTargetNew) init(base *transmogrificationTask) {
 
 func (task *installTargetNew) isValid() bool {
 	active := task.activeTopology
-	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+	return active != nil &&
+		active.NextConfiguration != nil &&
+		active.NextConfiguration.Version == task.targetConfig.Version &&
 		!active.NextConfiguration.InstalledOnNew
 }
 

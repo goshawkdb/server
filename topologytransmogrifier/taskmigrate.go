@@ -16,7 +16,11 @@ func (task *migrate) init(base *transmogrificationTask) {
 
 func (task *migrate) isValid() bool {
 	active := task.activeTopology
-	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+	return active != nil &&
+		active.NextConfiguration != nil &&
+		active.NextConfiguration.Version == task.targetConfig.Version &&
+		active.NextConfiguration.InstalledOnNew &&
+		active.NextConfiguration.QuietRMIds[task.self] &&
 		len(active.NextConfiguration.Pending) > 0
 }
 

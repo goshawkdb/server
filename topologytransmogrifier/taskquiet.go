@@ -20,7 +20,10 @@ func (task *quiet) init(base *transmogrificationTask) {
 
 func (task *quiet) isValid() bool {
 	active := task.activeTopology
-	return active.NextConfiguration != nil && active.NextConfiguration.Version == task.targetConfig.Version &&
+	return active != nil &&
+		active.NextConfiguration != nil &&
+		active.NextConfiguration.Version == task.targetConfig.Version &&
+		active.NextConfiguration.InstalledOnNew &&
 		!active.NextConfiguration.QuietRMIds[task.self]
 }
 

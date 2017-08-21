@@ -112,7 +112,7 @@ func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
 		// either it's commit or rerun-abort-badread in which case we
 		// should receive the updated topology via the subscriber.
 		msg.EnqueueFuncAsync(func() (bool, error) {
-			if msg.runTxnMsg == msg {
+			if msg.currentTask == msg.task && msg.runTxnMsg == msg {
 				msg.runTxnMsg = nil
 			}
 			return false, nil
@@ -152,6 +152,7 @@ func (msg *topologyTransmogrifierMsgCreateRoots) runTxn() {
 		msg.targetTopology.RootVarUUIds = append(msg.targetTopology.RootVarUUIds, roots...)
 		msg.EnqueueFuncAsync(func() (bool, error) {
 			if msg.currentTask == msg.task && msg.runTxnMsg == msg {
+				msg.runTxnMsg = nil
 				return msg.task.installTargetOld(msg.targetTopology, msg.active, msg.passive)
 			}
 			return false, nil

@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
+	mdb "github.com/msackman/gomdb"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	sconn "goshawkdb.io/server/types/connections/server"
@@ -38,7 +38,6 @@ type transmogrificationTask struct {
 	runTxnMsg    actor.MsgExec
 
 	ensureLocalTopology
-	joinCluster
 	installTargetOld
 	installTargetNew
 	quiet
@@ -54,7 +53,6 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 	}
 	base.stages = []stage{
 		&base.ensureLocalTopology,
-		&base.joinCluster,
 		&base.installTargetOld,
 		&base.installTargetNew,
 		&base.quiet,
@@ -69,8 +67,10 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 }
 
 func (tt *transmogrificationTask) selectStage() stage {
-	for _, s := range tt.stages {
+	for idx, s := range tt.stages {
 		if s.isValid() {
+			// make sure we can't go backwards
+			tt.stages = tt.stages[idx:]
 			return s
 		}
 	}
@@ -86,15 +86,35 @@ func (tt *transmogrificationTask) Tick() (bool, error) {
 	tt.currentTask = s
 	if s == nil {
 		tt.inner.Logger.Log("msg", "Task completed.")
-		if tt.activeTopology != nil && tt.activeTopology.NextConfiguration != nil {
-			// Our own targetConfig is either reached or can't be reached
-			// given where activeTopology is. And activeTopology has its
-			// own target (NextConfiguration). So we should adopt that as
-			// a fresh new target.
-			return false, tt.setTarget(tt.activeTopology.NextConfiguration)
-		} else {
-			return false, nil
+		activeTopology := tt.activeTopology
+		if activeTopology != nil {
+			if activeTopology.NextConfiguration == nil && activeTopology.Configuration.EqualExternally(tt.targetConfig.Configuration) {
+				localHost, remoteHosts, err := tt.activeTopology.LocalRemoteHosts(tt.listenPort)
+				if err != nil {
+					return false, err
+				}
+				tt.installTopology(tt.activeTopology, nil, localHost, remoteHosts)
+				tt.inner.Logger.Log("msg", "Topology change complete.", "localhost", localHost, "RMId", tt.self)
+
+				for version := range tt.migrations {
+					if version <= tt.activeTopology.Version {
+						delete(tt.migrations, version)
+					}
+				}
+
+				_, err = tt.db.WithEnv(func(env *mdb.Env) (interface{}, error) {
+					return nil, env.SetFlags(mdb.NOSYNC, activeTopology.NoSync)
+				}).ResultError()
+
+			} else if activeTopology.NextConfiguration != nil {
+				// Our own targetConfig is either reached or can't be reached
+				// given where activeTopology is. And activeTopology has its
+				// own target (NextConfiguration). So we should adopt that as
+				// a fresh new target.
+				return false, tt.setTarget(activeTopology.NextConfiguration)
+			}
 		}
+		return false, nil
 	} else {
 		s.announce()
 		return false, nil
@@ -153,7 +173,8 @@ func (tt *transmogrificationTask) Abandon() {
 func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) {
 	tt.runTxnMsg = &topologyTransmogrifierMsgRunTransaction{
 		transmogrificationTask: tt,
-		backoff:                binarybackoff.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, time.Duration(len(tt.targetConfig.Hosts))*server.SubmissionMaxSubmitDelay),
+		backoff:                binarybackoff.NewBinaryBackoffEngine(tt.rng, 2*time.Second, time.Duration(len(tt.targetConfig.Hosts)+1)*2*time.Second),
+		txn:                    txn,
 		task:                   tt.currentTask,
 		active:                 active,
 		passive:                passive,
@@ -314,7 +335,7 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 		return nil, err
 	}
 
-	backoff := binarybackoff.NewBinaryBackoffEngine(tt.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay)
+	backoff := binarybackoff.NewBinaryBackoffEngine(tt.rng, 2*time.Second, 4*time.Second)
 	for {
 		txn := tt.createTopologyTransaction(nil, nil, 1, []common.RMId{tt.self}, nil)
 
