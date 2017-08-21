@@ -212,11 +212,21 @@ func (s *server) start() {
 
 	router := router.NewRouter(s.rmId, s.logger)
 	cm := connectionmanager.NewConnectionManager(s.rmId, s.bootCount, s.certificate, router, s.logger)
+	// this is safe because cm only uses router when it's creating new
+	// dialers, and it won't be doing that until after
+	// TopologyTransmogrifier starts up.
 	router.ConnectionManager = cm
+
 	go s.signalHandler()
+
 	localConnection := localconnection.NewLocalConnection(s.rmId, s.bootCount, cm, s.logger)
 	dispatchers := paxos.NewDispatchers(cm, s.rmId, s.bootCount, uint8(procs), db, localConnection, s.logger)
+	// same reasoning as before: this write is done before
+	// TopologyTransmogrifier starts and cm will only dial out due to a
+	// msg from TopologyTransmogrifier so there is still sufficient
+	// write barriers.
 	router.Dispatchers = dispatchers
+
 	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.rmId, db, router, cm, localConnection, s.port, nil, commandLineConfig, s.logger)
 	s.transmogrifier = transmogrifier
 	<-localEstablished
