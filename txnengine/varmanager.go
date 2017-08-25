@@ -11,6 +11,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/status"
@@ -18,7 +19,7 @@ import (
 )
 
 type VarManager struct {
-	LocalConnection
+	localconnection.LocalConnection
 	logger           log.Logger
 	Topology         *configuration.Topology
 	RMId             common.RMId
@@ -35,7 +36,7 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp topology.TopologyPublisher, db *db.Databases, lc LocalConnection, logger log.Logger) *VarManager {
+func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp topology.TopologyPublisher, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarManager {
 	vm := &VarManager{
 		LocalConnection: lc,
 		logger:          logger, // varDispatcher creates the context for us

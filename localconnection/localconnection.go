@@ -9,9 +9,9 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
-	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
+	loco "goshawkdb.io/server/types/localconnection"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/binarybackoff"
@@ -165,7 +165,7 @@ type localConnectionMsgRunClientTxn struct {
 	txn                 *cmsgs.ClientTxn
 	isTopologyTxn       bool
 	varPosMap           map[common.VarUUId]*common.Positions
-	translationCallback eng.TranslationCallback
+	translationCallback loco.TranslationCallback
 	txnReader           *txnreader.TxnReader
 	outcome             *msgs.Outcome
 	err                 error
@@ -190,7 +190,7 @@ func (msg *localConnectionMsgRunClientTxn) Exec() (bool, error) {
 	return false, msg.submitter.SubmitClientTransaction(msg.translationCallback, txn, txnId, msg.setOutcomeError, nil, msg.isTopologyTxn, nil)
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback eng.TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback loco.TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunClientTxn{
 		LocalConnection:     lc,
 		txn:                 txn,

@@ -8,6 +8,7 @@ import (
 	"goshawkdb.io/server/db"
 	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/types/localconnection"
 )
 
 type Dispatchers struct {
@@ -17,7 +18,7 @@ type Dispatchers struct {
 	ProposerDispatcher *ProposerDispatcher
 }
 
-func NewDispatchers(cm connectionmanager.ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc eng.LocalConnection, logger log.Logger) *Dispatchers {
+func NewDispatchers(cm connectionmanager.ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *Dispatchers {
 	// It actually doesn't matter at this point what order we start up
 	// the acceptors. This is because we are called from the
 	// ConnectionManager constructor, and its actor loop hasn't been

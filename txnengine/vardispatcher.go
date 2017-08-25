@@ -4,14 +4,12 @@ import (
 	"fmt"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
-	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
-	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils/status"
-	"goshawkdb.io/server/utils/txnreader"
 )
 
 type VarDispatcher struct {
@@ -19,7 +17,7 @@ type VarDispatcher struct {
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, rmId common.RMId, cm topology.TopologyPublisher, db *db.Databases, lc LocalConnection, logger log.Logger) *VarDispatcher {
+func NewVarDispatcher(count uint8, rmId common.RMId, cm topology.TopologyPublisher, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
@@ -58,11 +56,4 @@ func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarMana
 		fun(manager)
 		return false, nil
 	})
-}
-
-// TODO fix these
-type TranslationCallback func(*cmsgs.ClientAction, *msgs.Action, []common.RMId, map[common.RMId]bool) error
-type LocalConnection interface {
-	RunClientTransaction(*cmsgs.ClientTxn, bool, map[common.VarUUId]*common.Positions, TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error)
-	Status(*status.StatusConsumer)
 }

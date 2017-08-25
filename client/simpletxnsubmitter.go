@@ -10,10 +10,10 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/actor"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/binarybackoff"
 	ch "goshawkdb.io/server/utils/consistenthash"
@@ -191,7 +191,7 @@ func (sts *SimpleTxnSubmitter) SubmitTransaction(txnCap *msgs.Txn, txnId *common
 	// fmt.Printf("sts%v ", len(sts.outcomeConsumers))
 }
 
-func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback eng.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *binarybackoff.BinaryBackoffEngine, isTopologyTxn bool, vc *versionCache) error {
+func (sts *SimpleTxnSubmitter) SubmitClientTransaction(translationCallback localconnection.TranslationCallback, ctxnCap *cmsgs.ClientTxn, txnId *common.TxnId, continuation TxnCompletionConsumer, delay *binarybackoff.BinaryBackoffEngine, isTopologyTxn bool, vc *versionCache) error {
 	// Frames could attempt rolls before we have a topology.
 	if sts.topology.IsBlank() {
 		fun := func() error {
@@ -279,7 +279,7 @@ func (sts *SimpleTxnSubmitter) Shutdown(onIdle func()) {
 	}
 }
 
-func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback eng.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, isTopologyTxn bool, vc *versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
+func (sts *SimpleTxnSubmitter) clientToServerTxn(translationCallback localconnection.TranslationCallback, clientTxnCap *cmsgs.ClientTxn, topologyVersion uint32, isTopologyTxn bool, vc *versionCache) (*msgs.Txn, []common.RMId, []common.RMId, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
@@ -337,7 +337,7 @@ func (sts *SimpleTxnSubmitter) setAllocations(allocIdx int, rmIdToActionIndices 
 }
 
 // translate from client representation to server representation
-func (sts *SimpleTxnSubmitter) translateActions(translationCallback eng.TranslationCallback, outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc *versionCache) (map[common.RMId]*[]int, error) {
+func (sts *SimpleTxnSubmitter) translateActions(translationCallback localconnection.TranslationCallback, outgoingSeg *capn.Segment, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List, vc *versionCache) (map[common.RMId]*[]int, error) {
 
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
