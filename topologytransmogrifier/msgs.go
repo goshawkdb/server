@@ -15,7 +15,7 @@ type topologyTransmogrifierMsgRequestConfigChange struct {
 	config *configuration.Configuration
 }
 
-func (msg *topologyTransmogrifierMsgRequestConfigChange) Exec() (bool, error) {
+func (msg topologyTransmogrifierMsgRequestConfigChange) Exec() (bool, error) {
 	utils.DebugLog(msg.inner.Logger, "debug", "Topology change request.", "config", msg.config)
 	nonFatalErr := msg.setTarget(&configuration.NextConfiguration{Configuration: msg.config})
 	// because this is definitely not the cmd-line config, an error here is non-fatal

@@ -32,7 +32,7 @@ type TLSCapnpHandshaker struct {
 	logger            log.Logger
 	connectionNumber  uint32
 	self              common.RMId
-	bootcount         uint32
+	bootCount         uint32
 	restartable       bool
 	router            *router.Router
 	connectionManager connectionmanager.ConnectionManager
@@ -40,13 +40,13 @@ type TLSCapnpHandshaker struct {
 	serverRemote      *sconn.ServerConnection
 }
 
-func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection) *TLSCapnpHandshaker {
+func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootCount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection) *TLSCapnpHandshaker {
 	return &TLSCapnpHandshaker{
 		TLSCapnpHandshakerBase: common.NewTLSCapnpHandshakerBase(dialer),
 		logger:                 logger,
 		connectionNumber:       count,
 		self:                   rmId,
-		bootcount:              bootcount,
+		bootCount:              bootCount,
 		restartable:            count == 0,
 		router:                 router,
 		connectionManager:      cm,
@@ -274,7 +274,7 @@ func (tcs *TLSCapnpServer) makeHelloServer() *capn.Segment {
 	localHost := tcs.connectionManager.LocalHost()
 	hello.SetLocalHost(localHost)
 	hello.SetRmId(uint32(tcs.self))
-	hello.SetBootCount(tcs.bootcount)
+	hello.SetBootCount(tcs.bootCount)
 	hello.SetClusterId(tcs.topology.ClusterId)
 	hello.SetClusterUUId(tcs.topology.ClusterUUId)
 	return seg
@@ -447,7 +447,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	hello := cmsgs.NewRootHelloClientFromServer(seg)
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], tcc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.bootcount)
+	binary.BigEndian.PutUint32(namespace[4:8], tcc.TLSCapnpHandshaker.bootCount)
 	binary.BigEndian.PutUint32(namespace[8:], uint32(tcc.self))
 	tcc.namespace = namespace
 	hello.SetNamespace(namespace)
@@ -486,7 +486,7 @@ func (tcc *TLSCapnpClient) Run(conn *network.Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewClientTxnSubmitter(tcc.self, tcc.bootcount, tcc.rootsVar, tcc.namespace,
+		tcc.submitter = client.NewClientTxnSubmitter(tcc.self, tcc.bootCount, tcc.rootsVar, tcc.namespace,
 			cm, tcc.Connection, tcc.logger, metrics)
 		if err := tcc.submitter.TopologyChanged(tcc.topology); err != nil {
 			return err

@@ -186,7 +186,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writes.Len() != 0 || (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil:
+	case (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil:
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
@@ -316,7 +316,7 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddReadWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writes.Len() != 0 || fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0:
+	case fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0:
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)

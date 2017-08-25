@@ -96,6 +96,12 @@ func (r Router) Status(sc *status.StatusConsumer) {
 	sc.Join()
 }
 
+func (r Router) ShutdownSync() {
+	r.AcceptorDispatcher.ShutdownSync()
+	r.ProposerDispatcher.ShutdownSync()
+	r.VarDispatcher.ShutdownSync()
+}
+
 func (r Router) Send(b []byte) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(b)
 	if err != nil {

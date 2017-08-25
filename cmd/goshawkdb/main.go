@@ -16,9 +16,12 @@ import (
 	"goshawkdb.io/server/connectionmanager"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/localconnection"
+	ghttp "goshawkdb.io/server/network/http"
+	"goshawkdb.io/server/network/tcpcapnproto"
+	"goshawkdb.io/server/network/websocketmsgpack"
 	"goshawkdb.io/server/paxos"
 	"goshawkdb.io/server/router"
-	//	"goshawkdb.io/server/stats"
+	"goshawkdb.io/server/stats"
 	"goshawkdb.io/server/topologytransmogrifier"
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
@@ -32,8 +35,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
-	//	"sync"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -57,7 +59,7 @@ func main() {
 func newServer(logger log.Logger) (*server, error) {
 	var configFile, dataDir, certFile string
 	var port, wssPort, promPort int
-	var httpProf, noWSS, noProm, version, genClusterCert, genClientCert bool
+	var httpProf, version, genClusterCert, genClientCert bool
 
 	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
 	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
@@ -66,10 +68,8 @@ func newServer(logger log.Logger) (*server, error) {
 	flag.BoolVar(&version, "version", false, "Display version and exit.")
 	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
 	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.BoolVar(&noWSS, "noWSS", false, "Disable the WebSocket service.")
-	flag.IntVar(&wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on.")
-	flag.BoolVar(&noProm, "noPrometheus", false, "Disable the HTTP Prometheus metrics service.")
-	flag.IntVar(&promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on.")
+	flag.IntVar(&wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on (required if non-default. Set to 0 to disable WebSocket service).")
+	flag.IntVar(&promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on (required if non-default. Set to 0 to disable Prometheus metrics service).")
 	flag.BoolVar(&httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))
 	flag.Parse()
 
@@ -129,13 +129,6 @@ func newServer(logger log.Logger) (*server, error) {
 		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
 	}
 
-	if noWSS {
-		wssPort = 0
-	}
-	if noProm {
-		promPort = 0
-	}
-
 	if wssPort != 0 && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
 		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
 	}
@@ -145,16 +138,16 @@ func newServer(logger log.Logger) (*server, error) {
 	}
 
 	s := &server{
-		logger:       logger,
-		configFile:   configFile,
-		certificate:  certificate,
-		dataDir:      dataDir,
-		port:         uint16(port),
-		onShutdown:   []func(){},
-		shutdownChan: make(chan types.EmptyStruct),
-		wssPort:      uint16(wssPort),
-		promPort:     uint16(promPort),
-		httpProf:     httpProf,
+		logger:         logger,
+		configFile:     configFile,
+		certificate:    certificate,
+		dataDir:        dataDir,
+		port:           uint16(port),
+		wssPort:        uint16(wssPort),
+		promPort:       uint16(promPort),
+		httpProf:       httpProf,
+		statusEmitters: []status.StatusEmitter{},
+		onShutdown:     []func(){},
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -168,23 +161,26 @@ func newServer(logger log.Logger) (*server, error) {
 }
 
 type server struct {
-	logger            log.Logger
-	configFile        string
-	certificate       []byte
-	dataDir           string
-	port              uint16
-	wssPort           uint16
-	promPort          uint16
-	httpProf          bool
-	rmId              common.RMId
-	bootCount         uint32
-	connectionManager *connectionmanager.ConnectionManager
-	transmogrifier    *topologytransmogrifier.TopologyTransmogrifier
-	profileFile       *os.File
-	traceFile         *os.File
-	onShutdown        []func()
-	shutdownChan      chan types.EmptyStruct
-	shutdownCounter   int32
+	logger      log.Logger
+	configFile  string
+	certificate []byte
+	dataDir     string
+	port        uint16
+	wssPort     uint16
+	promPort    uint16
+	httpProf    bool
+	rmId        common.RMId
+	bootCount   uint32
+
+	lock           sync.Mutex
+	transmogrifier *topologytransmogrifier.TopologyTransmogrifier
+	statusEmitters []status.StatusEmitter
+	onShutdown     []func()
+
+	profileFile *os.File
+	traceFile   *os.File
+
+	shutdownChan chan types.EmptyStruct
 }
 
 func (s *server) start() {
@@ -202,6 +198,8 @@ func (s *server) start() {
 	}
 	runtime.GOMAXPROCS(procs)
 
+	go s.signalHandler()
+
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
 
@@ -212,86 +210,98 @@ func (s *server) start() {
 
 	router := router.NewRouter(s.rmId, s.logger)
 	cm := connectionmanager.NewConnectionManager(s.rmId, s.bootCount, s.certificate, router, s.logger)
+	s.certificate = nil
+	s.addOnShutdown(cm.ShutdownSync)
 	// this is safe because cm only uses router when it's creating new
 	// dialers, and it won't be doing that until after
 	// TopologyTransmogrifier starts up.
 	router.ConnectionManager = cm
+	s.addStatusEmitter(cm)
 
-	go s.signalHandler()
+	lc := localconnection.NewLocalConnection(s.rmId, s.bootCount, cm, s.logger)
+	// localConnection registers as a client with connectionManager, so
+	// we rely on connectionManager to do shutdown and status calls.
 
-	localConnection := localconnection.NewLocalConnection(s.rmId, s.bootCount, cm, s.logger)
-	dispatchers := paxos.NewDispatchers(cm, s.rmId, s.bootCount, uint8(procs), db, localConnection, s.logger)
+	dispatchers := paxos.NewDispatchers(cm, s.rmId, s.bootCount, uint8(procs), db, lc, s.logger)
 	// same reasoning as before: this write is done before
 	// TopologyTransmogrifier starts and cm will only dial out due to a
 	// msg from TopologyTransmogrifier so there is still sufficient
 	// write barriers.
 	router.Dispatchers = dispatchers
+	s.addStatusEmitter(router)
+	s.addOnShutdown(router.ShutdownSync)
 
-	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.rmId, db, router, cm, localConnection, s.port, nil, commandLineConfig, s.logger)
+	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.rmId, db, router, cm, lc, s.port, s, commandLineConfig, s.logger)
+	s.lock.Lock()
 	s.transmogrifier = transmogrifier
+	s.lock.Unlock()
+	s.addOnShutdown(transmogrifier.ShutdownSync)
+
 	<-localEstablished
+
+	sp := stats.NewStatsPublisher(cm, lc, s.logger)
+	s.addOnShutdown(sp.ShutdownSync)
+
+	listener, err := tcpcapnproto.NewListener(s.port, s.rmId, s.bootCount, router, cm, s.logger)
+	s.maybeShutdown(err)
+	s.addOnShutdown(listener.ShutdownSync)
+
 	s.logger.Log("msg", "Startup complete.")
-	/*
-		//cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, uint8(procs), db, s.certificate, s.port, s, commandLineConfig, s.logger)
-		s.certificate = nil
-		s.addOnShutdown(transmogrifier.ShutdownSync)
-		sp := stats.NewStatsPublisher(cm, lc, s.logger)
-		s.addOnShutdown(sp.ShutdownSync)
-		s.addOnShutdown(cm.ShutdownSync)
-		s.connectionManager = cm
-		s.transmogrifier = transmogrifier
 
-
-		listener, err := network.NewListener(s.port, cm, s.logger)
+	var wssMux, promMux *ghttp.HttpListenerWithMux
+	var wssWG, promWG *sync.WaitGroup
+	if s.wssPort != 0 {
+		wssWG := new(sync.WaitGroup)
+		if s.wssPort == s.promPort {
+			wssWG.Add(2)
+		} else {
+			wssWG.Add(1)
+		}
+		wssMux, err = ghttp.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 		s.maybeShutdown(err)
-		s.addOnShutdown(listener.ShutdownSync)
+		wssListener := websocketmsgpack.NewWebsocketListener(wssMux, s.rmId, s.bootCount, cm, s.logger)
+		s.addOnShutdown(wssListener.ShutdownSync)
+	}
 
-		var wssMux, promMux *network.HttpListenerWithMux
-		var wssWG, promWG *sync.WaitGroup
-		if s.wssPort != 0 {
-			wssWG := new(sync.WaitGroup)
-			if s.wssPort == s.promPort {
-				wssWG.Add(2)
-			} else {
-				wssWG.Add(1)
-			}
-			wssMux, err = network.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
+	if s.promPort != 0 {
+		if s.wssPort == s.promPort {
+			promWG = wssWG
+			promMux = wssMux
+		} else {
+			promWG = new(sync.WaitGroup)
+			promWG.Add(1)
+			promMux, err = ghttp.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
 			s.maybeShutdown(err)
-			wssListener := network.NewWebsocketListener(wssMux, cm, s.logger)
-			s.addOnShutdown(wssListener.ShutdownSync)
 		}
+		promListener := stats.NewPrometheusListener(promMux, s.rmId, cm, router, s.logger)
+		s.addOnShutdown(promListener.ShutdownSync)
+	}
 
-		if s.promPort != 0 {
-			if s.wssPort == s.promPort {
-				promWG = wssWG
-				promMux = wssMux
-			} else {
-				promWG = new(sync.WaitGroup)
-				promWG.Add(1)
-				promMux, err = network.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
-				s.maybeShutdown(err)
-			}
-			promListener := stats.NewPrometheusListener(promMux, cm, s.logger)
-			s.addOnShutdown(promListener.ShutdownSync)
-		}
-	*/
-	defer s.shutdown(nil)
-	<-s.shutdownChan
+	<-transmogrifier.Terminated
+	s.shutdown(nil)
+}
+
+func (s *server) addStatusEmitter(emitter status.StatusEmitter) {
+	s.lock.Lock()
+	s.statusEmitters = append(s.statusEmitters, emitter)
+	s.lock.Unlock()
 }
 
 func (s *server) addOnShutdown(f func()) {
-	if f != nil {
-		s.onShutdown = append(s.onShutdown, f)
-	}
+	s.lock.Lock()
+	s.onShutdown = append(s.onShutdown, f)
+	s.lock.Unlock()
 }
 
 func (s *server) shutdown(err error) {
 	if err != nil {
 		s.logger.Log("msg", "Shutting down due to fatal error.", "error", err)
 	}
+	s.lock.Lock()
 	for idx := len(s.onShutdown) - 1; idx >= 0; idx-- {
 		s.onShutdown[idx]()
 	}
+	s.lock.Unlock()
 	if err == nil {
 		s.logger.Log("msg", "Shutdown.")
 	} else {
@@ -349,9 +359,15 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 func (s *server) SignalShutdown() {
 	// this may fail if stdout has died
 	s.logger.Log("msg", "Shutdown requested.")
-	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
-		s.shutdownChan <- types.EmptyStructVal
+	select {
+	case <-s.shutdownChan:
+	default:
+		close(s.shutdownChan)
 	}
+}
+
+func (s *server) ShutdownSync() {
+	s.SignalShutdown()
 }
 
 func (s *server) signalStatus() {
@@ -365,7 +381,13 @@ func (s *server) signalStatus() {
 	sc.Emit(fmt.Sprintf("Configuration File: %v", s.configFile))
 	sc.Emit(fmt.Sprintf("Data Directory: %v", s.dataDir))
 	sc.Emit(fmt.Sprintf("Port: %v", s.port))
-	s.connectionManager.Status(sc)
+
+	s.lock.Lock()
+	for _, emitter := range s.statusEmitters {
+		emitter.Status(sc.Fork())
+	}
+	s.lock.Unlock()
+	sc.Join()
 }
 
 func (s *server) signalReloadConfig() {
@@ -378,7 +400,9 @@ func (s *server) signalReloadConfig() {
 		s.logger.Log("msg", "Cannot reload config due to error.", "error", err)
 		return
 	}
+	s.lock.Lock()
 	s.transmogrifier.RequestConfigurationChange(config.ToConfiguration())
+	s.lock.Unlock()
 }
 
 func (s *server) signalDumpStacks() {
@@ -471,7 +495,7 @@ func (s *server) signalHandler() {
 		case syscall.SIGQUIT:
 			s.signalDumpStacks()
 		case syscall.SIGUSR1:
-			s.signalStatus()
+			go s.signalStatus()
 		case syscall.SIGUSR2:
 			s.signalToggleCpuProfile()
 			//s.signalToggleTrace()

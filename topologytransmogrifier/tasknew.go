@@ -19,14 +19,15 @@ func (task *installTargetNew) init(base *transmogrificationTask) {
 
 func (task *installTargetNew) isValid() bool {
 	active := task.activeTopology
-	return active != nil &&
+	return active != nil && len(active.ClusterId) > 0 &&
+		task.targetConfig != nil && task.targetConfig.Configuration != nil &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
 		!active.NextConfiguration.InstalledOnNew
 }
 
 func (task *installTargetNew) announce() {
-	task.inner.Logger.Log("msg", "Attempting to install topology change to new cluster.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Attempting to install topology change to new cluster.", "configuration", task.targetConfig)
 }
 
 func (task *installTargetNew) Tick() (bool, error) {

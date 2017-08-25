@@ -20,7 +20,8 @@ func (task *quiet) init(base *transmogrificationTask) {
 
 func (task *quiet) isValid() bool {
 	active := task.activeTopology
-	return active != nil &&
+	return active != nil && len(active.ClusterId) > 0 &&
+		task.targetConfig != nil && task.targetConfig.Configuration != nil &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
 		active.NextConfiguration.InstalledOnNew &&
@@ -28,7 +29,7 @@ func (task *quiet) isValid() bool {
 }
 
 func (task *quiet) announce() {
-	task.inner.Logger.Log("msg", "Waiting for quiet.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Waiting for quiet.", "configuration", task.targetConfig)
 }
 
 func (task *quiet) Tick() (bool, error) {

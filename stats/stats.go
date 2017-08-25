@@ -125,7 +125,7 @@ func (msg *configPublisherMsgTopologyChanged) Exec() (bool, error) {
 		root:            root,
 		topology:        msg.topology,
 		json:            json,
-		backoff:         binarybackoff.NewBinaryBackoffEngine(msg.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+		backoff:         binarybackoff.NewBinaryBackoffEngine(msg.rng, 2*time.Second, 30*time.Second),
 	}
 	return msg.publishing.Exec()
 }
@@ -172,14 +172,14 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 	varPosMap := make(map[common.VarUUId]*common.Positions)
 	varPosMap[*msg.root.VarUUId] = msg.root.Positions
 
-	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json))
-
-	time.AfterFunc(2*time.Second, func() { msg.EnqueueMsg(msg) })
+	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json), "readVersion", msg.vsn)
 
 	go func() {
 		_, result, err := msg.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)
 		msg.EnqueueFuncAsync(func() (bool, error) { return msg.execPart2(result, err) })
 	}()
+	msg.backoff.Advance()
+	msg.backoff.After(func() { msg.EnqueueMsg(msg) })
 
 	return false, nil
 }
@@ -206,8 +206,7 @@ func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool,
 
 	if retryAfterDelay {
 		utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config requires resubmit.")
-		msg.backoff.Advance()
-		msg.backoff.After(func() { msg.EnqueueMsg(msg) })
+		// rely on the other part doing the re-enqueue and Exec.
 		return false, nil
 	}
 

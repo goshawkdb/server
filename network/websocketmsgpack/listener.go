@@ -24,7 +24,7 @@ type WebsocketListener struct {
 
 	parentLogger      log.Logger
 	self              common.RMId
-	bootcount         uint32
+	bootCount         uint32
 	connectionManager connectionmanager.ConnectionManager
 	mux               *ghttp.HttpListenerWithMux
 	topology          *configuration.Topology
@@ -38,11 +38,11 @@ type websocketListenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewWebsocketListener(mux *ghttp.HttpListenerWithMux, rmId common.RMId, bootcount uint32, cm connectionmanager.ConnectionManager, logger log.Logger) *WebsocketListener {
+func NewWebsocketListener(mux *ghttp.HttpListenerWithMux, rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, logger log.Logger) *WebsocketListener {
 	l := &WebsocketListener{
 		parentLogger:      logger,
 		self:              rmId,
-		bootcount:         bootcount,
+		bootCount:         bootCount,
 		connectionManager: cm,
 		mux:               mux,
 	}
@@ -153,7 +153,7 @@ func (l *websocketListenerInner) wsHandler(connNumber uint32, w http.ResponseWri
 			remoteHost:        fmt.Sprintf("%v", c.RemoteAddr()),
 			connectionNumber:  connNumber,
 			self:              l.self,
-			bootcount:         l.bootcount,
+			bootCount:         l.bootCount,
 			socket:            c,
 			peerCerts:         peerCerts,
 			roots:             roots,

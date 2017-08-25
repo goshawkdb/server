@@ -32,7 +32,7 @@ type ConnectionManager struct {
 	parentLogger                  log.Logger
 	self                          common.RMId
 	localHost                     string
-	bootcount                     uint32
+	bootCount                     uint32
 	certificate                   []byte
 	router                        *router.Router
 	nodeCertificatePrivateKeyPair *certs.NodeCertificatePrivateKeyPair
@@ -56,12 +56,12 @@ type connectionManagerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewConnectionManager(rmId common.RMId, bootcount uint32, certificate []byte, router *router.Router, logger log.Logger) *ConnectionManager {
+func NewConnectionManager(rmId common.RMId, bootCount uint32, certificate []byte, router *router.Router, logger log.Logger) *ConnectionManager {
 
 	cm := &ConnectionManager{
 		parentLogger:      logger,
 		self:              rmId,
-		bootcount:         bootcount,
+		bootCount:         bootCount,
 		certificate:       certificate,
 		router:            router,
 		servers:           make(map[string][]*connectionManagerMsgServerEstablished),
@@ -89,24 +89,14 @@ func NewConnectionManager(rmId common.RMId, bootcount uint32, certificate []byte
 		panic(err) // "impossible"
 	}
 
+	// register ourself
 	cm.ServerEstablished(&sconn.ServerConnection{
-		RMId:      rmId,
-		BootCount: bootcount,
-		Sender:    router,
+		RMId:         rmId,
+		BootCount:    bootCount,
+		Sender:       router,
+		ShutdownSync: func() {},
 	})
 
-	// this remaining initialisation work must be done in this thread
-	// because we need connectionManager actually working for this
-	// (e.g. localConnection creation requires sync calls to
-	// connectionManager!).
-	/*
-		cm.localConnection = client.NewLocalConnection(cm.self, cm.bootcount, cm, cm.parentLogger)
-		cm.Dispatchers = paxos.NewDispatchers(cm, cm.self, cm.bootcount, procs, db, cm.localConnection, cm.parentLogger)
-		transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(db, cm, cm.localConnection, port, ss, config, cm.parentLogger)
-
-		<-localEstablished
-		return cm, transmogrifier, cm.localConnection
-	*/
 	return cm
 }
 
@@ -337,7 +327,7 @@ func (cm *ConnectionManager) ClientLost(connNumber uint32, conn cconn.ClientConn
 }
 
 func (cm *ConnectionManager) GetClient(bootNumber, connNumber uint32) cconn.ClientConnection {
-	if bootNumber != cm.bootcount && bootNumber != 0 {
+	if bootNumber != cm.bootCount && bootNumber != 0 {
 		return nil
 	}
 	cm.lock.RLock()
@@ -441,7 +431,7 @@ func (msg *connectionManagerMsgSetTopology) Exec() (bool, error) {
 					Host: host,
 				},
 			}
-			tcpcapnproto.NewConnectionTCPTLSCapnpDialer(cm.self, cm.bootcount, cm.router, cm, cd.ServerConnection, cm.parentLogger)
+			tcpcapnproto.NewConnectionTCPTLSCapnpDialer(cm.self, cm.bootCount, cm.router, cm, cd.ServerConnection, cm.parentLogger)
 			if !found || len(cds) == 0 {
 				cds := make([]*connectionManagerMsgServerEstablished, 1, 2)
 				cds[0] = cd
@@ -543,7 +533,7 @@ type connectionManagerMsgStatus struct {
 
 func (msg *connectionManagerMsgStatus) Exec() (bool, error) {
 	sc := msg.sc
-	sc.Emit(fmt.Sprintf("Boot Count: %v", msg.bootcount))
+	sc.Emit(fmt.Sprintf("Boot Count: %v", msg.bootCount))
 	sc.Emit(fmt.Sprintf("Address: %v", msg.localHost))
 	sc.Emit(fmt.Sprintf("Current Topology: %v", msg.topology))
 	if msg.topology != nil && msg.topology.NextConfiguration != nil {
@@ -667,7 +657,6 @@ func (cm *connectionManagerInner) HandleShutdown(err error) bool {
 			}
 		}
 	}
-	// go cm.localConnection.ShutdownSync() // TODO - move
 	cm.lock.RLock()
 	for _, cc := range cm.connCountToClient {
 		go cc.ShutdownSync()

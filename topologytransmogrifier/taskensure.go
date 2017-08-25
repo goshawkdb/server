@@ -19,7 +19,7 @@ func (task *ensureLocalTopology) isValid() bool {
 }
 
 func (task *ensureLocalTopology) announce() {
-	task.inner.Logger.Log("msg", "Ensuring local topology.")
+	task.inner.Logger.Log("stage", "Ensuring local topology.", "configuration", task.targetConfig)
 }
 
 func (task *ensureLocalTopology) Tick() (bool, error) {
@@ -41,7 +41,7 @@ func (task *ensureLocalTopology) Tick() (bool, error) {
 			return task.fatal(errors.New("No configuration supplied and no configuration found in local store. Cannot continue."))
 		}
 
-		_, err = task.createTopologyZero(task.targetConfig)
+		_, err = task.createTopologyZero()
 		if err != nil {
 			return task.fatal(err)
 		}

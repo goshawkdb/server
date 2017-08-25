@@ -49,10 +49,11 @@ type prometheusListenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewPrometheusListener(rmId common.RMId, mux *ghttp.HttpListenerWithMux, cm connectionmanager.ConnectionManager, logger log.Logger) *PrometheusListener {
+func NewPrometheusListener(mux *ghttp.HttpListenerWithMux, rmId common.RMId, cm connectionmanager.ConnectionManager, router *router.Router, logger log.Logger) *PrometheusListener {
 	pl := &PrometheusListener{
 		self:              rmId,
 		connectionManager: cm,
+		router:            router,
 		mux:               mux,
 	}
 

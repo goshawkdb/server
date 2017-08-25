@@ -1,61 +1,63 @@
 package status
 
 import (
+	"goshawkdb.io/common"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
+type StatusEmitter interface {
+	Status(*StatusConsumer)
+}
+
 type StatusConsumer struct {
-	sync.Mutex
-	forkCount int32
-	sep       string
-	slots     [][]string
-	joined    chan struct{}
+	wg    *common.ChannelWaitGroup
+	sep   string
+	lock  sync.Mutex
+	slots [][]string
 }
 
 func NewStatusConsumer() *StatusConsumer {
+	wg := common.NewChannelWaitGroup()
+	wg.Add(1)
 	return &StatusConsumer{
-		forkCount: 1,
-		sep:       "\n ",
-		slots:     make([][]string, 0, 8),
-		joined:    make(chan struct{}),
+		wg:    wg,
+		sep:   "\n ",
+		slots: make([][]string, 0, 8),
 	}
 }
 
 func (s *StatusConsumer) Fork() *StatusConsumer {
-	atomic.AddInt32(&s.forkCount, 1)
+	s.wg.Add(1)
 	sc := NewStatusConsumer()
 	sc.sep = s.sep + " "
-	s.Lock()
+	s.lock.Lock()
 	slotIdx := len(s.slots)
 	s.slots = append(s.slots, nil)
-	s.Unlock()
+	s.lock.Unlock()
 	go func() {
-		str := s.Wait()
-		s.Lock()
+		str := sc.Wait()
+		s.lock.Lock()
 		s.slots[slotIdx] = []string{str}
-		s.Unlock()
-		s.Join()
+		s.lock.Unlock()
+		s.wg.Done()
 	}()
 	return sc
 }
 
 func (s *StatusConsumer) Join() {
-	if atomic.AddInt32(&s.forkCount, -1) == 0 {
-		close(s.joined)
-	}
+	s.wg.Done()
 }
 
 func (s *StatusConsumer) Emit(status ...string) {
-	s.Lock()
+	s.lock.Lock()
 	s.slots = append(s.slots, status)
-	s.Unlock()
+	s.lock.Unlock()
 }
 
 func (s *StatusConsumer) Wait() string {
+	s.wg.Wait()
 	buf := " "
-	<-s.joined
 	for _, strs := range s.slots {
 		buf += strings.Join(strs, s.sep) + s.sep
 	}

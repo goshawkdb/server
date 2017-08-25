@@ -2,6 +2,7 @@ package topologytransmogrifier
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	mdb "github.com/msackman/gomdb"
@@ -38,6 +39,7 @@ type transmogrificationTask struct {
 	runTxnMsg    actor.MsgExec
 
 	ensureLocalTopology
+	joinCluster
 	installTargetOld
 	installTargetNew
 	quiet
@@ -53,6 +55,7 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 	}
 	base.stages = []stage{
 		&base.ensureLocalTopology,
+		&base.joinCluster,
 		&base.installTargetOld,
 		&base.installTargetNew,
 		&base.quiet,
@@ -85,10 +88,12 @@ func (tt *transmogrificationTask) Tick() (bool, error) {
 	s := tt.selectStage()
 	tt.currentTask = s
 	if s == nil {
-		tt.inner.Logger.Log("msg", "Task completed.")
+		tt.inner.Logger.Log("msg", "Task completed.", "active", tt.activeTopology, "target", tt.targetConfig)
 		activeTopology := tt.activeTopology
 		if activeTopology != nil {
-			if activeTopology.NextConfiguration == nil && activeTopology.Configuration.EqualExternally(tt.targetConfig.Configuration) {
+			if activeTopology.NextConfiguration == nil &&
+				(tt.targetConfig == nil || tt.targetConfig.Configuration == nil ||
+					activeTopology.Version == tt.targetConfig.Version) {
 				localHost, remoteHosts, err := tt.activeTopology.LocalRemoteHosts(tt.listenPort)
 				if err != nil {
 					return false, err
@@ -180,6 +185,26 @@ func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, 
 		passive:                passive,
 	}
 	tt.EnqueueMsg(tt.runTxnMsg)
+}
+
+func (tt *transmogrificationTask) verifyClusterUUIds(clusterUUId uint64, remoteHosts []string) (bool, uint64, error) {
+	for _, host := range remoteHosts {
+		if cd, found := tt.hostToConnection[host]; found {
+			switch remoteClusterUUId := cd.ClusterUUId; {
+			case remoteClusterUUId == 0:
+				// they're joining
+			case clusterUUId == 0:
+				clusterUUId = remoteClusterUUId
+			case clusterUUId == remoteClusterUUId:
+				// all good
+			default:
+				return false, 0, errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting topology change.")
+			}
+		} else {
+			return false, 0, nil
+		}
+	}
+	return true, clusterUUId, nil
 }
 
 // NB filters out empty RMIds so no need to pre-filter.
@@ -375,8 +400,8 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 	}
 }
 
-func (tt *transmogrificationTask) createTopologyZero(config *configuration.NextConfiguration) (*configuration.Topology, error) {
-	topology := configuration.BlankTopology(config.ClusterId, tt.self, tt.listenPort, config.MaxRMCount)
+func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology, error) {
+	topology := configuration.BlankTopology()
 	txn := tt.createTopologyTransaction(nil, topology, 1, []common.RMId{tt.self}, nil)
 	txnId := topology.DBVersion
 	txn.SetId(txnId[:])

@@ -15,7 +15,6 @@ type Dispatchers struct {
 	AcceptorDispatcher *AcceptorDispatcher
 	VarDispatcher      *eng.VarDispatcher
 	ProposerDispatcher *ProposerDispatcher
-	connectionManager  connectionmanager.ConnectionManager
 }
 
 func NewDispatchers(cm connectionmanager.ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc eng.LocalConnection, logger log.Logger) *Dispatchers {
@@ -31,7 +30,6 @@ func NewDispatchers(cm connectionmanager.ConnectionManager, rmId common.RMId, bo
 		db:                 db,
 		AcceptorDispatcher: NewAcceptorDispatcher(count, rmId, cm, db, logger),
 		VarDispatcher:      eng.NewVarDispatcher(count, rmId, cm, db, lc, logger),
-		connectionManager:  cm,
 	}
 	d.ProposerDispatcher = NewProposerDispatcher(count, rmId, bootCount, cm, db, d.VarDispatcher, logger)
 

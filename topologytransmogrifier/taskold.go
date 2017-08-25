@@ -1,7 +1,6 @@
 package topologytransmogrifier
 
 import (
-	"errors"
 	"fmt"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server/configuration"
@@ -27,13 +26,14 @@ func (task *installTargetOld) init(base *transmogrificationTask) {
 
 func (task *installTargetOld) isValid() bool {
 	active := task.activeTopology
-	return active != nil &&
+	return active != nil && len(active.ClusterId) > 0 &&
+		task.targetConfig != nil && task.targetConfig.Configuration != nil &&
 		active.Version < task.targetConfig.Version &&
 		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
 }
 
 func (task *installTargetOld) announce() {
-	task.inner.Logger.Log("msg", "Attempting to install topology change target.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Attempting to install topology change target.", "configuration", task.targetConfig)
 }
 
 func (task *installTargetOld) Tick() (bool, error) {
@@ -146,7 +146,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// the -1 is because allRemoteHosts will not include localHost
 	hostsAddedList := allRemoteHosts[len(hostsRemoved)-1:]
-	allAddedFound, err := task.verifyClusterUUIds(active.ClusterUUId, hostsAddedList)
+	allAddedFound, clusterUUId, err := task.verifyClusterUUIds(active.ClusterUUId, hostsAddedList)
 	if err != nil {
 		terminate, err := task.error(err)
 		return nil, 0, terminate, err
@@ -278,7 +278,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 			rootsRequired++
 		}
 	}
-	fmt.Println(active.Roots, activeCloned.RootVarUUIds)
+
 	activeCloned.RootVarUUIds = activeCloned.RootVarUUIds[:oldNamesCount]
 
 	activeCloned.NextConfiguration = &configuration.NextConfiguration{
@@ -295,28 +295,10 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// to one with a non-nil next. Therefore, we must ensure the
 	// ClusterUUId is non-0 and consistent down the chain. Of course,
 	// the txn will ensure only one such rewrite will win.
-	activeCloned.EnsureClusterUUId(0)
+	activeCloned.EnsureClusterUUId(clusterUUId)
 	utils.DebugLog(task.inner.Logger, "debug", "Set cluster uuid.", "uuid", activeCloned.ClusterUUId)
 
 	return activeCloned, rootsRequired, false, nil
-}
-
-func (task *installTargetOld) verifyClusterUUIds(clusterUUId uint64, remoteHosts []string) (bool, error) {
-	for _, host := range remoteHosts {
-		if cd, found := task.hostToConnection[host]; found {
-			switch remoteClusterUUId := cd.ClusterUUId; {
-			case remoteClusterUUId == 0:
-				// they're joining
-			case clusterUUId == remoteClusterUUId:
-				// all good
-			default:
-				return false, errors.New("Attempt made to merge different logical clusters together, which is illegal. Aborting topology change.")
-			}
-		} else {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {

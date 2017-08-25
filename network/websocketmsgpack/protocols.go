@@ -36,7 +36,7 @@ type wssMsgPackClient struct {
 	remoteHost        string
 	connectionNumber  uint32
 	self              common.RMId
-	bootcount         uint32
+	bootCount         uint32
 	socket            *websocket.Conn
 	peerCerts         []*x509.Certificate
 	roots             map[string]*common.Capability
@@ -122,7 +122,7 @@ func (wmpc *wssMsgPackClient) verifyHello(hello *cmsgs.Hello) bool {
 func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	namespace := make([]byte, common.KeyLen-8)
 	binary.BigEndian.PutUint32(namespace[0:4], wmpc.connectionNumber)
-	binary.BigEndian.PutUint32(namespace[4:8], wmpc.bootcount)
+	binary.BigEndian.PutUint32(namespace[4:8], wmpc.bootCount)
 	binary.BigEndian.PutUint32(namespace[8:], uint32(wmpc.self))
 	wmpc.namespace = namespace
 
@@ -165,7 +165,7 @@ func (wmpc *wssMsgPackClient) Run(conn *network.Connection) error {
 		wmpc.createBeater()
 		wmpc.createReader()
 
-		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.self, wmpc.bootcount, wmpc.rootsVar, wmpc.namespace,
+		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.self, wmpc.bootCount, wmpc.rootsVar, wmpc.namespace,
 			wmpc.connectionManager, wmpc.Connection, wmpc.logger, metrics)
 		if err := wmpc.submitter.TopologyChanged(wmpc.topology); err != nil {
 			return err

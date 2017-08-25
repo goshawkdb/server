@@ -13,10 +13,10 @@ import (
 )
 
 // we are dialing out to someone else
-func NewConnectionTCPTLSCapnpDialer(self common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection, logger log.Logger) {
+func NewConnectionTCPTLSCapnpDialer(self common.RMId, bootCount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection, logger log.Logger) {
 	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
 	phone := common.NewTCPDialer(nil, serverRemote.Host, logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, 0, self, bootcount, router, cm, serverRemote)
+	yesman := NewTLSCapnpHandshaker(phone, logger, 0, self, bootCount, router, cm, serverRemote)
 	network.NewConnection(yesman, cm, logger)
 }
 
@@ -24,7 +24,7 @@ func NewConnectionTCPTLSCapnpDialer(self common.RMId, bootcount uint32, router *
 func (l *listenerInner) NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, count uint32) {
 	logger := log.With(l.parentLogger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
 	phone := common.NewTCPDialer(socket, "", logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, count, l.self, l.bootcount, l.router, l.connectionManager, &sconn.ServerConnection{})
+	yesman := NewTLSCapnpHandshaker(phone, logger, count, l.self, l.bootCount, l.router, l.connectionManager, &sconn.ServerConnection{})
 	network.NewConnection(yesman, l.connectionManager, logger)
 }
 
@@ -34,7 +34,7 @@ type Listener struct {
 
 	parentLogger      log.Logger
 	self              common.RMId
-	bootcount         uint32
+	bootCount         uint32
 	router            *router.Router
 	connectionManager connectionmanager.ConnectionManager
 	listenPort        uint16
@@ -48,11 +48,11 @@ type listenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewListener(listenPort uint16, rmId common.RMId, bootcount uint32, router *router.Router, cm connectionmanager.ConnectionManager, logger log.Logger) (*Listener, error) {
+func NewListener(listenPort uint16, rmId common.RMId, bootCount uint32, router *router.Router, cm connectionmanager.ConnectionManager, logger log.Logger) (*Listener, error) {
 	l := &Listener{
 		parentLogger:      logger,
 		self:              rmId,
-		bootcount:         bootcount,
+		bootCount:         bootCount,
 		router:            router,
 		connectionManager: cm,
 		listenPort:        listenPort,

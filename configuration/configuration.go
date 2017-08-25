@@ -37,17 +37,9 @@ type Configuration struct {
 	NextConfiguration *NextConfiguration
 }
 
-func BlankConfiguration(clusterId string, self common.RMId, port uint16, maxRMCount uint16) *Configuration {
-	return &Configuration{
-		ClusterId:   clusterId,
-		ClusterUUId: 0,
-		Version:     0,
-		Hosts:       []string{fmt.Sprintf("localhost:%d", port)},
-		F:           0,
-		MaxRMCount:  maxRMCount,
-		NoSync:      false,
-		RMs:         common.RMIds{self},
-	}
+func BlankConfiguration() *Configuration {
+	// zero values are fine for all fields
+	return &Configuration{}
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {
