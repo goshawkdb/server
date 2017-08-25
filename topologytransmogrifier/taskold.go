@@ -27,13 +27,13 @@ func (task *installTargetOld) init(base *transmogrificationTask) {
 func (task *installTargetOld) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil && task.targetConfig.Configuration != nil &&
+		task.targetConfig != nil &&
 		active.Version < task.targetConfig.Version &&
 		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
 }
 
 func (task *installTargetOld) announce() {
-	task.inner.Logger.Log("stage", "Attempting to install topology change target.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Old", "msg", "Attempting to install topology change target.", "configuration", task.targetConfig)
 }
 
 func (task *installTargetOld) Tick() (bool, error) {
@@ -101,7 +101,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		return nil, 0, terminate, err
 	}
 	if len(localHost) == 0 { // we must be joining
-		localHost, err = task.firstLocalHost(task.targetConfig.Configuration)
+		localHost, err = task.firstLocalHost(task.targetConfig)
 		if err != nil {
 			terminate, err := task.fatal(err)
 			return nil, 0, terminate, err
@@ -236,7 +236,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		hostsNew = append(hostsNew, cd.Host)
 	}
 
-	nextConfig := task.targetConfig.Configuration.Clone()
+	nextConfig := task.targetConfig.Clone()
 	nextConfig.RMs = rmIdsNew
 	// Note this means that the Hosts in the db config can differ from
 	// the hosts in the cmdline config.

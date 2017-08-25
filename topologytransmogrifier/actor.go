@@ -64,7 +64,7 @@ func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, router *route
 		localEstablished:  localEstablished,
 	}
 	router.Transmogrifier = tt
-	tt.currentTask = tt.newTransmogrificationTask(&configuration.NextConfiguration{Configuration: config})
+	tt.currentTask = tt.newTransmogrificationTask(config)
 	tti := &tt.inner
 	tti.TopologyTransmogrifier = tt
 	tti.BasicServerInner = actor.NewBasicServerInner(log.With(logger, "subsystem", "topologyTransmogrifier"))

@@ -20,11 +20,11 @@ func (task *joinCluster) init(base *transmogrificationTask) {
 func (task *joinCluster) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) == 0 &&
-		task.targetConfig != nil && task.targetConfig.Configuration != nil
+		task.targetConfig != nil
 }
 
 func (task *joinCluster) announce() {
-	task.inner.Logger.Log("stage", "Preparing to join cluster.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Join", "msg", "Preparing to join cluster.", "configuration", task.targetConfig)
 }
 
 func (task *joinCluster) Tick() (bool, error) {
@@ -32,7 +32,7 @@ func (task *joinCluster) Tick() (bool, error) {
 		return task.completed()
 	}
 
-	targetClone := task.targetConfig.Configuration.Clone()
+	targetClone := task.targetConfig.Clone()
 	localHost, remoteHosts, err := targetClone.LocalRemoteHosts(task.listenPort)
 	if err != nil || len(localHost) == 0 {
 		// For joining, it's fatal if we can't find ourself in the

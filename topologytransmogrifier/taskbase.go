@@ -21,7 +21,7 @@ import (
 
 type Task interface {
 	Tick() (bool, error)
-	TargetConfig() *configuration.NextConfiguration
+	TargetConfig() *configuration.Configuration
 	Abandon()
 }
 
@@ -34,7 +34,7 @@ type stage interface {
 
 type transmogrificationTask struct {
 	*TopologyTransmogrifier
-	targetConfig *configuration.NextConfiguration
+	targetConfig *configuration.Configuration
 	sender       sconn.ServerConnectionSubscriber
 	runTxnMsg    actor.MsgExec
 
@@ -48,7 +48,7 @@ type transmogrificationTask struct {
 	stages []stage
 }
 
-func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *configuration.NextConfiguration) *transmogrificationTask {
+func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *configuration.Configuration) *transmogrificationTask {
 	base := &transmogrificationTask{
 		TopologyTransmogrifier: tt,
 		targetConfig:           targetConfig,
@@ -80,7 +80,7 @@ func (tt *transmogrificationTask) selectStage() stage {
 	return nil
 }
 
-func (tt *transmogrificationTask) TargetConfig() *configuration.NextConfiguration {
+func (tt *transmogrificationTask) TargetConfig() *configuration.Configuration {
 	return tt.targetConfig
 }
 
@@ -92,8 +92,7 @@ func (tt *transmogrificationTask) Tick() (bool, error) {
 		activeTopology := tt.activeTopology
 		if activeTopology != nil {
 			if activeTopology.NextConfiguration == nil &&
-				(tt.targetConfig == nil || tt.targetConfig.Configuration == nil ||
-					activeTopology.Version == tt.targetConfig.Version) {
+				(tt.targetConfig == nil || activeTopology.Version == tt.targetConfig.Version) {
 				localHost, remoteHosts, err := tt.activeTopology.LocalRemoteHosts(tt.listenPort)
 				if err != nil {
 					return false, err
@@ -116,7 +115,7 @@ func (tt *transmogrificationTask) Tick() (bool, error) {
 				// given where activeTopology is. And activeTopology has its
 				// own target (NextConfiguration). So we should adopt that as
 				// a fresh new target.
-				return false, tt.setTarget(activeTopology.NextConfiguration)
+				return false, tt.setTarget(activeTopology.NextConfiguration.Configuration)
 			}
 		}
 		return false, nil
@@ -135,10 +134,6 @@ func (tt *transmogrificationTask) ensureShareGoalWithAll() {
 	msg.SetTopologyChangeRequest(tt.targetConfig.AddToSegAutoRoot(seg))
 	tt.sender = senders.NewRepeatingAllSender(common.SegToBytes(seg))
 	tt.connectionManager.AddServerConnectionSubscriber(tt.sender)
-}
-
-func (tt *transmogrificationTask) Goal() *configuration.NextConfiguration {
-	return tt.targetConfig
 }
 
 func (tt *transmogrificationTask) shutdown() {
@@ -243,6 +238,7 @@ func (tt *transmogrificationTask) firstLocalHost(config *configuration.Configura
 		if config.NextConfiguration == nil {
 			break
 		} else {
+			err = nil
 			config = config.NextConfiguration.Configuration
 		}
 	}

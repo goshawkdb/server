@@ -16,7 +16,7 @@ func (task *installCompletion) init(base *transmogrificationTask) {
 func (task *installCompletion) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil && task.targetConfig.Configuration != nil &&
+		task.targetConfig != nil &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
 		active.NextConfiguration.InstalledOnNew &&
@@ -25,7 +25,7 @@ func (task *installCompletion) isValid() bool {
 }
 
 func (task *installCompletion) announce() {
-	task.inner.Logger.Log("stage", "Object migration completed, switching to new topology.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Complete", "msg", "Object migration completed, switching to new topology.", "configuration", task.targetConfig)
 }
 
 func (task *installCompletion) Tick() (bool, error) {

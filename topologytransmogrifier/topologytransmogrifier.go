@@ -44,7 +44,7 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 		if next := topology.NextConfiguration; next == nil {
 			return false, nil
 		} else {
-			return false, tt.setTarget(next)
+			return false, tt.setTarget(next.Configuration)
 		}
 	} else {
 		return tt.currentTask.Tick()
@@ -78,7 +78,7 @@ func (tt *TopologyTransmogrifier) installTopology(topology *configuration.Topolo
 	tt.connectionManager.SetTopology(topology, wrapped, localHost, remoteHosts)
 }
 
-func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConfiguration) error {
+func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.Configuration) error {
 	// This can be called both via a msg (eg cmdline and SIGHUP), or
 	// when there is no current task and we have to think about
 	// creating one. If there is a currentTask, then we compare
@@ -91,7 +91,7 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConf
 			versusConfig = tt.activeTopology.Configuration
 		}
 	} else {
-		versusConfig = tt.currentTask.TargetConfig().Configuration
+		versusConfig = tt.currentTask.TargetConfig()
 	}
 
 	if versusConfig != nil {
@@ -108,7 +108,7 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.NextConf
 		case targetConfig.MaxRMCount != versusConfig.MaxRMCount && versusConfig.Version != 0:
 			return fmt.Errorf("Illegal config change: Currently changes to MaxRMCount are not supported, sorry.")
 
-		case targetConfig.Configuration.EqualExternally(versusConfig):
+		case targetConfig.EqualExternally(versusConfig):
 			if tt.currentTask == nil {
 				tt.inner.Logger.Log("msg", "Config already reached.", "version", versusConfig.Version)
 			} else {

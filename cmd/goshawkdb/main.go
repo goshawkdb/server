@@ -148,6 +148,7 @@ func newServer(logger log.Logger) (*server, error) {
 		httpProf:       httpProf,
 		statusEmitters: []status.StatusEmitter{},
 		onShutdown:     []func(){},
+		shutdownChan:   make(chan types.EmptyStruct),
 	}
 
 	if err = s.ensureRMId(); err != nil {
@@ -277,7 +278,7 @@ func (s *server) start() {
 		s.addOnShutdown(promListener.ShutdownSync)
 	}
 
-	<-transmogrifier.Terminated
+	<-s.shutdownChan
 	s.shutdown(nil)
 }
 

@@ -17,7 +17,7 @@ func (task *migrate) init(base *transmogrificationTask) {
 func (task *migrate) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil && task.targetConfig.Configuration != nil &&
+		task.targetConfig != nil &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
 		active.NextConfiguration.InstalledOnNew &&
@@ -26,7 +26,7 @@ func (task *migrate) isValid() bool {
 }
 
 func (task *migrate) announce() {
-	task.inner.Logger.Log("stage", "Attempting to perform object migration for topology target.", "configuration", task.targetConfig)
+	task.inner.Logger.Log("stage", "Migrate", "msg", "Attempting to perform object migration for topology target.", "configuration", task.targetConfig)
 }
 
 func (task *migrate) Tick() (bool, error) {

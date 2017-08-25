@@ -340,9 +340,9 @@ func (tcs *TLSCapnpServer) Restart() bool {
 }
 
 func (tcs *TLSCapnpServer) InternalShutdown() {
-	tcs.internalShutdown()
 	tcs.connectionManager.ServerLost(tcs.remote, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
+	tcs.internalShutdown()
 	tcs.conn.ShutdownCompleted()
 }
 
