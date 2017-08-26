@@ -199,7 +199,7 @@ func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, don
 	}
 	tc.InitMsg(am.Exe.Mailbox)
 	if am.Exe.Mailbox.EnqueueMsg(tc) {
-		go done(tc.Wait())
+		go func() { done(tc.Wait()) }()
 	} else {
 		done(false)
 	}

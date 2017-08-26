@@ -153,7 +153,7 @@ func (lc *LocalConnection) TopologyChanged(topology *configuration.Topology, don
 	msg := &localConnectionMsgTopologyChanged{LocalConnection: lc, topology: topology}
 	msg.InitMsg(lc)
 	if lc.EnqueueMsg(msg) {
-		go done(msg.Wait())
+		go func() { done(msg.Wait()) }()
 	} else {
 		done(false)
 	}

@@ -85,7 +85,7 @@ func (pl *PrometheusListener) TopologyChanged(topology *configuration.Topology, 
 	msg := &prometheusListenerMsgTopologyChanged{PrometheusListener: pl, topology: topology}
 	msg.InitMsg(pl)
 	if pl.EnqueueMsg(msg) {
-		go done(msg.Wait())
+		go func() { done(msg.Wait()) }()
 	} else {
 		done(false)
 	}

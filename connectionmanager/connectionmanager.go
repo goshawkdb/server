@@ -428,7 +428,8 @@ func (msg *connectionManagerMsgSetTopology) Exec() (bool, error) {
 			// In all cases, we need to start a dialer
 			cd := &connectionManagerMsgServerEstablished{
 				ServerConnection: &sconn.ServerConnection{
-					Host: host,
+					Host:         host,
+					ShutdownSync: func() {},
 				},
 			}
 			tcpcapnproto.NewConnectionTCPTLSCapnpDialer(cm.self, cm.bootCount, cm.router, cm, cd.ServerConnection, cm.parentLogger)

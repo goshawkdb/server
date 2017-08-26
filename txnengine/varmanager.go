@@ -93,7 +93,7 @@ func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done fun
 	}
 	tc.InitMsg(vm.exe.Mailbox)
 	if vm.exe.Mailbox.EnqueueMsg(tc) {
-		go done(tc.Wait() && tc.outcome)
+		go func() { done(tc.Wait() && tc.outcome) }()
 	} else {
 		done(false)
 	}

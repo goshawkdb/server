@@ -96,6 +96,7 @@ func (tch *TLSCapnpHandshaker) PerformHandshake(topology *configuration.Topology
 
 func (tch *TLSCapnpHandshaker) Restart() bool {
 	tch.InternalShutdown()
+	tch.Reset()
 	return tch.restartable
 }
 
@@ -333,8 +334,8 @@ func (tcs *TLSCapnpServer) Send(msg []byte) {
 }
 
 func (tcs *TLSCapnpServer) Restart() bool {
-	tcs.internalShutdown()
 	tcs.connectionManager.ServerLost(tcs.remote, tcs.restartable)
+	tcs.internalShutdown()
 
 	return tcs.TLSCapnpHandshaker.Restart()
 }
@@ -343,6 +344,7 @@ func (tcs *TLSCapnpServer) InternalShutdown() {
 	tcs.connectionManager.ServerLost(tcs.remote, false)
 	tcs.TLSCapnpHandshaker.InternalShutdown()
 	tcs.internalShutdown()
+	tcs.Reset()
 	tcs.conn.ShutdownCompleted()
 }
 

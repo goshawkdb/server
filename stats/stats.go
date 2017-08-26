@@ -134,7 +134,7 @@ func (cp *configPublisher) TopologyChanged(topology *configuration.Topology, don
 	msg := &configPublisherMsgTopologyChanged{configPublisher: cp, topology: topology}
 	msg.InitMsg(cp)
 	if cp.EnqueueMsg(msg) {
-		go done(msg.Wait())
+		go func() { done(msg.Wait()) }()
 	} else {
 		done(false)
 	}

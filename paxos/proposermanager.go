@@ -130,7 +130,7 @@ func (pm *ProposerManager) TopologyChanged(topology *configuration.Topology, don
 	}
 	tc.InitMsg(pm.Exe.Mailbox)
 	if pm.Exe.Mailbox.EnqueueMsg(tc) {
-		go done(tc.Wait() && tc.outcome)
+		go func() { done(tc.Wait() && tc.outcome) }()
 	} else {
 		done(false)
 	}
