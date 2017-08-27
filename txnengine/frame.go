@@ -186,7 +186,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil:
+	case fo.writes.Len() != 0 || fo.frameTxnActions == nil:
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:

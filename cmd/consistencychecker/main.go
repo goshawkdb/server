@@ -12,9 +12,9 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
-	ch "goshawkdb.io/server/consistenthash"
 	"goshawkdb.io/server/db"
-	eng "goshawkdb.io/server/txnengine"
+	ch "goshawkdb.io/server/utils/consistenthash"
+	"goshawkdb.io/server/utils/txnreader"
 	"io/ioutil"
 	"os"
 	"runtime"
@@ -247,7 +247,7 @@ func (s *store) LoadTopology() error {
 			rtxn.Error(fmt.Errorf("Unable to find txn for topology: %v", txnId))
 			return nil
 		}
-		txnReader := eng.TxnReaderFromData(bites)
+		txnReader := txnreader.TxnReaderFromData(bites)
 		actions := txnReader.Actions(true)
 		if l := actions.Actions().Len(); l != 1 {
 			rtxn.Error(fmt.Errorf("Topology txn has %v actions; expected 1", l))
