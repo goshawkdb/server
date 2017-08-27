@@ -119,6 +119,10 @@ func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
 	pl.topology = topology
 	pl.topologyLock.Unlock()
 
+	if topology.IsBlank() {
+		return
+	}
+
 	labels := prometheus.Labels{
 		"ClusterId": topology.ClusterId,
 		"RMId":      fmt.Sprint(pl.self),

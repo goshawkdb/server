@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/go-kit/kit/log"
@@ -46,132 +47,124 @@ func main() {
 
 	logger.Log("product", common.ProductName, "version", goshawk.ServerVersion, "mdbVersion", mdb.Version(), "args", fmt.Sprint(os.Args))
 
-	if s, err := newServer(logger); err != nil {
+	f := &flags{}
+	f.registerFlags()
+	f.parse()
+
+	if terminate, err := f.validate(logger); err != nil {
 		fmt.Printf("\n%v\n\n", err)
 		flag.Usage()
 		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
 		os.Exit(1)
-	} else if s != nil {
-		s.start()
+
+	} else if terminate {
+		os.Exit(0)
+
+	} else {
+		newServer(f, logger).start()
 	}
 }
 
-func newServer(logger log.Logger) (*server, error) {
-	var configFile, dataDir, certFile string
-	var port, wssPort, promPort int
-	var httpProf, version, genClusterCert, genClientCert bool
+type flags struct {
+	configFile     string
+	dataDir        string
+	certFile       string
+	port           uint64
+	wssPort        uint64
+	promPort       uint64
+	httpProf       bool
+	version        bool
+	genClusterCert bool
+	genClientCert  bool
 
-	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
-	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
-	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file (required to run server).")
-	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on (required if non-default).")
-	flag.BoolVar(&version, "version", false, "Display version and exit.")
-	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
-	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.IntVar(&wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on (required if non-default. Set to 0 to disable WebSocket service).")
-	flag.IntVar(&promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on (required if non-default. Set to 0 to disable Prometheus metrics service).")
-	flag.BoolVar(&httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))
+	certificate []byte
+}
+
+func (f *flags) registerFlags() {
+	flag.StringVar(&f.configFile, "config", "", "`Path` to configuration file (required to start server).")
+	flag.StringVar(&f.dataDir, "dir", "", "`Path` to data directory (required to run server).")
+	flag.StringVar(&f.certFile, "cert", "", "`Path` to cluster certificate and key file (required to run server).")
+	flag.Uint64Var(&f.port, "port", common.DefaultPort, "Port to listen on (required if non-default).")
+	flag.Uint64Var(&f.wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on (required if non-default. Set to 0 to disable WebSocket service).")
+	flag.Uint64Var(&f.promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on (required if non-default. Set to 0 to disable Prometheus metrics service).")
+
+	flag.BoolVar(&f.httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))
+
+	flag.BoolVar(&f.genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair and exit.")
+	flag.BoolVar(&f.genClientCert, "gen-client-cert", false, "Generate client certificate key pair and exit.")
+	flag.BoolVar(&f.version, "version", false, "Display version and exit.")
+}
+
+func (f *flags) parse() {
 	flag.Parse()
+}
 
-	if version {
-		fmt.Println(common.ProductName, "version", goshawk.ServerVersion)
-		return nil, nil
+func (f *flags) validate(logger log.Logger) (bool, error) {
+	if f.version {
+		return true, nil
 	}
 
-	if genClusterCert {
+	var err error
+	if f.genClusterCert {
 		certificatePrivateKeyPair, err := certs.NewClusterCertificate()
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
-		return nil, nil
+		return true, nil
 	}
 
-	if len(certFile) == 0 {
-		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
+	if len(f.certFile) == 0 {
+		return false, errors.New("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
 	}
-	certificate, err := ioutil.ReadFile(certFile)
+	f.certificate, err = ioutil.ReadFile(f.certFile)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
-	if genClientCert {
-		certificatePrivateKeyPair, err := certs.NewClientCertificate(certificate)
+	if f.genClientCert {
+		certificatePrivateKeyPair, err := certs.NewClientCertificate(f.certificate)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
-		logger.Log("fingerprint", hex.EncodeToString(fingerprint[:]))
-		return nil, nil
+		fmt.Printf("fingerprint: %s", hex.EncodeToString(fingerprint[:]))
+		return true, nil
 	}
 
-	if dataDir == "" {
-		dataDir, err = ioutil.TempDir("", common.ProductName+"_Data_")
+	if len(f.dataDir) == 0 {
+		f.dataDir, err = ioutil.TempDir("", common.ProductName+"_Data_")
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		logger.Log("msg", "No data dir supplied (missing -dir parameter).", "dataDir", dataDir)
-	}
-	err = os.MkdirAll(dataDir, 0750)
-	if err != nil {
-		return nil, err
+		logger.Log("msg", "No data dir supplied (missing -dir parameter). Using temporary dir.", "dataDir", f.dataDir)
 	}
 
-	if configFile != "" {
-		_, err := ioutil.ReadFile(configFile)
-		if err != nil {
-			return nil, err
-		}
+	if !(0 < f.port && f.port < 65536) {
+		return false, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", f.port)
 	}
 
-	if !(0 < port && port < 65536) {
-		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
+	if f.wssPort > 0 && !(f.wssPort < 65536 && f.wssPort != f.port) {
+		return false, fmt.Errorf("Supplied WSS port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", f.wssPort, f.port)
 	}
 
-	if wssPort != 0 && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
-		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
+	if f.promPort > 0 && !(f.promPort < 65536 && f.promPort != f.port) {
+		return false, fmt.Errorf("Supplied Prometheus port is illegal (%d). Prometheus Port must be > 0 and < 65536 and not equal to the main communication port (%d)", f.promPort, f.port)
 	}
 
-	if promPort != 0 && !(0 < promPort && promPort < 65536 && promPort != port) {
-		return nil, fmt.Errorf("Supplied Prometheus port is illegal (%d). Prometheus Port must be > 0 and < 65536 and not equal to the main communication port (%d)", promPort, port)
-	}
-
-	s := &server{
-		logger:         logger,
-		configFile:     configFile,
-		certificate:    certificate,
-		dataDir:        dataDir,
-		port:           uint16(port),
-		wssPort:        uint16(wssPort),
-		promPort:       uint16(promPort),
-		httpProf:       httpProf,
-		statusEmitters: []status.StatusEmitter{},
-		onShutdown:     []func(){},
-		shutdownChan:   make(chan types.EmptyStruct),
-	}
-
-	if err = s.ensureRMId(); err != nil {
-		return nil, err
-	}
-	if err = s.ensureBootCount(); err != nil {
-		return nil, err
-	}
-
-	return s, nil
+	return false, nil
 }
 
 type server struct {
-	logger      log.Logger
-	configFile  string
-	certificate []byte
-	dataDir     string
-	port        uint16
-	wssPort     uint16
-	promPort    uint16
-	httpProf    bool
-	rmId        common.RMId
-	bootCount   uint32
+	*flags
+	logger   log.Logger
+	port     uint16
+	wssPort  uint16
+	promPort uint16
+
+	self      common.RMId
+	bootCount uint32
 
 	lock           sync.Mutex
 	transmogrifier *topologytransmogrifier.TopologyTransmogrifier
@@ -184,13 +177,22 @@ type server struct {
 	shutdownChan chan types.EmptyStruct
 }
 
-func (s *server) start() {
-	if s.httpProf {
-		go func() {
-			s.logger.Log("pprofResult", http.ListenAndServe(fmt.Sprintf("localhost:%d", goshawk.HttpProfilePort), nil))
-		}()
-	}
+func newServer(f *flags, logger log.Logger) *server {
+	return &server{
+		flags:    f,
+		logger:   logger,
+		port:     uint16(f.port),
+		wssPort:  uint16(f.wssPort),
+		promPort: uint16(f.promPort),
 
+		statusEmitters: []status.StatusEmitter{},
+		onShutdown:     []func(){},
+
+		shutdownChan: make(chan types.EmptyStruct),
+	}
+}
+
+func (s *server) start() {
 	os.Stdin.Close()
 
 	procs := runtime.NumCPU()
@@ -201,16 +203,26 @@ func (s *server) start() {
 
 	go s.signalHandler()
 
+	s.maybeShutdown(os.MkdirAll(s.dataDir, 0700))
+	s.maybeShutdown(s.ensureRMId())
+	s.maybeShutdown(s.ensureBootCount())
+
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
+
+	if s.httpProf {
+		go func() {
+			s.logger.Log("pprofResult", http.ListenAndServe(fmt.Sprintf("localhost:%d", goshawk.HttpProfilePort), nil))
+		}()
+	}
 
 	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 500*time.Microsecond, db.DB, s.logger)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	router := router.NewRouter(s.rmId, s.logger)
-	cm := connectionmanager.NewConnectionManager(s.rmId, s.bootCount, s.certificate, router, s.logger)
+	router := router.NewRouter(s.self, s.logger)
+	cm := connectionmanager.NewConnectionManager(s.self, s.bootCount, s.certificate, router, s.logger)
 	s.certificate = nil
 	s.addOnShutdown(cm.ShutdownSync)
 	// this is safe because cm only uses router when it's creating new
@@ -219,11 +231,11 @@ func (s *server) start() {
 	router.ConnectionManager = cm
 	s.addStatusEmitter(cm)
 
-	lc := localconnection.NewLocalConnection(s.rmId, s.bootCount, cm, s.logger)
+	lc := localconnection.NewLocalConnection(s.self, s.bootCount, cm, s.logger)
 	// localConnection registers as a client with connectionManager, so
 	// we rely on connectionManager to do shutdown and status calls.
 
-	dispatchers := paxos.NewDispatchers(cm, s.rmId, s.bootCount, uint8(procs), db, lc, s.logger)
+	dispatchers := paxos.NewDispatchers(cm, s.self, s.bootCount, uint8(procs), db, lc, s.logger)
 	// same reasoning as before: this write is done before
 	// TopologyTransmogrifier starts and cm will only dial out due to a
 	// msg from TopologyTransmogrifier so there is still sufficient
@@ -232,7 +244,7 @@ func (s *server) start() {
 	s.addStatusEmitter(router)
 	s.addOnShutdown(router.ShutdownSync)
 
-	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.rmId, db, router, cm, lc, s.port, s, commandLineConfig, s.logger)
+	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.self, db, router, cm, lc, s.port, s, commandLineConfig, s.logger)
 	s.lock.Lock()
 	s.transmogrifier = transmogrifier
 	s.lock.Unlock()
@@ -243,11 +255,9 @@ func (s *server) start() {
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.ShutdownSync)
 
-	listener, err := tcpcapnproto.NewListener(s.port, s.rmId, s.bootCount, router, cm, s.logger)
+	listener, err := tcpcapnproto.NewListener(s.port, s.self, s.bootCount, router, cm, s.logger)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.ShutdownSync)
-
-	s.logger.Log("msg", "Startup complete.")
 
 	var wssMux, promMux *ghttp.HttpListenerWithMux
 	var wssWG, promWG *sync.WaitGroup
@@ -260,7 +270,7 @@ func (s *server) start() {
 		}
 		wssMux, err = ghttp.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 		s.maybeShutdown(err)
-		wssListener := websocketmsgpack.NewWebsocketListener(wssMux, s.rmId, s.bootCount, cm, s.logger)
+		wssListener := websocketmsgpack.NewWebsocketListener(wssMux, s.self, s.bootCount, cm, s.logger)
 		s.addOnShutdown(wssListener.ShutdownSync)
 	}
 
@@ -274,12 +284,41 @@ func (s *server) start() {
 			promMux, err = ghttp.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
 			s.maybeShutdown(err)
 		}
-		promListener := stats.NewPrometheusListener(promMux, s.rmId, cm, router, s.logger)
+		promListener := stats.NewPrometheusListener(promMux, s.self, cm, router, s.logger)
 		s.addOnShutdown(promListener.ShutdownSync)
 	}
 
 	<-s.shutdownChan
 	s.shutdown(nil)
+}
+
+func (s *server) ensureRMId() error {
+	path := s.dataDir + "/rmid"
+	if b, err := ioutil.ReadFile(path); err == nil {
+		s.self = common.RMId(binary.BigEndian.Uint32(b))
+		return nil
+
+	} else {
+		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		for s.self == common.RMIdEmpty {
+			s.self = common.RMId(rng.Uint32())
+		}
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, uint32(s.self))
+		return ioutil.WriteFile(path, b, 0400)
+	}
+}
+
+func (s *server) ensureBootCount() error {
+	path := s.dataDir + "/bootcount"
+	if b, err := ioutil.ReadFile(path); err == nil {
+		s.bootCount = binary.BigEndian.Uint32(b) + 1
+	} else {
+		s.bootCount = 1
+	}
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, s.bootCount)
+	return ioutil.WriteFile(path, b, 0600)
 }
 
 func (s *server) addStatusEmitter(emitter status.StatusEmitter) {
@@ -317,37 +356,8 @@ func (s *server) maybeShutdown(err error) {
 	}
 }
 
-func (s *server) ensureRMId() error {
-	path := s.dataDir + "/rmid"
-	if b, err := ioutil.ReadFile(path); err == nil {
-		s.rmId = common.RMId(binary.BigEndian.Uint32(b))
-		return nil
-
-	} else {
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		for s.rmId == common.RMIdEmpty {
-			s.rmId = common.RMId(rng.Uint32())
-		}
-		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, uint32(s.rmId))
-		return ioutil.WriteFile(path, b, 0400)
-	}
-}
-
-func (s *server) ensureBootCount() error {
-	path := s.dataDir + "/bootcount"
-	if b, err := ioutil.ReadFile(path); err == nil {
-		s.bootCount = binary.BigEndian.Uint32(b) + 1
-	} else {
-		s.bootCount = 1
-	}
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, s.bootCount)
-	return ioutil.WriteFile(path, b, 0600)
-}
-
 func (s *server) commandLineConfig() (*configuration.Configuration, error) {
-	if s.configFile != "" {
+	if len(s.configFile) > 0 {
 		configJSON, err := configuration.LoadJSONFromPath(s.configFile)
 		if err != nil {
 			return nil, err
@@ -375,9 +385,9 @@ func (s *server) signalStatus() {
 	sc := status.NewStatusConsumer()
 	go func() {
 		str := sc.Wait()
-		s.logger.Log("msg", "System Status Start", "RMId", s.rmId)
+		s.logger.Log("msg", "System Status Start", "RMId", s.self)
 		os.Stderr.WriteString(str + "\n")
-		s.logger.Log("msg", "System Status End", "RMId", s.rmId)
+		s.logger.Log("msg", "System Status End", "RMId", s.self)
 	}()
 	sc.Emit(fmt.Sprintf("Configuration File: %v", s.configFile))
 	sc.Emit(fmt.Sprintf("Data Directory: %v", s.dataDir))
@@ -392,7 +402,7 @@ func (s *server) signalStatus() {
 }
 
 func (s *server) signalReloadConfig() {
-	if s.configFile == "" {
+	if len(s.configFile) == 0 {
 		s.logger.Log("msg", "Attempt to reload config failed as no path to configuration provided on command line.")
 		return
 	}
@@ -411,9 +421,9 @@ func (s *server) signalDumpStacks() {
 	for {
 		buf := make([]byte, size)
 		if l := runtime.Stack(buf, true); l <= size {
-			s.logger.Log("msg", "Stacks Dump Start", "RMId", s.rmId)
+			s.logger.Log("msg", "Stacks Dump Start", "RMId", s.self)
 			os.Stderr.Write(buf[:l])
-			s.logger.Log("msg", "Stacks Dump End", "RMId", s.rmId)
+			s.logger.Log("msg", "Stacks Dump End", "RMId", s.self)
 			return
 		} else {
 			size += size
