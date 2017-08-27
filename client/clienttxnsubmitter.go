@@ -9,8 +9,14 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/paxos"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/actor"
+	cconn "goshawkdb.io/server/types/connections/client"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	"math/rand"
 	"time"
 )
 
@@ -20,22 +26,25 @@ type ClientTxnSubmitter struct {
 	*SimpleTxnSubmitter
 	versionCache *versionCache
 	txnLive      bool
-	backoff      *server.BinaryBackoffEngine
-	metrics      *paxos.ClientTxnMetrics
+	rng          *rand.Rand
+	backoff      *binarybackoff.BinaryBackoffEngine
+	metrics      *cconn.ClientTxnMetrics
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm paxos.ServerConnectionPublisher, actor paxos.Actorish, logger log.Logger, metrics *paxos.ClientTxnMetrics) *ClientTxnSubmitter {
-	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, logger)
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm sconn.ServerConnectionPublisher, actor actor.EnqueueActor, logger log.Logger, metrics *cconn.ClientTxnMetrics) *ClientTxnSubmitter {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, rng, logger)
 	return &ClientTxnSubmitter{
 		SimpleTxnSubmitter: sts,
 		versionCache:       NewVersionCache(roots, namespace),
 		txnLive:            false,
-		backoff:            server.NewBinaryBackoffEngine(sts.rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
+		rng:                rng,
+		backoff:            binarybackoff.NewBinaryBackoffEngine(rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 		metrics:            metrics,
 	}
 }
 
-func (cts *ClientTxnSubmitter) Status(sc *server.StatusConsumer) {
+func (cts *ClientTxnSubmitter) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("ClientTxnSubmitter: txnLive? %v", cts.txnLive))
 	cts.SimpleTxnSubmitter.Status(sc.Fork())
 	sc.Join()
@@ -64,7 +73,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	cts.backoff.Shrink(server.SubmissionMinSubmitDelay)
 
 	var cont TxnCompletionConsumer
-	cont = func(txn *eng.TxnReader, outcome *msgs.Outcome, err error) error {
+	cont = func(txn *txnreader.TxnReader, outcome *msgs.Outcome, err error) error {
 		if outcome == nil || err != nil { // node is shutting down or error
 			cts.txnLive = false
 			return continuation(nil, err)
@@ -91,7 +100,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 			if !resubmit {
 				updates := abort.Rerun()
 				validUpdates := cts.versionCache.UpdateFromAbort(&updates)
-				server.DebugLog(cts.logger, "debug", "Txn Outcome.", "TxnId", txnId,
+				utils.DebugLog(cts.logger, "debug", "Txn Outcome.", "TxnId", txnId,
 					"updatesLen", updates.Len(), "validLen", len(validUpdates))
 				resubmit = len(validUpdates) == 0
 				if !resubmit {
@@ -105,7 +114,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 					return continuation(&clientOutcome, nil)
 				}
 			}
-			server.DebugLog(cts.logger, "debug", "Resubmitting Txn.", "TxnId", txnId,
+			utils.DebugLog(cts.logger, "debug", "Resubmitting Txn.", "TxnId", txnId,
 				"origResubmit", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
 
 			cts.backoff.Advance()
@@ -131,7 +140,7 @@ func (cts *ClientTxnSubmitter) SubmitClientTransaction(ctxnCap *cmsgs.ClientTxn,
 	return cts.SimpleTxnSubmitter.SubmitClientTransaction(nil, ctxnCap, curTxnId, cont, cts.backoff, false, cts.versionCache)
 }
 
-func (cts *ClientTxnSubmitter) addCreatesToCache(txn *eng.TxnReader) {
+func (cts *ClientTxnSubmitter) addCreatesToCache(txn *txnreader.TxnReader) {
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)

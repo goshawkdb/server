@@ -10,6 +10,12 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/types"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	vc "goshawkdb.io/server/utils/vectorclock"
 	"sort"
 	"time"
 )
@@ -22,20 +28,20 @@ type frame struct {
 	child            *frame
 	v                *Var
 	frameTxnId       *common.TxnId
-	frameTxnActions  *TxnActions
-	frameTxnClock    *VectorClockMutable // the clock (including merge missing) of the frame txn
-	frameWritesClock *VectorClockMutable // max elems from all writes of all txns in parent frame
-	readVoteClock    *VectorClockMutable
+	frameTxnActions  *txnreader.TxnActions
+	frameTxnClock    *vc.VectorClockMutable // the clock (including merge missing) of the frame txn
+	frameWritesClock *vc.VectorClockMutable // max elems from all writes of all txns in parent frame
+	readVoteClock    *vc.VectorClockMutable
 	positionsFound   bool
-	mask             *VectorClockMutable
-	scheduleBackoff  *server.BinaryBackoffEngine
+	mask             *vc.VectorClockMutable
+	scheduleBackoff  *binarybackoff.BinaryBackoffEngine
 	frameOpen
 	frameClosed
 	frameErase
 	currentState frameStateMachineComponent
 }
 
-func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions, txnClock, writesClock *VectorClockMutable) *frame {
+func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
 	f := &frame{
 		parent:           parent,
 		v:                v,
@@ -46,15 +52,15 @@ func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *TxnActions
 		positionsFound:   false,
 	}
 	if parent == nil {
-		f.mask = NewVectorClock().AsMutable()
-		f.scheduleBackoff = server.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
+		f.mask = vc.NewVectorClock().AsMutable()
+		f.scheduleBackoff = binarybackoff.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
 	} else {
 		f.mask = parent.mask
 		f.scheduleBackoff = parent.scheduleBackoff
 		f.scheduleBackoff.Shrink(server.VarRollDelayMin)
 	}
 	f.init()
-	server.DebugLog(f.v.vm.logger, "debug", "NewFrame.", "VarUUId", f.v.UUId)
+	utils.DebugLog(f.v.vm.logger, "debug", "NewFrame.", "VarUUId", f.v.UUId)
 	f.maybeStartRoll()
 	return f
 }
@@ -85,7 +91,7 @@ func (f *frame) String() string {
 	return fmt.Sprintf("%v Frame %v (%v) r%v w%v", f.v.UUId, f.frameTxnId, f.frameTxnClock.Len(), f.readVoteClock, f.writeVoteClock)
 }
 
-func (f *frame) Status(sc *server.StatusConsumer) {
+func (f *frame) Status(sc *status.StatusConsumer) {
 	sc.Emit(f.String())
 	readHistogram := make([]int, 4)
 	for node := f.reads.First(); node != nil; node = node.Next() {
@@ -127,7 +133,6 @@ const (
 type frameStateMachineComponent interface {
 	init(*frame)
 	start()
-	frameStateMachineWitness()
 }
 
 // open
@@ -138,9 +143,9 @@ type frameOpen struct {
 	learntFutureReads  []*localAction
 	maxUncommittedRead *localAction
 	uncommittedReads   uint
-	writeVoteClock     *VectorClockMutable
+	writeVoteClock     *vc.VectorClockMutable
 	writes             *sl.SkipList
-	clientWrites       map[[common.ClientLen]byte]server.EmptyStruct
+	clientWrites       map[[common.ClientLen]byte]types.EmptyStruct
 	uncommittedWrites  uint
 	rwPresent          bool
 	rollScheduled      *time.Time
@@ -154,16 +159,15 @@ func (fo *frameOpen) init(f *frame) {
 	fo.reads = sl.New(f.v.rng)
 	fo.learntFutureReads = []*localAction{}
 	fo.writes = sl.New(f.v.rng)
-	fo.clientWrites = make(map[[common.ClientLen]byte]server.EmptyStruct)
+	fo.clientWrites = make(map[[common.ClientLen]byte]types.EmptyStruct)
 }
 
-func (fo *frameOpen) start()                    {}
-func (fo *frameOpen) frameStateMachineWitness() {}
-func (fo *frameOpen) String() string            { return "frameOpen" }
+func (fo *frameOpen) start()         {}
+func (fo *frameOpen) String() string { return "frameOpen" }
 
 func (fo *frameOpen) ReadRetry(action *localAction) bool {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "ReadRetry", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "ReadRetry", "frame", fo.frame, "TxnId", txn.Id)
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v ReadRetry called for %v with frame in state %v", fo.v, txn, fo.currentState))
@@ -178,11 +182,11 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 
 func (fo *frameOpen) AddRead(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "AddRead", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
+	utils.DebugLog(fo.v.vm.logger, "debug", "AddRead", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writes.Len() != 0 || (fo.writes.Len() != 0 && fo.writes.First().Key.Compare(action) == sl.LT) || fo.frameTxnActions == nil:
+	case fo.writes.Len() != 0 || fo.frameTxnActions == nil:
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
@@ -206,7 +210,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 
 func (fo *frameOpen) ReadAborted(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "ReadAborted", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "ReadAborted", "frame", fo.frame, "TxnId", txn.Id)
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v ReadAborted called for %v with frame in state %v", fo.frame, txn, fo.currentState))
 	}
@@ -224,7 +228,7 @@ func (fo *frameOpen) ReadAborted(action *localAction) {
 
 func (fo *frameOpen) ReadCommitted(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "ReadCommitted", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "ReadCommitted", "frame", fo.frame, "TxnId", txn.Id)
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v ReadAborted called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
@@ -239,7 +243,7 @@ func (fo *frameOpen) ReadCommitted(action *localAction) {
 
 func (fo *frameOpen) AddWrite(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "AddWrite", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "AddWrite", "frame", fo.frame, "TxnId", txn.Id)
 	cid := txn.Id.ClientId()
 	_, found := fo.clientWrites[cid]
 	switch {
@@ -249,7 +253,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.writes.Get(action) == nil:
 		fo.uncommittedWrites++
-		fo.clientWrites[cid] = server.EmptyStructVal
+		fo.clientWrites[cid] = types.EmptyStructVal
 		action.frame = fo.frame
 		if fo.uncommittedReads == 0 {
 			fo.writes.Insert(action, uncommitted)
@@ -267,7 +271,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 
 func (fo *frameOpen) WriteAborted(action *localAction, permitInactivate bool) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "WriteAborted", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "WriteAborted", "frame", fo.frame, "TxnId", txn.Id)
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v WriteAborted called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
@@ -292,7 +296,7 @@ func (fo *frameOpen) WriteAborted(action *localAction, permitInactivate bool) {
 
 func (fo *frameOpen) WriteCommitted(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "WriteCommitted", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "WriteCommitted", "frame", fo.frame, "TxnId", txn.Id)
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v WriteCommitted called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
@@ -308,11 +312,11 @@ func (fo *frameOpen) WriteCommitted(action *localAction) {
 
 func (fo *frameOpen) AddReadWrite(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "AddReadWrite", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
+	utils.DebugLog(fo.v.vm.logger, "debug", "AddReadWrite", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddReadWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writes.Len() != 0 || fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0:
+	case fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0:
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
@@ -337,7 +341,7 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 
 func (fo *frameOpen) ReadWriteAborted(action *localAction, permitInactivate bool) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "ReadWriteAborted", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "ReadWriteAborted", "frame", fo.frame, "TxnId", txn.Id)
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v ReadWriteAborted called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
@@ -362,7 +366,7 @@ func (fo *frameOpen) ReadWriteAborted(action *localAction, permitInactivate bool
 
 func (fo *frameOpen) ReadWriteCommitted(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fo.v.vm.logger, "debug", "ReadWriteCommitted", "frame", fo.frame, "TxnId", txn.Id)
+	utils.DebugLog(fo.v.vm.logger, "debug", "ReadWriteCommitted", "frame", fo.frame, "TxnId", txn.Id)
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v ReadWriteCommitted called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
@@ -381,8 +385,8 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		panic(fmt.Sprintf("%v ReadLearnt called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	}
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
-	if actClockElem == deleted {
-		panic("Just did 0 - 1 in int64")
+	if actClockElem == 0 {
+		panic("About to do 0 - 1 in uint64")
 	}
 	actClockElem--
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
@@ -395,11 +399,11 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		// only should ignore this read if its write clock elem is < our
 		// frame write clock elem.
 		if actClockElem < reqClockElem {
-			server.DebugLog(fo.v.vm.logger, "debug", "ReadLearnt. Ignored. Too Old.", "frame", fo.frame, "TxnId", txn.Id)
+			utils.DebugLog(fo.v.vm.logger, "debug", "ReadLearnt. Ignored. Too Old.", "frame", fo.frame, "TxnId", txn.Id)
 			fo.maybeStartRoll()
 			return false
 		} else {
-			server.DebugLog(fo.v.vm.logger, "debug", "ReadLearnt. Future frame.", "frame", fo.frame, "TxnId", txn.Id)
+			utils.DebugLog(fo.v.vm.logger, "debug", "ReadLearnt. Future frame.", "frame", fo.frame, "TxnId", txn.Id)
 			fo.learntFutureReads = append(fo.learntFutureReads, action)
 			action.frame = fo.frame
 			return true
@@ -419,15 +423,15 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 		// missing some TGCs - essentially we can infer TGCs by
 		// observing the outcome clocks on future txns we learn.
 		fo.calculateReadVoteClock()
-		mask := NewVectorClock().AsMutable()
+		mask := vc.NewVectorClock().AsMutable()
 		fo.readVoteClock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if action.outcomeClock.At(vUUId) == deleted {
+			if action.outcomeClock.At(vUUId) == 0 {
 				mask.SetVarIdMax(vUUId, v)
 			}
 			return true
 		})
 		fo.subtractClock(mask)
-		server.DebugLog(fo.v.vm.logger, "debug", "ReadLearnt", "frame", fo.frame, "TxnId", txn.Id, "uncommittedReads", fo.uncommittedReads, "uncommittedWrites", fo.uncommittedWrites)
+		utils.DebugLog(fo.v.vm.logger, "debug", "ReadLearnt", "frame", fo.frame, "TxnId", txn.Id, "uncommittedReads", fo.uncommittedReads, "uncommittedWrites", fo.uncommittedWrites)
 		fo.maybeStartRoll()
 		return true
 	} else {
@@ -443,12 +447,12 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
 	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
-		server.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Ignored. Too Old.", "frame", fo.frame, "TxnId", txn.Id)
+		utils.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Ignored. Too Old.", "frame", fo.frame, "TxnId", txn.Id)
 		fo.maybeStartRoll()
 		return false
 	}
 	if action.Id.Compare(fo.frameTxnId) == common.EQ {
-		server.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Duplicate of current frame.", "frame", fo.frame, "TxnId", txn.Id)
+		utils.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Duplicate of current frame.", "frame", fo.frame, "TxnId", txn.Id)
 		fo.maybeStartRoll()
 		return false
 	}
@@ -472,15 +476,15 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 			fo.calculateReadVoteClock()
 			clock = fo.readVoteClock
 		}
-		mask := NewVectorClock().AsMutable()
+		mask := vc.NewVectorClock().AsMutable()
 		clock.ForEach(func(vUUId *common.VarUUId, v uint64) bool {
-			if action.outcomeClock.At(vUUId) == deleted {
+			if action.outcomeClock.At(vUUId) == 0 {
 				mask.SetVarIdMax(vUUId, v)
 			}
 			return true
 		})
 		fo.subtractClock(mask)
-		server.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt", "frame", fo.frame, "TxnId", txn.Id, "uncommittedReads", fo.uncommittedReads, "uncommittedWrites", fo.uncommittedWrites)
+		utils.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt", "frame", fo.frame, "TxnId", txn.Id, "uncommittedReads", fo.uncommittedReads, "uncommittedWrites", fo.uncommittedWrites)
 		fo.maybeCreateChild()
 		return true
 	} else {
@@ -532,7 +536,7 @@ func (fo *frameOpen) maybeStartWrites() {
 
 func (fo *frameOpen) calculateReadVoteClock() {
 	if fo.readVoteClock == nil {
-		if fo.frameWritesClock.At(fo.v.UUId) == deleted {
+		if fo.frameWritesClock.At(fo.v.UUId) == 0 {
 			panic(fmt.Sprintf("%v no write to self! %v", fo.frame, fo.frameWritesClock))
 		}
 
@@ -572,7 +576,7 @@ func (fo *frameOpen) calculateWriteVoteClock() {
 	if fo.writeVoteClock == nil {
 		fo.calculateReadVoteClock()
 		clock := fo.readVoteClock.Clone()
-		written := NewVectorClock().AsMutable()
+		written := vc.NewVectorClock().AsMutable()
 		for node := fo.reads.First(); node != nil; node = node.Next() {
 			action := node.Key.(*localAction)
 			clock.MergeInMax(action.outcomeClock)
@@ -648,7 +652,7 @@ func (fo *frameOpen) maybeCreateChild() {
 	}
 	localElemVals.Sort()
 
-	var clock, written *VectorClockMutable
+	var clock, written *vc.VectorClockMutable
 
 	elem := fo.frameTxnClock.At(fo.v.UUId)
 	switch {
@@ -675,12 +679,12 @@ func (fo *frameOpen) maybeCreateChild() {
 		}
 		fo.calculateWriteVoteClock()
 		clock = fo.writeVoteClock
-		written = NewVectorClock().AsMutable()
+		written = vc.NewVectorClock().AsMutable()
 
 	default:
 		fo.calculateWriteVoteClock()
 		clock = fo.writeVoteClock
-		written = NewVectorClock().AsMutable()
+		written = vc.NewVectorClock().AsMutable()
 	}
 
 	var winner *localAction
@@ -714,7 +718,7 @@ func (fo *frameOpen) maybeCreateChild() {
 	fo.v.SetCurFrame(fo.child, winner, positions)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
-		server.DebugLog(fo.v.vm.logger, "debug", "New frame learns future reads.", "frame", fo.frame)
+		utils.DebugLog(fo.v.vm.logger, "debug", "New frame learns future reads.", "frame", fo.frame)
 		if !fo.child.ReadLearnt(action) {
 			action.LocallyComplete()
 		}
@@ -769,9 +773,9 @@ func (fo *frameOpen) maybeStartRollFrom(rescheduling bool) {
 }
 
 func (fo *frameOpen) scheduleRoll() {
-	server.DebugLog(fo.v.vm.logger, "debug", "Roll callback scheduled.", "frame", fo.frame)
+	utils.DebugLog(fo.v.vm.logger, "debug", "Roll callback scheduled.", "frame", fo.frame)
 	fo.v.vm.ScheduleCallback(fo.scheduleBackoff.Advance(), func(*time.Time) {
-		fo.v.applyToVar(func() {
+		fo.v.applyToSelf(func() {
 			fo.maybeStartRollFrom(true)
 		})
 	})
@@ -781,7 +785,7 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	fo.rollActive = true
 	// must do roll txn creation in the main go-routine
 	ctxn, varPosMap := fo.createRollClientTxn()
-	server.DebugLog(fo.v.vm.logger, "debug", "Starting roll.", "frame", fo.frame)
+	utils.DebugLog(fo.v.vm.logger, "debug", "Starting roll.", "frame", fo.frame)
 	go func() {
 		// Yes, we really must mark these as topology txns so that they
 		// are allowed through during topology changes.
@@ -794,8 +798,8 @@ func (fo *frameOpen) startRoll(rollCB rollCallback) {
 			}
 		}
 		// fmt.Printf("%v r%v (%v)\n", fo.v.UUId, ow, err == AbortRollNotFirst)
-		fo.v.applyToVar(func() {
-			server.DebugLog(fo.v.vm.logger, "debug", "Roll finished.", "frame", fo.frame, "outcome", ow, "error", err)
+		fo.v.applyToSelf(func() {
+			utils.DebugLog(fo.v.vm.logger, "debug", "Roll finished.", "frame", fo.frame, "outcome", ow, "error", err)
 			if fo.v.curFrame != fo.frame {
 				return
 			}
@@ -904,7 +908,7 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	return &ctxn, posMap
 }
 
-func (fo *frameOpen) subtractClock(clock VectorClockInterface) {
+func (fo *frameOpen) subtractClock(clock vc.VectorClock) {
 	if fo.currentState != fo {
 		panic(fmt.Sprintf("%v subtractClock called with frame in state %v", fo.v, fo.currentState))
 	}
@@ -942,12 +946,11 @@ func (fc *frameClosed) start() {
 	fc.MaybeCompleteTxns()
 }
 
-func (fc *frameClosed) frameStateMachineWitness() {}
-func (fc *frameClosed) String() string            { return "frameClosed" }
+func (fc *frameClosed) String() string { return "frameClosed" }
 
 func (fc *frameClosed) DescendentOnDisk() bool {
 	if !fc.onDisk {
-		server.DebugLog(fc.v.vm.logger, "debug", "DescendentOnDisk", "frame", fc.frame)
+		utils.DebugLog(fc.v.vm.logger, "debug", "DescendentOnDisk", "frame", fc.frame)
 		fc.onDisk = true
 		fc.MaybeCompleteTxns()
 		return true
@@ -957,7 +960,7 @@ func (fc *frameClosed) DescendentOnDisk() bool {
 
 func (fc *frameClosed) MaybeCompleteTxns() {
 	if fc.currentState == fc && fc.onDisk && fc.parent == nil {
-		server.DebugLog(fc.v.vm.logger, "debug", "MaybeCompleteTxns", "frame", fc.frame)
+		utils.DebugLog(fc.v.vm.logger, "debug", "MaybeCompleteTxns", "frame", fc.frame)
 		fc.nextState()
 		for node := fc.reads.First(); node != nil; node = node.Next() {
 			if node.Value == committed {
@@ -990,13 +993,12 @@ func (fe *frameErase) init(f *frame) {
 	fe.frame = f
 }
 
-func (fe *frameErase) start()                    {}
-func (fe *frameErase) frameStateMachineWitness() {}
-func (fe *frameErase) String() string            { return "frameErase" }
+func (fe *frameErase) start()         {}
+func (fe *frameErase) String() string { return "frameErase" }
 
 func (fe *frameErase) ReadGloballyComplete(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fe.v.vm.logger, "debug", "ReadGloballyComplete", "frame", fe.frame, "TxnId", txn.Id)
+	utils.DebugLog(fe.v.vm.logger, "debug", "ReadGloballyComplete", "frame", fe.frame, "TxnId", txn.Id)
 	if fe.currentState != fe {
 		panic(fmt.Sprintf("%v ReadGloballyComplete called for %v with frame in state %v", fe.v, txn, fe.currentState))
 	}
@@ -1011,7 +1013,7 @@ func (fe *frameErase) ReadGloballyComplete(action *localAction) {
 
 func (fe *frameErase) WriteGloballyComplete(action *localAction) {
 	txn := action.Txn
-	server.DebugLog(fe.v.vm.logger, "debug", "WriteGloballyComplete", "frame", fe.frame, "TxnId", txn.Id)
+	utils.DebugLog(fe.v.vm.logger, "debug", "WriteGloballyComplete", "frame", fe.frame, "TxnId", txn.Id)
 	if fe.currentState != fe {
 		panic(fmt.Sprintf("%v WriteGloballyComplete called for %v with frame in state %v", fe.v, txn, fe.currentState))
 	}
@@ -1027,7 +1029,7 @@ func (fe *frameErase) WriteGloballyComplete(action *localAction) {
 func (fe *frameErase) maybeErase() {
 	// (we won't receive TGCs for learnt writes)
 	if fe.reads.Len() == 0 && fe.writes.Len() == 0 {
-		server.DebugLog(fe.v.vm.logger, "debug", "maybeErase", "frame", fe.frame)
+		utils.DebugLog(fe.v.vm.logger, "debug", "maybeErase", "frame", fe.frame)
 		child := fe.child
 		child.parent = nil
 		child.MaybeCompleteTxns() // child may be in frame open!

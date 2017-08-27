@@ -10,17 +10,19 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type AcceptorDispatcher struct {
 	dispatcher.Dispatcher
 	logger            log.Logger
-	connectionManager ConnectionManager
+	connectionManager connectionmanager.ConnectionManager
 	acceptormanagers  []*AcceptorManager
 }
 
-func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorDispatcher {
+func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm connectionmanager.ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorDispatcher {
 	ad := &AcceptorDispatcher{
 		logger:           log.With(logger, "subsystem", "acceptorDispatcher"),
 		acceptormanagers: make([]*AcceptorManager, count),
@@ -35,23 +37,23 @@ func NewAcceptorDispatcher(count uint8, rmId common.RMId, cm ConnectionManager, 
 	return ad
 }
 
-func (ad *AcceptorDispatcher) OneATxnVotesReceived(sender common.RMId, oneATxnVotes *msgs.OneATxnVotes) {
+func (ad *AcceptorDispatcher) OneATxnVotesReceived(sender common.RMId, oneATxnVotes msgs.OneATxnVotes) {
 	txnId := common.MakeTxnId(oneATxnVotes.TxnId())
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.OneATxnVotesReceived(sender, txnId, oneATxnVotes) })
 }
 
-func (ad *AcceptorDispatcher) TwoATxnVotesReceived(sender common.RMId, twoATxnVotes *msgs.TwoATxnVotes) {
-	txn := eng.TxnReaderFromData(twoATxnVotes.Txn())
+func (ad *AcceptorDispatcher) TwoATxnVotesReceived(sender common.RMId, twoATxnVotes msgs.TwoATxnVotes) {
+	txn := txnreader.TxnReaderFromData(twoATxnVotes.Txn())
 	txnId := txn.Id
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TwoATxnVotesReceived(sender, txn, twoATxnVotes) })
 }
 
-func (ad *AcceptorDispatcher) TxnLocallyCompleteReceived(sender common.RMId, tlc *msgs.TxnLocallyComplete) {
+func (ad *AcceptorDispatcher) TxnLocallyCompleteReceived(sender common.RMId, tlc msgs.TxnLocallyComplete) {
 	txnId := common.MakeTxnId(tlc.TxnId())
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TxnLocallyCompleteReceived(sender, txnId, tlc) })
 }
 
-func (ad *AcceptorDispatcher) TxnSubmissionCompleteReceived(sender common.RMId, tsc *msgs.TxnSubmissionComplete) {
+func (ad *AcceptorDispatcher) TxnSubmissionCompleteReceived(sender common.RMId, tsc msgs.TxnSubmissionComplete) {
 	txnId := common.MakeTxnId(tsc.TxnId())
 	ad.withAcceptorManager(txnId, func(am *AcceptorManager) { am.TxnSubmissionCompleteReceived(sender, txnId, tsc) })
 }
@@ -59,17 +61,23 @@ func (ad *AcceptorDispatcher) TxnSubmissionCompleteReceived(sender common.RMId, 
 func (ad *AcceptorDispatcher) SetMetrics(metrics *AcceptorMetrics) {
 	for idx, executor := range ad.Executors {
 		manager := ad.acceptormanagers[idx]
-		executor.Enqueue(func() { manager.SetMetrics(metrics) })
+		executor.EnqueueFuncAsync(func() (bool, error) {
+			manager.SetMetrics(metrics)
+			return false, nil
+		})
 	}
 }
 
-func (ad *AcceptorDispatcher) Status(sc *server.StatusConsumer) {
+func (ad *AcceptorDispatcher) Status(sc *status.StatusConsumer) {
 	sc.Emit("Acceptors")
 	for idx, executor := range ad.Executors {
 		s := sc.Fork()
 		s.Emit(fmt.Sprintf("Acceptor Manager %v", idx))
 		manager := ad.acceptormanagers[idx]
-		executor.Enqueue(func() { manager.Status(s) })
+		executor.EnqueueFuncAsync(func() (bool, error) {
+			manager.Status(s)
+			return false, nil
+		})
 	}
 	sc.Join()
 }
@@ -117,5 +125,8 @@ func (ad *AcceptorDispatcher) withAcceptorManager(txnId *common.TxnId, fun func(
 	idx := uint8(txnId[server.MostRandomByteIndex]) % ad.ExecutorCount
 	executor := ad.Executors[idx]
 	manager := ad.acceptormanagers[idx]
-	return executor.Enqueue(func() { fun(manager) })
+	return executor.EnqueueFuncAsync(func() (bool, error) {
+		fun(manager)
+		return false, nil
+	})
 }

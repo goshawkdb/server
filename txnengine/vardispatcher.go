@@ -4,34 +4,12 @@ import (
 	"fmt"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
-	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
-	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-)
-
-type TopologyPublisher interface {
-	AddTopologySubscriber(TopologyChangeSubscriberType, TopologySubscriber) *configuration.Topology
-	RemoveTopologySubscriberAsync(TopologyChangeSubscriberType, TopologySubscriber)
-}
-
-type TopologySubscriber interface {
-	TopologyChanged(*configuration.Topology, func(bool))
-}
-
-type TopologyChangeSubscriberType uint8
-
-const (
-	VarSubscriber                     TopologyChangeSubscriberType = iota
-	ProposerSubscriber                TopologyChangeSubscriberType = iota
-	AcceptorSubscriber                TopologyChangeSubscriberType = iota
-	ConnectionSubscriber              TopologyChangeSubscriberType = iota
-	ConnectionManagerSubscriber       TopologyChangeSubscriberType = iota
-	EmigratorSubscriber               TopologyChangeSubscriberType = iota
-	MiscSubscriber                    TopologyChangeSubscriberType = iota
-	TopologyChangeSubscriberTypeLimit int                          = iota
+	"goshawkdb.io/server/types/localconnection"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils/status"
 )
 
 type VarDispatcher struct {
@@ -39,7 +17,7 @@ type VarDispatcher struct {
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, rmId common.RMId, cm TopologyPublisher, db *db.Databases, lc LocalConnection, logger log.Logger) *VarDispatcher {
+func NewVarDispatcher(count uint8, rmId common.RMId, cm topology.TopologyPublisher, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}
@@ -56,26 +34,26 @@ func (vd *VarDispatcher) ApplyToVar(fun func(*Var), createIfMissing bool, vUUId 
 	vd.withVarManager(vUUId, func(vm *VarManager) { vm.ApplyToVar(fun, createIfMissing, vUUId) })
 }
 
-func (vd *VarDispatcher) Status(sc *server.StatusConsumer) {
+func (vd *VarDispatcher) Status(sc *status.StatusConsumer) {
 	sc.Emit("Vars")
-	for idx, executor := range vd.Executors {
+	for idx, exe := range vd.Executors {
 		s := sc.Fork()
 		s.Emit(fmt.Sprintf("Var Manager %v", idx))
 		manager := vd.varmanagers[idx]
-		executor.Enqueue(func() { manager.Status(s) })
+		exe.EnqueueFuncAsync(func() (bool, error) {
+			manager.Status(s)
+			return false, nil
+		})
 	}
 	sc.Join()
 }
 
 func (vd *VarDispatcher) withVarManager(vUUId *common.VarUUId, fun func(*VarManager)) bool {
 	idx := uint8(vUUId[server.MostRandomByteIndex]) % vd.ExecutorCount
-	executor := vd.Executors[idx]
+	exe := vd.Executors[idx]
 	manager := vd.varmanagers[idx]
-	return executor.Enqueue(func() { fun(manager) })
-}
-
-type TranslationCallback func(*cmsgs.ClientAction, *msgs.Action, []common.RMId, map[common.RMId]bool) error
-type LocalConnection interface {
-	RunClientTransaction(*cmsgs.ClientTxn, bool, map[common.VarUUId]*common.Positions, TranslationCallback) (*TxnReader, *msgs.Outcome, error)
-	Status(*server.StatusConsumer)
+	return exe.EnqueueFuncAsync(func() (bool, error) {
+		fun(manager)
+		return false, nil
+	})
 }

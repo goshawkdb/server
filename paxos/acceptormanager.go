@@ -10,12 +10,20 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	"github.com/prometheus/client_golang/prometheus"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
+	"goshawkdb.io/common/actor"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
+	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/proxy"
+	"goshawkdb.io/server/utils/senders"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -24,7 +32,7 @@ func init() {
 }
 
 type AcceptorManager struct {
-	ServerConnectionPublisher
+	sconn.ServerConnectionPublisher
 	logger    log.Logger
 	RMId      common.RMId
 	DB        *db.Databases
@@ -40,9 +48,9 @@ type AcceptorMetrics struct {
 	Lifespan prometheus.Observer
 }
 
-func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {
+func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm connectionmanager.ConnectionManager, db *db.Databases, logger log.Logger) *AcceptorManager {
 	am := &AcceptorManager{
-		ServerConnectionPublisher: NewServerConnectionPublisherProxy(exe, cm, logger),
+		ServerConnectionPublisher: proxy.NewServerConnectionPublisherProxy(exe, cm, logger),
 		logger:    logger, // acceptorDispatcher creates the context for us
 		RMId:      rmId,
 		DB:        db,
@@ -50,7 +58,10 @@ func NewAcceptorManager(rmId common.RMId, exe *dispatcher.Executor, cm Connectio
 		instances: make(map[instanceId]*instance),
 		acceptors: make(map[common.TxnId]*acceptorInstances),
 	}
-	exe.Enqueue(func() { am.Topology = cm.AddTopologySubscriber(eng.AcceptorSubscriber, am) })
+	exe.EnqueueFuncAsync(func() (bool, error) {
+		am.Topology = cm.AddTopologySubscriber(topology.AcceptorSubscriber, am)
+		return false, nil
+	})
 	return am
 }
 
@@ -73,7 +84,7 @@ func (am *AcceptorManager) ensureInstance(txnId *common.TxnId, instId *instanceI
 	}
 }
 
-func (am *AcceptorManager) ensureAcceptor(txn *eng.TxnReader) *Acceptor {
+func (am *AcceptorManager) ensureAcceptor(txn *txnreader.TxnReader) *Acceptor {
 	txnId := txn.Id
 	aInst, found := am.acceptors[*txnId]
 	switch {
@@ -163,26 +174,32 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 	return nil
 }
 
-func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan struct{})
-	enqueued := am.Exe.Enqueue(func() {
-		am.Topology = topology
-		for _, ai := range am.acceptors {
-			if ai.acceptor != nil {
-				ai.acceptor.TopologyChanged(topology)
-			}
+type amTopologyChanged struct {
+	actor.MsgSyncQuery
+	am       *AcceptorManager
+	topology *configuration.Topology
+}
+
+func (tc *amTopologyChanged) Exec() (bool, error) {
+	defer tc.MustClose()
+	tc.am.Topology = tc.topology
+	for _, ai := range tc.am.acceptors {
+		if ai.acceptor != nil {
+			ai.acceptor.TopologyChanged(tc.topology)
 		}
-		close(finished)
-	})
-	if enqueued {
-		go am.Exe.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case <-finished:
-				done(true)
-			case <-terminated:
-				done(false)
-			}
-		})
+	}
+
+	return false, nil
+}
+
+func (am *AcceptorManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	tc := &amTopologyChanged{
+		am:       am,
+		topology: topology,
+	}
+	tc.InitMsg(am.Exe.Mailbox)
+	if am.Exe.Mailbox.EnqueueMsg(tc) {
+		go func() { done(tc.Wait()) }()
 	} else {
 		done(false)
 	}
@@ -204,9 +221,9 @@ func (am *AcceptorManager) SetMetrics(metrics *AcceptorMetrics) {
 	am.metrics = metrics
 }
 
-func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes *msgs.OneATxnVotes) {
+func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneATxnVotes msgs.OneATxnVotes) {
 	instanceRMId := common.RMId(oneATxnVotes.RmId())
-	server.DebugLog(am.logger, "debug", "1A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
+	utils.DebugLog(am.logger, "debug", "1A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -232,13 +249,13 @@ func (am *AcceptorManager) OneATxnVotesReceived(sender common.RMId, txnId *commo
 	}
 
 	// The proposal senders are repeating, so this use of OSS is fine.
-	NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
+	senders.NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
 }
 
-func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.TxnReader, twoATxnVotes *msgs.TwoATxnVotes) {
+func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *txnreader.TxnReader, twoATxnVotes msgs.TwoATxnVotes) {
 	instanceRMId := common.RMId(twoATxnVotes.RmId())
 	txnId := txn.Id
-	server.DebugLog(am.logger, "debug", "2A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
+	utils.DebugLog(am.logger, "debug", "2A received.", "TxnId", txnId, "sender", sender, "instance", instanceRMId)
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
 	copy(instIdSlice, txnId[:])
@@ -281,15 +298,15 @@ func (am *AcceptorManager) TwoATxnVotesReceived(sender common.RMId, txn *eng.Txn
 			failure.SetRoundNumber(failureRequests[idx].RoundNumber())
 			failure.SetRoundNumberTooLow(uint32(inst.promiseNum >> 32))
 		}
-		server.DebugLog(am.logger, "debug", "Sending 2B failures.", "TxnId", txnId, "recipient", sender, "instance", instanceRMId)
+		utils.DebugLog(am.logger, "debug", "Sending 2B failures.", "TxnId", txnId, "recipient", sender, "instance", instanceRMId)
 		// The proposal senders are repeating, so this use of OSS is fine.
-		NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
+		senders.NewOneShotSender(am.logger, common.SegToBytes(replySeg), am, sender)
 	}
 }
 
-func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId *common.TxnId, tlc *msgs.TxnLocallyComplete) {
+func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId *common.TxnId, tlc msgs.TxnLocallyComplete) {
 	if aInst, found := am.acceptors[*txnId]; found && aInst.acceptor != nil {
-		server.DebugLog(am.logger, "debug", "TLC received. Acceptor found.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(am.logger, "debug", "TLC received. Acceptor found.", "TxnId", txnId, "sender", sender)
 		aInst.acceptor.TxnLocallyCompleteReceived(sender)
 
 	} else {
@@ -297,28 +314,28 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 		// immediately prior to sending TGC, and then died. Now we're
 		// back up, the proposers have sent us more TLCs, and we should
 		// just reply with TGCs.
-		server.DebugLog(am.logger, "debug", "TLC received. Acceptor not found.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(am.logger, "debug", "TLC received. Acceptor not found.", "TxnId", txnId, "sender", sender)
 		seg := capn.NewBuffer(nil)
 		msg := msgs.NewRootMessage(seg)
 		tgc := msgs.NewTxnGloballyComplete(seg)
 		msg.SetTxnGloballyComplete(tgc)
 		tgc.SetTxnId(txnId[:])
-		server.DebugLog(am.logger, "debug", "Sending single TGC.", "TxnId", txnId, "recipient", sender)
+		utils.DebugLog(am.logger, "debug", "Sending single TGC.", "TxnId", txnId, "recipient", sender)
 		// Use of OSS here is ok because this is the default action on
 		// not finding state.
-		NewOneShotSender(am.logger, common.SegToBytes(seg), am, sender)
+		senders.NewOneShotSender(am.logger, common.SegToBytes(seg), am, sender)
 	}
 }
 
-func (am *AcceptorManager) TxnSubmissionCompleteReceived(sender common.RMId, txnId *common.TxnId, tsc *msgs.TxnSubmissionComplete) {
+func (am *AcceptorManager) TxnSubmissionCompleteReceived(sender common.RMId, txnId *common.TxnId, tsc msgs.TxnSubmissionComplete) {
 	if aInst, found := am.acceptors[*txnId]; found && aInst.acceptor != nil {
-		server.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "sender", sender)
+		utils.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "sender", sender)
 		aInst.acceptor.TxnSubmissionCompleteReceived(sender)
 	}
 }
 
 func (am *AcceptorManager) AcceptorFinished(txnId *common.TxnId) {
-	server.DebugLog(am.logger, "debug", "Acceptor finished.", "TxnId", txnId)
+	utils.DebugLog(am.logger, "debug", "Acceptor finished.", "TxnId", txnId)
 	aInst, found := am.acceptors[*txnId]
 	if !found {
 		panic(fmt.Sprintf("AcceptorManager AcceptorFinished: No such acceptor found! %v", txnId))
@@ -334,7 +351,7 @@ func (am *AcceptorManager) AcceptorFinished(txnId *common.TxnId) {
 	}
 }
 
-func (am *AcceptorManager) Status(sc *server.StatusConsumer) {
+func (am *AcceptorManager) Status(sc *status.StatusConsumer) {
 	s := sc.Fork()
 	s.Emit(fmt.Sprintf("- Live Instances: %v", len(am.instances)))
 	for instId, inst := range am.instances {
@@ -447,7 +464,7 @@ func (i *instance) TwoATxnVotesReceived(roundNumber paxosNumber, ballot *eng.Bal
 	}
 }
 
-func (i *instance) status(instId instanceId, sc *server.StatusConsumer) {
+func (i *instance) status(instId instanceId, sc *status.StatusConsumer) {
 	sc.Emit(instId.String())
 	sc.Emit(fmt.Sprintf("- Promise Number: %v", i.promiseNum))
 	sc.Emit(fmt.Sprintf("- Accepted Number: %v", i.acceptedNum))

@@ -4,23 +4,36 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-kit/kit/log"
-	cc "github.com/msackman/chancell"
-	"goshawkdb.io/common"
+	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils/status"
 	"math/rand"
-	"net"
 	"time"
 )
 
+type Handshaker interface {
+	Dial() error
+	PerformHandshake(*configuration.Topology) (Protocol, error)
+	Restart() bool
+	InternalShutdown()
+}
+
+type Protocol interface {
+	Run(*Connection) error
+	TopologyChanged(*ConnectionMsgTopologyChanged) error
+	Restart() bool
+	InternalShutdown()
+}
+
 type Connection struct {
-	logger            log.Logger
-	connectionManager *ConnectionManager
-	cellTail          *cc.ChanCellTail
-	enqueueQueryInner func(connectionMsg, *cc.ChanCell, cc.CurCellConsumer) (bool, cc.CurCellConsumer)
-	queryChan         <-chan connectionMsg
-	shutdownStarted   bool
+	*actor.Mailbox
+	*actor.BasicServerOuter
+
+	connectionManager connectionmanager.ConnectionManager
+	shuttingDown      bool
 	handshaker        Handshaker
 	rng               *rand.Rand
 	currentState      connectionStateMachineComponent
@@ -28,264 +41,176 @@ type Connection struct {
 	connectionDial
 	connectionHandshake
 	connectionRun
+
+	inner connectionInner
 }
 
-type connectionMsg interface{}
-
-type connectionMsgSync interface {
-	connectionMsg
-	common.MsgSync
+type connectionInner struct {
+	*Connection
+	*actor.BasicServerInner // super-type, essentially
+	previousState           connectionStateMachineComponent
 }
 
-type connectionMsgStartShutdown struct{}
-type connectionMsgShutdownComplete struct{}
-
-type connectionMsgTopologyChanged struct {
-	common.MsgSyncQuery
-	topology *configuration.Topology
-}
-
-type connectionMsgStatus struct {
-	*server.StatusConsumer
-}
-
-// for paxos.Actorish
-type connectionMsgExec func()
-
-// is async
-func (conn *Connection) Shutdown() {
-	conn.enqueueQuery(connectionMsgStartShutdown{})
-}
-
-func (conn *Connection) shutdownComplete() {
-	conn.enqueueQuery(connectionMsgShutdownComplete{})
-}
-
-func (conn *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	msg := &connectionMsgTopologyChanged{topology: topology}
-	conn.enqueueQuerySync(msg)
-	done(true)
-}
-
-func (conn *Connection) Status(sc *server.StatusConsumer) {
-	conn.enqueueQuery(connectionMsgStatus{StatusConsumer: sc})
-}
-
-// This is for the paxos.Actorish interface
-func (conn *Connection) Enqueue(fun func()) bool {
-	return conn.enqueueQuery(connectionMsgExec(fun))
-}
-
-// This is for the paxos.Actorish interface
-func (conn *Connection) WithTerminatedChan(fun func(chan struct{})) {
-	fun(conn.cellTail.Terminated)
-}
-
-type connectionMsgExecFuncError func() error
-
-func (conn *Connection) EnqueueFuncError(fun func() error) bool {
-	return conn.enqueueQuery(connectionMsgExecFuncError(fun))
-}
-
-type connectionQueryCapture struct {
-	conn *Connection
-	msg  connectionMsg
-}
-
-func (cqc *connectionQueryCapture) ccc(cell *cc.ChanCell) (bool, cc.CurCellConsumer) {
-	return cqc.conn.enqueueQueryInner(cqc.msg, cell, cqc.ccc)
-}
-
-func (conn *Connection) enqueueQuery(msg connectionMsg) bool {
-	cqc := &connectionQueryCapture{conn: conn, msg: msg}
-	return conn.cellTail.WithCell(cqc.ccc)
-}
-
-func (conn *Connection) enqueueQuerySync(msg connectionMsgSync) bool {
-	resultChan := msg.Init()
-	if conn.enqueueQuery(msg) {
-		select {
-		case <-resultChan:
-			return true
-		case <-conn.cellTail.Terminated:
-			return false
-		}
-	} else {
-		return false
-	}
-}
-
-// we are dialing out to someone else
-func NewConnectionTCPTLSCapnpDialer(remoteHost string, cm *ConnectionManager, logger log.Logger) *Connection {
-	logger = log.With(logger, "subsystem", "connection", "dir", "outgoing", "protocol", "capnp")
-	phone := common.NewTCPDialer(nil, remoteHost, logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, 0, cm)
-	return NewConnection(yesman, cm, logger)
-}
-
-// the socket is already established - we got it from the TCP listener
-func NewConnectionTCPTLSCapnpHandshaker(socket *net.TCPConn, cm *ConnectionManager, count uint32, logger log.Logger) {
-	logger = log.With(logger, "subsystem", "connection", "dir", "incoming", "protocol", "capnp")
-	phone := common.NewTCPDialer(socket, "", logger)
-	yesman := NewTLSCapnpHandshaker(phone, logger, count, cm)
-	NewConnection(yesman, cm, logger)
-}
-
-func NewConnection(yesman Handshaker, cm *ConnectionManager, logger log.Logger) *Connection {
-	conn := &Connection{
-		logger:            logger,
+func NewConnection(yesman Handshaker, cm connectionmanager.ConnectionManager, logger log.Logger) *Connection {
+	c := &Connection{
 		connectionManager: cm,
 		handshaker:        yesman,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	conn.start()
-	return conn
+
+	ci := &c.inner
+	ci.Connection = c
+	ci.BasicServerInner = actor.NewBasicServerInner(logger)
+
+	_, err := actor.Spawn(ci)
+	if err != nil {
+		panic(err) // "impossible"
+	}
+
+	c.EnqueueMsg(connectionMsgInit{Connection: c})
+
+	return c
 }
 
-func (conn *Connection) start() {
-	var head *cc.ChanCellHead
-	head, conn.cellTail = cc.NewChanCellTail(
-		func(n int, cell *cc.ChanCell) {
-			queryChan := make(chan connectionMsg, n)
-			cell.Open = func() { conn.queryChan = queryChan }
-			cell.Close = func() { close(queryChan) }
-			conn.enqueueQueryInner = func(msg connectionMsg, curCell *cc.ChanCell, cont cc.CurCellConsumer) (bool, cc.CurCellConsumer) {
-				if curCell == cell {
-					select {
-					case queryChan <- msg:
-						return true, nil
-					default:
-						return false, nil
-					}
-				} else {
-					return false, cont
-				}
-			}
-		})
-
-	conn.connectionDelay.init(conn)
-	conn.connectionDial.init(conn)
-	conn.connectionHandshake.init(conn)
-	conn.connectionRun.init(conn)
-
-	conn.currentState = &conn.connectionDial
-
-	go conn.actorLoop(head)
+type connectionMsgInit struct {
+	*Connection
 }
 
-func (conn *Connection) actorLoop(head *cc.ChanCellHead) {
-	conn.topology = conn.connectionManager.AddTopologySubscriber(eng.ConnectionSubscriber, conn)
-	defer conn.connectionManager.RemoveTopologySubscriberAsync(eng.ConnectionSubscriber, conn)
-
-	defer func() {
-		if r := recover(); r != nil {
-			conn.logger.Log("msg", "Connection panicked!", "error", fmt.Sprint(r))
-		}
-	}()
-
-	var (
-		err       error
-		oldState  connectionStateMachineComponent
-		queryChan <-chan connectionMsg
-		queryCell *cc.ChanCell
-	)
-	chanFun := func(cell *cc.ChanCell) { queryChan, queryCell = conn.queryChan, cell }
-	head.WithCell(chanFun)
-	if conn.topology == nil {
+func (msg connectionMsgInit) Exec() (bool, error) {
+	msg.topology = msg.connectionManager.AddTopologySubscriber(topology.ConnectionSubscriber, msg.Connection)
+	if msg.topology == nil {
 		// Most likely is that the connection manager has shutdown due
 		// to some other error and so the sync enqueue failed.
-		err = errors.New("No local topology, not ready for any connections.")
+		return false, errors.New("No local topology, not ready for any connections.")
 	}
 
-	terminated := err != nil // have we stopped?
-	terminating := false     // what should we do next?
-	for !terminated {
-		if oldState != conn.currentState {
-			oldState = conn.currentState
-			terminating, err = conn.currentState.start()
-		} else if msg, ok := <-queryChan; ok {
-			terminating, terminated, err = conn.handleMsg(msg)
-		} else {
-			head.Next(queryCell, chanFun)
-		}
-		terminating = terminating || err != nil
-		if terminating {
-			conn.startShutdown(err)
-			err = nil
-		}
-	}
-	conn.cellTail.Terminate()
-	conn.handleShutdown(err)
-	conn.logger.Log("msg", "Terminated.")
+	msg.nextState(nil)
+	return false, nil
 }
 
-func (conn *Connection) handleMsg(msg connectionMsg) (terminating, terminated bool, err error) {
-	switch msgT := msg.(type) {
-	case connectionMsgStartShutdown:
-		terminating = true
-	case connectionMsgShutdownComplete:
-		terminated = true
-	case connectionMsgExec:
-		msgT()
-	case connectionMsgExecFuncError:
-		err = msgT()
-	case *connectionMsgTopologyChanged:
-		err = conn.topologyChanged(msgT)
-	case connectionMsgStatus:
-		conn.status(msgT.StatusConsumer)
+func (c *Connection) ShutdownCompleted() {
+	c.EnqueueMsg(actor.MsgShutdown{})
+}
+
+type ConnectionMsgTopologyChanged struct {
+	actor.MsgSyncQuery
+	c        *Connection
+	Topology *configuration.Topology
+}
+
+func (msg *ConnectionMsgTopologyChanged) Exec() (bool, error) {
+	msg.c.topology = msg.Topology
+	switch {
+	case msg.c.protocol != nil:
+		return false, msg.c.protocol.TopologyChanged(msg) // This calls msg.MustClose
 	default:
-		panic(fmt.Sprintf("Received unexpected message: %#v", msgT))
+		msg.MustClose()
+		return false, nil
 	}
-	if err != nil && !terminating {
-		err = conn.maybeRestartConnection(err)
+}
+
+func (c *Connection) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	msg := &ConnectionMsgTopologyChanged{Topology: topology, c: c}
+	msg.InitMsg(c)
+	if c.EnqueueMsg(msg) {
+		go func() {
+			msg.Wait()
+			done(true) // connection drop is not a problem
+		}()
+	} else {
+		done(true) // connection drop is not a problem
+	}
+}
+
+type connectionMsgStatus struct {
+	*Connection
+	sc *status.StatusConsumer
+}
+
+func (msg connectionMsgStatus) Exec() (bool, error) {
+	if msg.protocol != nil {
+		msg.sc.Emit(fmt.Sprintf("Connection %v", msg.protocol))
+	} else if msg.handshaker != nil {
+		msg.sc.Emit(fmt.Sprintf("Connection %v", msg.handshaker))
+	}
+	msg.sc.Join()
+	return false, nil
+}
+
+func (c *Connection) Status(sc *status.StatusConsumer) {
+	c.EnqueueMsg(connectionMsgStatus{Connection: c, sc: sc})
+}
+
+func (c *connectionInner) Init(self *actor.Actor) (bool, error) {
+	terminate, err := c.BasicServerInner.Init(self)
+	if terminate || err != nil {
+		return terminate, err
+	}
+
+	c.Mailbox = self.Mailbox
+	c.BasicServerOuter = actor.NewBasicServerOuter(self.Mailbox)
+
+	c.connectionDelay.init(c.Connection)
+	c.connectionDial.init(c.Connection)
+	c.connectionHandshake.init(c.Connection)
+	c.connectionRun.init(c.Connection)
+
+	return false, nil
+}
+
+func (c *connectionInner) HandleShutdown(err error) bool {
+	if c.shuttingDown {
+		c.connectionManager.RemoveTopologySubscriberAsync(topology.ConnectionSubscriber, c)
+		return c.BasicServerInner.HandleShutdown(err)
+	}
+
+	if err != nil {
+		if err = c.maybeRestartConnection(err); err == nil {
+			return false
+		}
+	}
+
+	if err != nil {
+		c.Logger.Log("error", err)
+	}
+	c.shuttingDown = true
+	if c.protocol != nil {
+		c.protocol.InternalShutdown() // this will call ShutdownCompleted
+	} else {
+		if c.handshaker != nil {
+			c.handshaker.InternalShutdown()
+		}
+		c.ShutdownCompleted()
+	}
+	c.currentState = nil
+	c.protocol = nil
+	c.handshaker = nil
+	return false
+}
+
+func (c *connectionInner) HandleBeat() (terminate bool, err error) {
+	for c.currentState != nil && c.previousState != c.currentState && !terminate && err == nil {
+		c.previousState = c.currentState
+		terminate, err = c.currentState.start()
 	}
 	return
 }
 
-func (conn *Connection) maybeRestartConnection(err error) error {
+func (c *Connection) maybeRestartConnection(err error) error {
 	restartable := false
-	if conn.protocol != nil {
-		restartable = conn.protocol.Restart()
-	} else if conn.handshaker != nil {
-		restartable = conn.handshaker.Restart()
+	if c.protocol != nil {
+		restartable = c.protocol.Restart()
+	} else if c.handshaker != nil {
+		restartable = c.handshaker.Restart()
 	}
 
 	if restartable {
-		conn.logger.Log("msg", "Restarting.", "error", err)
-		conn.nextState(&conn.connectionDelay)
+		c.inner.Logger.Log("msg", "Restarting.", "error", err)
+		c.nextState(&c.connectionDelay)
 		return nil
 	} else {
-		return err // it's fatal; actor loop will shutdown Protocol or Handshaker
+		return err // it's fatal; HandleShutdown will shutdown Protocol and Handshaker
 	}
-}
-
-func (conn *Connection) startShutdown(err error) {
-	if err != nil {
-		conn.logger.Log("error", err)
-	}
-	if !conn.shutdownStarted {
-		conn.shutdownStarted = true
-		if conn.protocol != nil {
-			conn.protocol.InternalShutdown()
-			conn.protocol = nil
-		} else {
-			conn.shutdownComplete()
-		}
-	}
-}
-
-func (conn *Connection) handleShutdown(err error) {
-	if err != nil {
-		conn.logger.Log("error", err)
-	}
-	if conn.protocol != nil {
-		conn.protocol.InternalShutdown()
-	} else if conn.handshaker != nil {
-		conn.handshaker.InternalShutdown()
-	}
-	conn.currentState = nil
-	conn.protocol = nil
-	conn.handshaker = nil
 }
 
 // state machine
@@ -293,33 +218,23 @@ func (conn *Connection) handleShutdown(err error) {
 type connectionStateMachineComponent interface {
 	init(*Connection)
 	start() (bool, error)
-	connectionStateMachineComponentWitness()
 }
 
-func (conn *Connection) nextState(requestedState connectionStateMachineComponent) {
+func (c *Connection) nextState(requestedState connectionStateMachineComponent) {
 	if requestedState == nil {
-		switch conn.currentState {
-		case &conn.connectionDelay:
-			conn.currentState = &conn.connectionDial
-		case &conn.connectionDial:
-			conn.currentState = &conn.connectionHandshake
-		case &conn.connectionHandshake:
-			conn.currentState = &conn.connectionRun
+		switch c.currentState {
+		case nil, &c.connectionDelay:
+			c.currentState = &c.connectionDial
+		case &c.connectionDial:
+			c.currentState = &c.connectionHandshake
+		case &c.connectionHandshake:
+			c.currentState = &c.connectionRun
 		default:
-			panic(fmt.Sprintf("Unexpected current state for nextState: %v", conn.currentState))
+			panic(fmt.Sprintf("Unexpected current state for nextState: %v", c.currentState))
 		}
 	} else {
-		conn.currentState = requestedState
+		c.currentState = requestedState
 	}
-}
-
-func (conn *Connection) status(sc *server.StatusConsumer) {
-	if conn.protocol != nil {
-		sc.Emit(fmt.Sprintf("Connection %v", conn.protocol))
-	} else if conn.handshaker != nil {
-		sc.Emit(fmt.Sprintf("Connection %v", conn.handshaker))
-	}
-	sc.Join()
 }
 
 // Delay
@@ -329,8 +244,7 @@ type connectionDelay struct {
 	delay *time.Timer
 }
 
-func (cd *connectionDelay) connectionStateMachineComponentWitness() {}
-func (cd *connectionDelay) String() string                          { return "ConnectionDelay" }
+func (cd *connectionDelay) String() string { return "ConnectionDelay" }
 
 func (cd *connectionDelay) init(conn *Connection) {
 	cd.Connection = conn
@@ -340,18 +254,17 @@ func (cd *connectionDelay) start() (bool, error) {
 	cd.protocol = nil
 	if cd.delay == nil {
 		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
-		cd.delay = time.AfterFunc(delay, func() {
-			cd.Enqueue(cd.received)
-		})
+		cd.delay = time.AfterFunc(delay, func() { cd.EnqueueMsg(cd) })
 	}
 	return false, nil
 }
 
-func (cd *connectionDelay) received() {
+func (cd *connectionDelay) Exec() (bool, error) {
 	if cd.currentState == cd {
 		cd.delay = nil
 		cd.nextState(nil)
 	}
+	return false, nil
 }
 
 // Dial
@@ -360,8 +273,7 @@ type connectionDial struct {
 	*Connection
 }
 
-func (cc *connectionDial) connectionStateMachineComponentWitness() {}
-func (cc *connectionDial) String() string                          { return "ConnectionDial" }
+func (cc *connectionDial) String() string { return "ConnectionDial" }
 
 func (cc *connectionDial) init(conn *Connection) {
 	cc.Connection = conn
@@ -372,7 +284,7 @@ func (cc *connectionDial) start() (bool, error) {
 	if err == nil {
 		cc.nextState(nil)
 	} else {
-		cc.logger.Log("msg", "Error when dialing.", "error", err)
+		cc.inner.Logger.Log("msg", "Error when dialing.", "error", err)
 		cc.nextState(&cc.connectionDelay)
 	}
 	return false, nil
@@ -385,8 +297,7 @@ type connectionHandshake struct {
 	topology *configuration.Topology
 }
 
-func (cah *connectionHandshake) connectionStateMachineComponentWitness() {}
-func (cah *connectionHandshake) String() string                          { return "ConnectionHandshake" }
+func (cah *connectionHandshake) String() string { return "ConnectionHandshake" }
 
 func (cah *connectionHandshake) init(conn *Connection) {
 	cah.Connection = conn
@@ -410,8 +321,7 @@ type connectionRun struct {
 	protocol Protocol
 }
 
-func (cr *connectionRun) connectionStateMachineComponentWitness() {}
-func (cr *connectionRun) String() string                          { return "ConnectionRun" }
+func (cr *connectionRun) String() string { return "ConnectionRun" }
 
 func (cr *connectionRun) init(conn *Connection) {
 	cr.Connection = conn
@@ -419,15 +329,4 @@ func (cr *connectionRun) init(conn *Connection) {
 
 func (cr *connectionRun) start() (bool, error) {
 	return false, cr.protocol.Run(cr.Connection)
-}
-
-func (cr *connectionRun) topologyChanged(tc *connectionMsgTopologyChanged) error {
-	switch {
-	case cr.protocol != nil:
-		cr.topology = tc.topology
-		return cr.protocol.TopologyChanged(tc)
-	default:
-		tc.Close()
-		return nil
-	}
 }

@@ -7,15 +7,19 @@ import (
 	mdbs "github.com/msackman/gomdb/server"
 	tw "github.com/msackman/gotimerwheel"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
+	"goshawkdb.io/common/actor"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types/localconnection"
+	"goshawkdb.io/server/types/topology"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 	"time"
 )
 
 type VarManager struct {
-	LocalConnection
+	localconnection.LocalConnection
 	logger           log.Logger
 	Topology         *configuration.Topology
 	RMId             common.RMId
@@ -32,7 +36,7 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublisher, db *db.Databases, lc LocalConnection, logger log.Logger) *VarManager {
+func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp topology.TopologyPublisher, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarManager {
 	vm := &VarManager{
 		LocalConnection: lc,
 		logger:          logger, // varDispatcher creates the context for us
@@ -43,41 +47,53 @@ func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp TopologyPublis
 		tw:              tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
 		exe:             exe,
 	}
-	exe.Enqueue(func() {
-		vm.Topology = tp.AddTopologySubscriber(VarSubscriber, vm)
+	exe.EnqueueFuncAsync(func() (bool, error) {
+		vm.Topology = tp.AddTopologySubscriber(topology.VarSubscriber, vm)
 		vm.RollAllowed = vm.Topology != nil && vm.Topology.NextConfiguration == nil
+		return false, nil
 	})
 	return vm
 }
 
-func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	finished := make(chan bool)
-	enqueued := vm.exe.Enqueue(func() {
-		if od := vm.onDisk; od != nil {
-			vm.onDisk = nil
-			od(false)
-		}
-		vm.Topology = topology
-		server.DebugLog(vm.logger, "debug", "TopologyChanged.", "topology", topology)
+type vmTopologyChanged struct {
+	actor.MsgSyncQuery
+	vm       *VarManager
+	topology *configuration.Topology
+	outcome  bool
+}
 
-		if topology.NextConfiguration == nil {
-			vm.RollAllowed = true
-			server.DebugLog(vm.logger, "debug", "TopologyChanged. Calling done.", "topology", topology)
-			finished <- true
-		} else {
-			vm.onDisk = func(result bool) { finished <- result }
-			vm.checkAllDisk()
-		}
-	})
-	if enqueued {
-		go vm.exe.WithTerminatedChan(func(terminated chan struct{}) {
-			select {
-			case success := <-finished:
-				done(success)
-			case <-terminated:
-				done(false)
-			}
-		})
+func (tc *vmTopologyChanged) Exec() (bool, error) {
+	if od := tc.vm.onDisk; od != nil {
+		tc.vm.onDisk = nil
+		od(false)
+	}
+	tc.vm.Topology = tc.topology
+	utils.DebugLog(tc.vm.logger, "debug", "TopologyChanged.", "topology", tc.topology)
+
+	if tc.topology.NextConfiguration == nil {
+		tc.vm.RollAllowed = true
+		utils.DebugLog(tc.vm.logger, "debug", "TopologyChanged. Calling done.", "topology", tc.topology)
+		tc.done(true)
+	} else {
+		tc.vm.onDisk = tc.done
+		tc.vm.checkAllDisk()
+	}
+	return false, nil
+}
+
+func (tc *vmTopologyChanged) done(result bool) {
+	tc.outcome = result
+	tc.MustClose()
+}
+
+func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
+	tc := &vmTopologyChanged{
+		vm:       vm,
+		topology: topology,
+	}
+	tc.InitMsg(vm.exe.Mailbox)
+	if vm.exe.Mailbox.EnqueueMsg(tc) {
+		go func() { done(tc.Wait() && tc.outcome) }()
 	} else {
 		done(false)
 	}
@@ -91,7 +107,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var), createIfMissing bool, uuid *com
 	if v == nil && createIfMissing {
 		v = NewVar(uuid, vm.exe, vm.db, vm)
 		vm.active[*v.UUId] = v
-		server.DebugLog(vm.logger, "debug", "New var.", "VarUUId", uuid)
+		utils.DebugLog(vm.logger, "debug", "New var.", "VarUUId", uuid)
 	}
 	fun(v)
 	if _, found := vm.active[*uuid]; v != nil && !found && !v.isIdle() {
@@ -110,14 +126,14 @@ func (vm *VarManager) checkAllDisk() {
 		}
 		vm.onDisk = nil
 		vm.RollAllowed = false
-		server.DebugLog(vm.logger, "debug", "Rolls now banned. Calling done.", "topology", vm.Topology)
+		utils.DebugLog(vm.logger, "debug", "Rolls now banned. Calling done.", "topology", vm.Topology)
 		od(true)
 	}
 }
 
 // var.VarLifecycle interface
 func (vm *VarManager) SetInactive(v *Var) {
-	server.DebugLog(vm.logger, "debug", "Var now inactive.", "VarUUId", v.UUId)
+	utils.DebugLog(vm.logger, "debug", "Var now inactive.", "VarUUId", v.UUId)
 	v1, found := vm.active[*v.UUId]
 	switch {
 	case !found:
@@ -171,7 +187,7 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 	}
 }
 
-func (vm *VarManager) Status(sc *server.StatusConsumer) {
+func (vm *VarManager) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Active Vars: %v", len(vm.active)))
 	sc.Emit(fmt.Sprintf("- Callbacks: %v", vm.tw.Length()))
 	sc.Emit(fmt.Sprintf("- Beater live? %v", vm.beaterTerminator != nil))
@@ -192,13 +208,14 @@ func (vm *VarManager) ScheduleCallback(interval time.Duration, fun tw.Event) {
 	}
 }
 
-func (vm *VarManager) beat() {
+func (vm *VarManager) beat() (bool, error) {
 	vm.tw.AdvanceTo(time.Now(), 32)
 	// fmt.Println("done:", )
 	if vm.tw.IsEmpty() && vm.beaterTerminator != nil {
 		close(vm.beaterTerminator)
 		vm.beaterTerminator = nil
 	}
+	return false, nil
 }
 
 func (vm *VarManager) beater(terminate chan struct{}) {
@@ -209,7 +226,7 @@ func (vm *VarManager) beater(terminate chan struct{}) {
 		case <-terminate:
 			return
 		default:
-			vm.exe.Enqueue(vm.beat)
+			vm.exe.EnqueueFuncAsync(vm.beat)
 		}
 	}
 }

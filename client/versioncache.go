@@ -6,10 +6,11 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
-	ch "goshawkdb.io/server/consistenthash"
-	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types"
+	ch "goshawkdb.io/server/utils/consistenthash"
+	"goshawkdb.io/server/utils/txnreader"
+	"goshawkdb.io/server/utils/vectorclock"
 )
 
 type versionCache struct {
@@ -59,7 +60,7 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 	}
 
 	actions := cTxn.Actions()
-	actionsMap := make(map[common.VarUUId]server.EmptyStruct, actions.Len())
+	actionsMap := make(map[common.VarUUId]types.EmptyStruct, actions.Len())
 
 	if cTxn.Retry() {
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
@@ -68,7 +69,7 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 			if _, found := actionsMap[*vUUId]; found {
 				return fmt.Errorf("Var Id appears twice in txn actions: %v", vUUId)
 			} else {
-				actionsMap[*vUUId] = server.EmptyStructVal
+				actionsMap[*vUUId] = types.EmptyStructVal
 			}
 			if which := action.Which(); which != cmsgs.CLIENTACTION_READ {
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
@@ -89,7 +90,7 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 			if _, found := actionsMap[*vUUId]; found {
 				return fmt.Errorf("Var Id appears twice in txn actions: %v", vUUId)
 			} else {
-				actionsMap[*vUUId] = server.EmptyStructVal
+				actionsMap[*vUUId] = types.EmptyStructVal
 			}
 			c, found := vc.cache[*vUUId]
 			switch act := action.Which(); act {
@@ -163,9 +164,9 @@ func (vc *versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability
 	return true
 }
 
-func (vc *versionCache) UpdateFromCommit(txn *eng.TxnReader, outcome *msgs.Outcome) {
+func (vc *versionCache) UpdateFromCommit(txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	txnId := txn.Id
-	clock := eng.VectorClockFromData(outcome.Commit(), false)
+	clock := vectorclock.VectorClockFromData(outcome.Commit(), false)
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -246,8 +247,8 @@ func (vc *versionCache) updateExisting(updatesCap *msgs.Update_List, updateGraph
 	for idx, l := 0, updatesCap.Len(); idx < l; idx++ {
 		updateCap := updatesCap.At(idx)
 		txnId := common.MakeTxnId(updateCap.TxnId())
-		clock := eng.VectorClockFromData(updateCap.Clock(), true)
-		actionsCap := eng.TxnActionsFromData(updateCap.Actions(), true).Actions()
+		clock := vectorclock.VectorClockFromData(updateCap.Clock(), true)
+		actionsCap := txnreader.TxnActionsFromData(updateCap.Actions(), true).Actions()
 
 		for idy, m := 0, actionsCap.Len(); idy < m; idy++ {
 			actionCap := actionsCap.At(idy)

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/go-kit/kit/log"
@@ -13,9 +14,19 @@ import (
 	"goshawkdb.io/common/certs"
 	goshawk "goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/connectionmanager"
 	"goshawkdb.io/server/db"
-	"goshawkdb.io/server/network"
+	"goshawkdb.io/server/localconnection"
+	ghttp "goshawkdb.io/server/network/http"
+	"goshawkdb.io/server/network/tcpcapnproto"
+	"goshawkdb.io/server/network/websocketmsgpack"
+	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/router"
 	"goshawkdb.io/server/stats"
+	"goshawkdb.io/server/topologytransmogrifier"
+	"goshawkdb.io/server/types"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -26,7 +37,6 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -37,156 +47,152 @@ func main() {
 
 	logger.Log("product", common.ProductName, "version", goshawk.ServerVersion, "mdbVersion", mdb.Version(), "args", fmt.Sprint(os.Args))
 
-	if s, err := newServer(logger); err != nil {
+	f := &flags{}
+	f.registerFlags()
+	f.parse()
+
+	if terminate, err := f.validate(logger); err != nil {
 		fmt.Printf("\n%v\n\n", err)
 		flag.Usage()
 		fmt.Println("\nSee https://goshawkdb.io/starting.html for the Getting Started guide.")
 		os.Exit(1)
-	} else if s != nil {
-		s.start()
+
+	} else if terminate {
+		os.Exit(0)
+
+	} else {
+		newServer(f, logger).start()
 	}
 }
 
-func newServer(logger log.Logger) (*server, error) {
-	var configFile, dataDir, certFile string
-	var port, wssPort, promPort int
-	var httpProf, noWSS, noProm, version, genClusterCert, genClientCert bool
+type flags struct {
+	configFile     string
+	dataDir        string
+	certFile       string
+	port           uint64
+	wssPort        uint64
+	promPort       uint64
+	httpProf       bool
+	version        bool
+	genClusterCert bool
+	genClientCert  bool
 
-	flag.StringVar(&configFile, "config", "", "`Path` to configuration file (required to start server).")
-	flag.StringVar(&dataDir, "dir", "", "`Path` to data directory (required to run server).")
-	flag.StringVar(&certFile, "cert", "", "`Path` to cluster certificate and key file (required to run server).")
-	flag.IntVar(&port, "port", common.DefaultPort, "Port to listen on (required if non-default).")
-	flag.BoolVar(&version, "version", false, "Display version and exit.")
-	flag.BoolVar(&genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair.")
-	flag.BoolVar(&genClientCert, "gen-client-cert", false, "Generate client certificate key pair.")
-	flag.BoolVar(&noWSS, "noWSS", false, "Disable the WebSocket service.")
-	flag.IntVar(&wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on.")
-	flag.BoolVar(&noProm, "noPrometheus", false, "Disable the HTTP Prometheus metrics service.")
-	flag.IntVar(&promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on.")
-	flag.BoolVar(&httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))
+	certificate []byte
+}
+
+func (f *flags) registerFlags() {
+	flag.StringVar(&f.configFile, "config", "", "`Path` to configuration file (required to start server).")
+	flag.StringVar(&f.dataDir, "dir", "", "`Path` to data directory (required to run server).")
+	flag.StringVar(&f.certFile, "cert", "", "`Path` to cluster certificate and key file (required to run server).")
+	flag.Uint64Var(&f.port, "port", common.DefaultPort, "Port to listen on (required if non-default).")
+	flag.Uint64Var(&f.wssPort, "wssPort", common.DefaultWSSPort, "Port to provide WebSocket service on (required if non-default. Set to 0 to disable WebSocket service).")
+	flag.Uint64Var(&f.promPort, "prometheusPort", common.DefaultPrometheusPort, "Port to provide HTTP for Prometheus metrics service on (required if non-default. Set to 0 to disable Prometheus metrics service).")
+
+	flag.BoolVar(&f.httpProf, "httpProfile", false, fmt.Sprintf("Enable Go HTTP Profiling on port localhost:%d.", goshawk.HttpProfilePort))
+
+	flag.BoolVar(&f.genClusterCert, "gen-cluster-cert", false, "Generate new cluster certificate key pair and exit.")
+	flag.BoolVar(&f.genClientCert, "gen-client-cert", false, "Generate client certificate key pair and exit.")
+	flag.BoolVar(&f.version, "version", false, "Display version and exit.")
+}
+
+func (f *flags) parse() {
 	flag.Parse()
+}
 
-	if version {
-		fmt.Println(common.ProductName, "version", goshawk.ServerVersion)
-		return nil, nil
+func (f *flags) validate(logger log.Logger) (bool, error) {
+	if f.version {
+		return true, nil
 	}
 
-	if genClusterCert {
+	var err error
+	if f.genClusterCert {
 		certificatePrivateKeyPair, err := certs.NewClusterCertificate()
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
-		return nil, nil
+		return true, nil
 	}
 
-	if len(certFile) == 0 {
-		return nil, fmt.Errorf("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
+	if len(f.certFile) == 0 {
+		return false, errors.New("No certificate supplied (missing -cert parameter). Use -gen-cluster-cert to create cluster certificate.")
 	}
-	certificate, err := ioutil.ReadFile(certFile)
+	f.certificate, err = ioutil.ReadFile(f.certFile)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 
-	if genClientCert {
-		certificatePrivateKeyPair, err := certs.NewClientCertificate(certificate)
+	if f.genClientCert {
+		certificatePrivateKeyPair, err := certs.NewClientCertificate(f.certificate)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		fmt.Printf("%v%v", certificatePrivateKeyPair.CertificatePEM, certificatePrivateKeyPair.PrivateKeyPEM)
 		fingerprint := sha256.Sum256(certificatePrivateKeyPair.Certificate)
-		logger.Log("fingerprint", hex.EncodeToString(fingerprint[:]))
-		return nil, nil
+		fmt.Printf("fingerprint: %s", hex.EncodeToString(fingerprint[:]))
+		return true, nil
 	}
 
-	if dataDir == "" {
-		dataDir, err = ioutil.TempDir("", common.ProductName+"_Data_")
+	if len(f.dataDir) == 0 {
+		f.dataDir, err = ioutil.TempDir("", common.ProductName+"_Data_")
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		logger.Log("msg", "No data dir supplied (missing -dir parameter).", "dataDir", dataDir)
-	}
-	err = os.MkdirAll(dataDir, 0750)
-	if err != nil {
-		return nil, err
+		logger.Log("msg", "No data dir supplied (missing -dir parameter). Using temporary dir.", "dataDir", f.dataDir)
 	}
 
-	if configFile != "" {
-		_, err := ioutil.ReadFile(configFile)
-		if err != nil {
-			return nil, err
-		}
+	if !(0 < f.port && f.port < 65536) {
+		return false, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", f.port)
 	}
 
-	if !(0 < port && port < 65536) {
-		return nil, fmt.Errorf("Supplied port is illegal (%d). Port must be > 0 and < 65536", port)
+	if f.wssPort > 0 && !(f.wssPort < 65536 && f.wssPort != f.port) {
+		return false, fmt.Errorf("Supplied WSS port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", f.wssPort, f.port)
 	}
 
-	if noWSS {
-		wssPort = 0
-	}
-	if noProm {
-		promPort = 0
+	if f.promPort > 0 && !(f.promPort < 65536 && f.promPort != f.port) {
+		return false, fmt.Errorf("Supplied Prometheus port is illegal (%d). Prometheus Port must be > 0 and < 65536 and not equal to the main communication port (%d)", f.promPort, f.port)
 	}
 
-	if wssPort != 0 && !(0 < wssPort && wssPort < 65536 && wssPort != port) {
-		return nil, fmt.Errorf("Supplied wss port is illegal (%d). WSS Port must be > 0 and < 65536 and not equal to the main communication port (%d)", wssPort, port)
-	}
-
-	if promPort != 0 && !(0 < promPort && promPort < 65536 && promPort != port) {
-		return nil, fmt.Errorf("Supplied Prometheus port is illegal (%d). Prometheus Port must be > 0 and < 65536 and not equal to the main communication port (%d)", promPort, port)
-	}
-
-	s := &server{
-		logger:       logger,
-		configFile:   configFile,
-		certificate:  certificate,
-		dataDir:      dataDir,
-		port:         uint16(port),
-		onShutdown:   []func(){},
-		shutdownChan: make(chan goshawk.EmptyStruct),
-		wssPort:      uint16(wssPort),
-		promPort:     uint16(promPort),
-		httpProf:     httpProf,
-	}
-
-	if err = s.ensureRMId(); err != nil {
-		return nil, err
-	}
-	if err = s.ensureBootCount(); err != nil {
-		return nil, err
-	}
-
-	return s, nil
+	return false, nil
 }
 
 type server struct {
-	logger            log.Logger
-	configFile        string
-	certificate       []byte
-	dataDir           string
-	port              uint16
-	wssPort           uint16
-	promPort          uint16
-	httpProf          bool
-	rmId              common.RMId
-	bootCount         uint32
-	connectionManager *network.ConnectionManager
-	transmogrifier    *network.TopologyTransmogrifier
-	profileFile       *os.File
-	traceFile         *os.File
-	onShutdown        []func()
-	shutdownChan      chan goshawk.EmptyStruct
-	shutdownCounter   int32
+	*flags
+	logger   log.Logger
+	port     uint16
+	wssPort  uint16
+	promPort uint16
+
+	self      common.RMId
+	bootCount uint32
+
+	lock           sync.Mutex
+	transmogrifier *topologytransmogrifier.TopologyTransmogrifier
+	statusEmitters []status.StatusEmitter
+	onShutdown     []func()
+
+	profileFile *os.File
+	traceFile   *os.File
+
+	shutdownChan chan types.EmptyStruct
+}
+
+func newServer(f *flags, logger log.Logger) *server {
+	return &server{
+		flags:    f,
+		logger:   logger,
+		port:     uint16(f.port),
+		wssPort:  uint16(f.wssPort),
+		promPort: uint16(f.promPort),
+
+		statusEmitters: []status.StatusEmitter{},
+		onShutdown:     []func(){},
+
+		shutdownChan: make(chan types.EmptyStruct),
+	}
 }
 
 func (s *server) start() {
-	if s.httpProf {
-		go func() {
-			s.logger.Log("pprofResult", http.ListenAndServe(fmt.Sprintf("localhost:%d", goshawk.HttpProfilePort), nil))
-		}()
-	}
-
 	os.Stdin.Close()
 
 	procs := runtime.NumCPU()
@@ -195,30 +201,65 @@ func (s *server) start() {
 	}
 	runtime.GOMAXPROCS(procs)
 
+	go s.signalHandler()
+
+	s.maybeShutdown(os.MkdirAll(s.dataDir, 0700))
+	s.maybeShutdown(s.ensureRMId())
+	s.maybeShutdown(s.ensureBootCount())
+
 	commandLineConfig, err := s.commandLineConfig()
 	s.maybeShutdown(err)
+
+	if s.httpProf {
+		go func() {
+			s.logger.Log("pprofResult", http.ListenAndServe(fmt.Sprintf("localhost:%d", goshawk.HttpProfilePort), nil))
+		}()
+	}
 
 	disk, err := mdbs.NewMDBServer(s.dataDir, 0, 0600, goshawk.MDBInitialSize, 500*time.Microsecond, db.DB, s.logger)
 	s.maybeShutdown(err)
 	db := disk.(*db.Databases)
 	s.addOnShutdown(db.Shutdown)
 
-	cm, transmogrifier, lc := network.NewConnectionManager(s.rmId, s.bootCount, procs, db, s.certificate, s.port, s, commandLineConfig, s.logger)
+	router := router.NewRouter(s.self, s.logger)
+	cm := connectionmanager.NewConnectionManager(s.self, s.bootCount, s.certificate, router, s.logger)
 	s.certificate = nil
-	s.addOnShutdown(transmogrifier.Shutdown)
-	sp := stats.NewStatsPublisher(cm, lc, s.logger)
-	s.addOnShutdown(sp.Shutdown)
-	s.addOnShutdown(cm.Shutdown)
-	s.connectionManager = cm
+	s.addOnShutdown(cm.ShutdownSync)
+	// this is safe because cm only uses router when it's creating new
+	// dialers, and it won't be doing that until after
+	// TopologyTransmogrifier starts up.
+	router.ConnectionManager = cm
+	s.addStatusEmitter(cm)
+
+	lc := localconnection.NewLocalConnection(s.self, s.bootCount, cm, s.logger)
+	// localConnection registers as a client with connectionManager, so
+	// we rely on connectionManager to do shutdown and status calls.
+
+	dispatchers := paxos.NewDispatchers(cm, s.self, s.bootCount, uint8(procs), db, lc, s.logger)
+	// same reasoning as before: this write is done before
+	// TopologyTransmogrifier starts and cm will only dial out due to a
+	// msg from TopologyTransmogrifier so there is still sufficient
+	// write barriers.
+	router.Dispatchers = dispatchers
+	s.addStatusEmitter(router)
+	s.addOnShutdown(router.ShutdownSync)
+
+	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.self, db, router, cm, lc, s.port, s, commandLineConfig, s.logger)
+	s.lock.Lock()
 	s.transmogrifier = transmogrifier
+	s.lock.Unlock()
+	s.addOnShutdown(transmogrifier.ShutdownSync)
 
-	go s.signalHandler()
+	<-localEstablished
 
-	listener, err := network.NewListener(s.port, cm, s.logger)
+	sp := stats.NewStatsPublisher(cm, lc, s.logger)
+	s.addOnShutdown(sp.ShutdownSync)
+
+	listener, err := tcpcapnproto.NewListener(s.port, s.self, s.bootCount, router, cm, s.logger)
 	s.maybeShutdown(err)
-	s.addOnShutdown(listener.Shutdown)
+	s.addOnShutdown(listener.ShutdownSync)
 
-	var wssMux, promMux *network.HttpListenerWithMux
+	var wssMux, promMux *ghttp.HttpListenerWithMux
 	var wssWG, promWG *sync.WaitGroup
 	if s.wssPort != 0 {
 		wssWG := new(sync.WaitGroup)
@@ -227,10 +268,10 @@ func (s *server) start() {
 		} else {
 			wssWG.Add(1)
 		}
-		wssMux, err = network.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
+		wssMux, err = ghttp.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 		s.maybeShutdown(err)
-		wssListener := network.NewWebsocketListener(wssMux, cm, s.logger)
-		s.addOnShutdown(wssListener.Shutdown)
+		wssListener := websocketmsgpack.NewWebsocketListener(wssMux, s.self, s.bootCount, cm, s.logger)
+		s.addOnShutdown(wssListener.ShutdownSync)
 	}
 
 	if s.promPort != 0 {
@@ -240,57 +281,30 @@ func (s *server) start() {
 		} else {
 			promWG = new(sync.WaitGroup)
 			promWG.Add(1)
-			promMux, err = network.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
+			promMux, err = ghttp.NewHttpListenerWithMux(s.promPort, cm, s.logger, promWG)
 			s.maybeShutdown(err)
 		}
-		promListener := stats.NewPrometheusListener(promMux, cm, s.logger)
-		s.addOnShutdown(promListener.Shutdown)
+		promListener := stats.NewPrometheusListener(promMux, s.self, cm, router, s.logger)
+		s.addOnShutdown(promListener.ShutdownSync)
 	}
 
-	defer s.shutdown(nil)
 	<-s.shutdownChan
-}
-
-func (s *server) addOnShutdown(f func()) {
-	if f != nil {
-		s.onShutdown = append(s.onShutdown, f)
-	}
-}
-
-func (s *server) shutdown(err error) {
-	if err != nil {
-		s.logger.Log("msg", "Shutting down due to fatal error.", "error", err)
-	}
-	for idx := len(s.onShutdown) - 1; idx >= 0; idx-- {
-		s.onShutdown[idx]()
-	}
-	if err == nil {
-		s.logger.Log("msg", "Shutdown.")
-	} else {
-		s.logger.Log("msg", "Shutdown due to fatal error.", "error", err)
-		os.Exit(1)
-	}
-}
-
-func (s *server) maybeShutdown(err error) {
-	if err != nil {
-		s.shutdown(err)
-	}
+	s.shutdown(nil)
 }
 
 func (s *server) ensureRMId() error {
 	path := s.dataDir + "/rmid"
 	if b, err := ioutil.ReadFile(path); err == nil {
-		s.rmId = common.RMId(binary.BigEndian.Uint32(b))
+		s.self = common.RMId(binary.BigEndian.Uint32(b))
 		return nil
 
 	} else {
 		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		for s.rmId == common.RMIdEmpty {
-			s.rmId = common.RMId(rng.Uint32())
+		for s.self == common.RMIdEmpty {
+			s.self = common.RMId(rng.Uint32())
 		}
 		b := make([]byte, 4)
-		binary.BigEndian.PutUint32(b, uint32(s.rmId))
+		binary.BigEndian.PutUint32(b, uint32(s.self))
 		return ioutil.WriteFile(path, b, 0400)
 	}
 }
@@ -307,8 +321,43 @@ func (s *server) ensureBootCount() error {
 	return ioutil.WriteFile(path, b, 0600)
 }
 
+func (s *server) addStatusEmitter(emitter status.StatusEmitter) {
+	s.lock.Lock()
+	s.statusEmitters = append(s.statusEmitters, emitter)
+	s.lock.Unlock()
+}
+
+func (s *server) addOnShutdown(f func()) {
+	s.lock.Lock()
+	s.onShutdown = append(s.onShutdown, f)
+	s.lock.Unlock()
+}
+
+func (s *server) shutdown(err error) {
+	if err != nil {
+		s.logger.Log("msg", "Shutting down due to fatal error.", "error", err)
+	}
+	s.lock.Lock()
+	for idx := len(s.onShutdown) - 1; idx >= 0; idx-- {
+		s.onShutdown[idx]()
+	}
+	s.lock.Unlock()
+	if err == nil {
+		s.logger.Log("msg", "Shutdown.")
+	} else {
+		s.logger.Log("msg", "Shutdown due to fatal error.", "error", err)
+		os.Exit(1)
+	}
+}
+
+func (s *server) maybeShutdown(err error) {
+	if err != nil {
+		s.shutdown(err)
+	}
+}
+
 func (s *server) commandLineConfig() (*configuration.Configuration, error) {
-	if s.configFile != "" {
+	if len(s.configFile) > 0 {
 		configJSON, err := configuration.LoadJSONFromPath(s.configFile)
 		if err != nil {
 			return nil, err
@@ -321,26 +370,39 @@ func (s *server) commandLineConfig() (*configuration.Configuration, error) {
 func (s *server) SignalShutdown() {
 	// this may fail if stdout has died
 	s.logger.Log("msg", "Shutdown requested.")
-	if atomic.AddInt32(&s.shutdownCounter, 1) == 1 {
-		s.shutdownChan <- goshawk.EmptyStructVal
+	select {
+	case <-s.shutdownChan:
+	default:
+		close(s.shutdownChan)
 	}
 }
 
+func (s *server) ShutdownSync() {
+	s.SignalShutdown()
+}
+
 func (s *server) signalStatus() {
-	sc := goshawk.NewStatusConsumer()
-	go sc.Consume(func(str string) {
-		s.logger.Log("msg", "System Status Start", "RMId", s.rmId)
+	sc := status.NewStatusConsumer()
+	go func() {
+		str := sc.Wait()
+		s.logger.Log("msg", "System Status Start", "RMId", s.self)
 		os.Stderr.WriteString(str + "\n")
-		s.logger.Log("msg", "System Status End", "RMId", s.rmId)
-	})
+		s.logger.Log("msg", "System Status End", "RMId", s.self)
+	}()
 	sc.Emit(fmt.Sprintf("Configuration File: %v", s.configFile))
 	sc.Emit(fmt.Sprintf("Data Directory: %v", s.dataDir))
 	sc.Emit(fmt.Sprintf("Port: %v", s.port))
-	s.connectionManager.Status(sc)
+
+	s.lock.Lock()
+	for _, emitter := range s.statusEmitters {
+		emitter.Status(sc.Fork())
+	}
+	s.lock.Unlock()
+	sc.Join()
 }
 
 func (s *server) signalReloadConfig() {
-	if s.configFile == "" {
+	if len(s.configFile) == 0 {
 		s.logger.Log("msg", "Attempt to reload config failed as no path to configuration provided on command line.")
 		return
 	}
@@ -349,7 +411,9 @@ func (s *server) signalReloadConfig() {
 		s.logger.Log("msg", "Cannot reload config due to error.", "error", err)
 		return
 	}
+	s.lock.Lock()
 	s.transmogrifier.RequestConfigurationChange(config.ToConfiguration())
+	s.lock.Unlock()
 }
 
 func (s *server) signalDumpStacks() {
@@ -357,9 +421,9 @@ func (s *server) signalDumpStacks() {
 	for {
 		buf := make([]byte, size)
 		if l := runtime.Stack(buf, true); l <= size {
-			s.logger.Log("msg", "Stacks Dump Start", "RMId", s.rmId)
+			s.logger.Log("msg", "Stacks Dump Start", "RMId", s.self)
 			os.Stderr.Write(buf[:l])
-			s.logger.Log("msg", "Stacks Dump End", "RMId", s.rmId)
+			s.logger.Log("msg", "Stacks Dump End", "RMId", s.self)
 			return
 		} else {
 			size += size
@@ -369,22 +433,22 @@ func (s *server) signalDumpStacks() {
 
 func (s *server) signalToggleCpuProfile() {
 	memFile, err := ioutil.TempFile("", common.ProductName+"_Mem_Profile_")
-	if goshawk.CheckWarn(err, s.logger) {
+	if utils.CheckWarn(err, s.logger) {
 		return
 	}
-	if goshawk.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0), s.logger) {
+	if utils.CheckWarn(pprof.Lookup("heap").WriteTo(memFile, 0), s.logger) {
 		return
 	}
-	if !goshawk.CheckWarn(memFile.Close(), s.logger) {
+	if !utils.CheckWarn(memFile.Close(), s.logger) {
 		s.logger.Log("msg", "Memory profile written.", "file", memFile.Name())
 	}
 
 	if s.profileFile == nil {
 		profFile, err := ioutil.TempFile("", common.ProductName+"_CPU_Profile_")
-		if goshawk.CheckWarn(err, s.logger) {
+		if utils.CheckWarn(err, s.logger) {
 			return
 		}
-		if goshawk.CheckWarn(pprof.StartCPUProfile(profFile), s.logger) {
+		if utils.CheckWarn(pprof.StartCPUProfile(profFile), s.logger) {
 			return
 		}
 		s.profileFile = profFile
@@ -392,7 +456,7 @@ func (s *server) signalToggleCpuProfile() {
 
 	} else {
 		pprof.StopCPUProfile()
-		if !goshawk.CheckWarn(s.profileFile.Close(), s.logger) {
+		if !utils.CheckWarn(s.profileFile.Close(), s.logger) {
 			s.logger.Log("msg", "Profiling stopped.", "file", s.profileFile.Name())
 		}
 		s.profileFile = nil
@@ -402,10 +466,10 @@ func (s *server) signalToggleCpuProfile() {
 func (s *server) signalToggleTrace() {
 	if s.traceFile == nil {
 		traceFile, err := ioutil.TempFile("", common.ProductName+"_Trace_")
-		if goshawk.CheckWarn(err, s.logger) {
+		if utils.CheckWarn(err, s.logger) {
 			return
 		}
-		if goshawk.CheckWarn(trace.Start(traceFile), s.logger) {
+		if utils.CheckWarn(trace.Start(traceFile), s.logger) {
 			return
 		}
 		s.traceFile = traceFile
@@ -413,7 +477,7 @@ func (s *server) signalToggleTrace() {
 
 	} else {
 		trace.Stop()
-		if !goshawk.CheckWarn(s.traceFile.Close(), s.logger) {
+		if !utils.CheckWarn(s.traceFile.Close(), s.logger) {
 			s.logger.Log("msg", "Tracing stopped.", "file", s.traceFile.Name())
 		}
 		s.traceFile = nil
@@ -442,7 +506,7 @@ func (s *server) signalHandler() {
 		case syscall.SIGQUIT:
 			s.signalDumpStacks()
 		case syscall.SIGUSR1:
-			s.signalStatus()
+			go s.signalStatus()
 		case syscall.SIGUSR2:
 			s.signalToggleCpuProfile()
 			//s.signalToggleTrace()

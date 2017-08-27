@@ -6,15 +6,18 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	"goshawkdb.io/server/utils/vectorclock"
 	"sort"
 )
 
 type BallotAccumulator struct {
 	logger         log.Logger
-	txn            *eng.TxnReader
+	txn            *txnreader.TxnReader
 	vUUIdToBallots map[common.VarUUId]*varBallot
 	outcome        *outcomeEqualId
 	incompleteVars int
@@ -25,7 +28,7 @@ type BallotAccumulator struct {
 // paxos instance namespace is {rmId,varId}. So for each var, we
 // expect to see ballots from fInc distinct rms.
 
-func NewBallotAccumulator(txn *eng.TxnReader, logger log.Logger) *BallotAccumulator {
+func NewBallotAccumulator(txn *txnreader.TxnReader, logger log.Logger) *BallotAccumulator {
 	actions := txn.Actions(true).Actions()
 	ba := &BallotAccumulator{
 		logger:         logger,
@@ -85,7 +88,7 @@ type rmBallot struct {
 	roundNumber  paxosNumber
 }
 
-func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
+func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
 	ba := NewBallotAccumulator(txn, logger)
 	ba.outcome = outcome
 
@@ -117,7 +120,7 @@ func BallotAccumulatorFromData(txn *eng.TxnReader, outcome *outcomeEqualId, inst
 
 // For every vUUId involved in this txn, we should see fInc * ballots:
 // one from each RM voting for each vUUId.
-func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *eng.TxnReader) *outcomeEqualId {
+func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) *outcomeEqualId {
 	ba.txn = ba.txn.Combine(txn)
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
@@ -164,12 +167,12 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	}
 	ba.dirty = false
 
-	combinedClock := eng.NewVectorClock().AsMutable()
+	combinedClock := vectorclock.NewVectorClock().AsMutable()
 	aborted, deadlock := false, false
 
 	vUUIds := common.VarUUIds(make([]*common.VarUUId, 0, len(ba.vUUIdToBallots)))
 	br := NewBadReads()
-	server.DebugLog(ba.logger, "debug", "determineOutcome")
+	utils.DebugLog(ba.logger, "debug", "determineOutcome")
 	for _, vBallot := range ba.vUUIdToBallots {
 		if len(vBallot.rmToBallot) < vBallot.voters {
 			continue
@@ -249,7 +252,7 @@ func (ba *BallotAccumulator) AddInstancesToSeg(seg *capn.Segment) msgs.Instances
 	return instances
 }
 
-func (ba *BallotAccumulator) Status(sc *server.StatusConsumer) {
+func (ba *BallotAccumulator) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Ballot Accumulator for %v", ba.txn.Id))
 	sc.Emit(fmt.Sprintf("- incomplete var count: %v", ba.incompleteVars))
 	sc.Emit(fmt.Sprintf("- retry? %v", ba.txn.Txn.Retry()))
@@ -262,10 +265,10 @@ type varBallotReducer struct {
 	badReads
 }
 
-func (vb *varBallot) CalculateResult(br badReads, clock *eng.VectorClockMutable) {
+func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClockMutable) {
 	reducer := &varBallotReducer{
 		vUUId:         vb.vUUId,
-		BallotBuilder: eng.NewBallotBuilder(vb.vUUId, eng.Commit, eng.NewVectorClock().AsMutable()),
+		BallotBuilder: eng.NewBallotBuilder(vb.vUUId, eng.Commit, vectorclock.NewVectorClock().AsMutable()),
 		badReads:      br,
 	}
 	for _, rmBal := range vb.rmToBallot {
@@ -352,7 +355,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 	badRead := rmBal.ballot.VoteCap.AbortBadRead()
 	clock := rmBal.ballot.Clock
 	txnId := common.MakeTxnId(badRead.TxnId())
-	actions := eng.TxnActionsFromData(badRead.TxnActions(), true).Actions()
+	actions := txnreader.TxnActionsFromData(badRead.TxnActions(), true).Actions()
 
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -468,7 +471,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 		actionsListWrapper := msgs.NewRootActionListWrapper(actionsListSeg)
 		actionsList := msgs.NewActionList(actionsListSeg, len(*badReadActions))
 		actionsListWrapper.SetActions(actionsList)
-		clock := eng.NewVectorClock().AsMutable()
+		clock := vectorclock.NewVectorClock().AsMutable()
 		for idy, bra := range *badReadActions {
 			action := bra.action
 			switch action.Which() {

@@ -11,6 +11,9 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 type ProposerDispatcher struct {
@@ -19,7 +22,7 @@ type ProposerDispatcher struct {
 	proposermanagers []*ProposerManager
 }
 
-func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerDispatcher {
+func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, db *db.Databases, varDispatcher *eng.VarDispatcher, logger log.Logger) *ProposerDispatcher {
 	pd := &ProposerDispatcher{
 		logger:           log.With(logger, "subsystem", "proposerDispatcher"),
 		proposermanagers: make([]*ProposerManager, count),
@@ -34,24 +37,24 @@ func NewProposerDispatcher(count uint8, rmId common.RMId, bootCount uint32, cm C
 	return pd
 }
 
-func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *eng.TxnReader) {
+func (pd *ProposerDispatcher) TxnReceived(sender common.RMId, txn *txnreader.TxnReader) {
 	txnId := txn.Id
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnReceived(sender, txn) })
 }
 
-func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes *msgs.OneBTxnVotes) {
+func (pd *ProposerDispatcher) OneBTxnVotesReceived(sender common.RMId, oneBTxnVotes msgs.OneBTxnVotes) {
 	txnId := common.MakeTxnId(oneBTxnVotes.TxnId())
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.OneBTxnVotesReceived(sender, txnId, oneBTxnVotes) })
 }
 
-func (pd *ProposerDispatcher) TwoBTxnVotesReceived(sender common.RMId, twoBTxnVotes *msgs.TwoBTxnVotes) {
+func (pd *ProposerDispatcher) TwoBTxnVotesReceived(sender common.RMId, twoBTxnVotes msgs.TwoBTxnVotes) {
 	var txnId *common.TxnId
-	var txn *eng.TxnReader
+	var txn *txnreader.TxnReader
 	switch twoBTxnVotes.Which() {
 	case msgs.TWOBTXNVOTES_FAILURES:
 		txnId = common.MakeTxnId(twoBTxnVotes.Failures().TxnId())
 	case msgs.TWOBTXNVOTES_OUTCOME:
-		txn = eng.TxnReaderFromData(twoBTxnVotes.Outcome().Txn())
+		txn = txnreader.TxnReaderFromData(twoBTxnVotes.Outcome().Txn())
 		txnId = txn.Id
 	default:
 		panic(fmt.Sprintf("Unexpected 2BVotes type: %v", twoBTxnVotes.Which()))
@@ -59,42 +62,48 @@ func (pd *ProposerDispatcher) TwoBTxnVotesReceived(sender common.RMId, twoBTxnVo
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TwoBTxnVotesReceived(sender, txnId, txn, twoBTxnVotes) })
 }
 
-func (pd *ProposerDispatcher) TxnGloballyCompleteReceived(sender common.RMId, tgc *msgs.TxnGloballyComplete) {
+func (pd *ProposerDispatcher) TxnGloballyCompleteReceived(sender common.RMId, tgc msgs.TxnGloballyComplete) {
 	txnId := common.MakeTxnId(tgc.TxnId())
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnGloballyCompleteReceived(sender, txnId) })
 }
 
-func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa *msgs.TxnSubmissionAbort) {
+func (pd *ProposerDispatcher) TxnSubmissionAbortReceived(sender common.RMId, tsa msgs.TxnSubmissionAbort) {
 	txnId := common.MakeTxnId(tsa.TxnId())
 	pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.TxnSubmissionAbortReceived(sender, txnId) })
 }
 
-func (pd *ProposerDispatcher) ImmigrationReceived(migration *msgs.Migration, stateChange eng.TxnLocalStateChange) {
+func (pd *ProposerDispatcher) ImmigrationReceived(migration msgs.Migration, stateChange eng.TxnLocalStateChange) {
 	elemsList := migration.Elems()
 	elemsCount := elemsList.Len()
 	for idx := 0; idx < elemsCount; idx++ {
 		elem := elemsList.At(idx)
-		txn := eng.TxnReaderFromData(elem.Txn())
+		txn := txnreader.TxnReaderFromData(elem.Txn())
 		txnId := txn.Id
 		varCaps := elem.Vars()
-		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txn, &varCaps, stateChange) })
+		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txn, varCaps, stateChange) })
 	}
 }
 
 func (pd *ProposerDispatcher) SetMetrics(metrics *ProposerMetrics) {
-	for idx, executor := range pd.Executors {
+	for idx, exe := range pd.Executors {
 		manager := pd.proposermanagers[idx]
-		executor.Enqueue(func() { manager.SetMetrics(metrics) })
+		exe.EnqueueFuncAsync(func() (bool, error) {
+			manager.SetMetrics(metrics)
+			return false, nil
+		})
 	}
 }
 
-func (pd *ProposerDispatcher) Status(sc *server.StatusConsumer) {
+func (pd *ProposerDispatcher) Status(sc *status.StatusConsumer) {
 	sc.Emit("Proposers")
-	for idx, executor := range pd.Executors {
+	for idx, exe := range pd.Executors {
 		s := sc.Fork()
 		s.Emit(fmt.Sprintf("Proposer Manager %v", idx))
 		manager := pd.proposermanagers[idx]
-		executor.Enqueue(func() { manager.Status(s) })
+		exe.EnqueueFuncAsync(func() (bool, error) {
+			manager.Status(s)
+			return false, nil
+		})
 	}
 	sc.Join()
 }
@@ -140,7 +149,10 @@ func (pd *ProposerDispatcher) loadFromDisk(db *db.Databases) {
 
 func (pd *ProposerDispatcher) withProposerManager(txnId *common.TxnId, fun func(*ProposerManager)) bool {
 	idx := uint8(txnId[server.MostRandomByteIndex]) % pd.ExecutorCount
-	executor := pd.Executors[idx]
+	exe := pd.Executors[idx]
 	manager := pd.proposermanagers[idx]
-	return executor.Enqueue(func() { fun(manager) })
+	return exe.EnqueueFuncAsync(func() (bool, error) {
+		fun(manager)
+		return false, nil
+	})
 }

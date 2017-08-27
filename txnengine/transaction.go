@@ -6,9 +6,12 @@ import (
 	"github.com/go-kit/kit/log"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
-	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/status"
+	"goshawkdb.io/server/utils/txnreader"
+	vc "goshawkdb.io/server/utils/vectorclock"
 	"sync/atomic"
 	"time"
 )
@@ -26,7 +29,7 @@ type Txn struct {
 	writes       []*common.VarUUId
 	localActions []localAction
 	voter        bool
-	TxnReader    *TxnReader
+	TxnReader    *txnreader.TxnReader
 	exe          *dispatcher.Executor
 	vd           *VarDispatcher
 	stateChange  TxnLocalStateChange
@@ -57,12 +60,12 @@ type localAction struct {
 	ballot          *Ballot
 	frame           *frame
 	readVsn         *common.TxnId
-	writeTxnActions *TxnActions
+	writeTxnActions *txnreader.TxnActions
 	writeAction     *msgs.Action
 	createPositions *common.Positions
 	roll            bool
-	outcomeClock    VectorClockInterface
-	writesClock     *VectorClock
+	outcomeClock    vc.VectorClock
+	writesClock     *vc.VectorClockImmutable
 }
 
 func (action *localAction) IsRead() bool {
@@ -81,21 +84,21 @@ func (action *localAction) IsImmigrant() bool {
 	return action.writesClock != nil
 }
 
-func (action *localAction) VoteDeadlock(clock *VectorClockMutable) {
+func (action *localAction) VoteDeadlock(clock *vc.VectorClockMutable) {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, AbortDeadlock, clock).ToBallot()
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteBadRead(clock *VectorClockMutable, txnId *common.TxnId, actions *TxnActions) {
+func (action *localAction) VoteBadRead(clock *vc.VectorClockMutable, txnId *common.TxnId, actions *txnreader.TxnActions) {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadBallot(txnId, actions)
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteCommit(clock *VectorClockMutable) bool {
+func (action *localAction) VoteCommit(clock *vc.VectorClockMutable) bool {
 	if action.ballot == nil {
 		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock).ToBallot()
 		return !action.voteCast(action.ballot, false)
@@ -144,7 +147,7 @@ func (action localAction) String() string {
 	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
 }
 
-func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, varCaps *msgs.Var_List, logger log.Logger) {
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
 	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
 	txnActions := reader.Actions(true)
 	txn.localActions = make([]localAction, varCaps.Len())
@@ -157,8 +160,8 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		action.writeTxnActions = txnActions
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
-		action.outcomeClock = VectorClockFromData(varCap.WriteTxnClock(), false)
-		action.writesClock = VectorClockFromData(varCap.WritesClock(), false)
+		action.outcomeClock = vc.VectorClockFromData(varCap.WriteTxnClock(), false)
+		action.writesClock = vc.VectorClockFromData(varCap.WritesClock(), false)
 		actionsMap[*action.vUUId] = action
 	}
 
@@ -188,7 +191,7 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 	}
 }
 
-func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *TxnReader, logger log.Logger) *Txn {
+func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, logger log.Logger) *Txn {
 	txnId := reader.Id
 	actions := reader.Actions(true)
 	actionsList := actions.Actions()
@@ -217,7 +220,7 @@ func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnL
 	return txn
 }
 
-func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action_List, actions *TxnActions) {
+func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action_List, actions *txnreader.TxnActions) {
 	localActions := make([]localAction, actionIndices.Len())
 	txn.localActions = localActions
 	var action *localAction
@@ -349,7 +352,7 @@ func (txn *Txn) String() string {
 	return txn.Id.String()
 }
 
-func (txn *Txn) Status(sc *server.StatusConsumer) {
+func (txn *Txn) Status(sc *status.StatusConsumer) {
 	sc.Emit(txn.Id.String())
 	sc.Emit(fmt.Sprintf("- Local Actions: %v", txn.localActions))
 	sc.Emit(fmt.Sprintf("- Current State: %v", txn.currentState))
@@ -367,7 +370,6 @@ func (txn *Txn) Status(sc *server.StatusConsumer) {
 type txnStateMachineComponent interface {
 	init(*Txn)
 	start()
-	txnStateMachineComponentWitness()
 }
 
 // Determine Local Ballots
@@ -376,8 +378,7 @@ type txnDetermineLocalBallots struct {
 	pendingVote int32
 }
 
-func (tdb *txnDetermineLocalBallots) txnStateMachineComponentWitness() {}
-func (tdb *txnDetermineLocalBallots) String() string                   { return "txnDetermineLocalBallots" }
+func (tdb *txnDetermineLocalBallots) String() string { return "txnDetermineLocalBallots" }
 
 func (tdb *txnDetermineLocalBallots) init(txn *Txn) {
 	tdb.Txn = txn
@@ -409,8 +410,7 @@ type txnAwaitLocalBallots struct {
 	preAbortedBool bool
 }
 
-func (talb *txnAwaitLocalBallots) txnStateMachineComponentWitness() {}
-func (talb *txnAwaitLocalBallots) String() string                   { return "txnAwaitLocalBallots" }
+func (talb *txnAwaitLocalBallots) String() string { return "txnAwaitLocalBallots" }
 
 func (talb *txnAwaitLocalBallots) init(txn *Txn) {
 	talb.Txn = txn
@@ -420,20 +420,22 @@ func (talb *txnAwaitLocalBallots) start() {}
 
 func (talb *txnAwaitLocalBallots) voteCast(ballot *Ballot, abort bool) bool {
 	if talb.Retry {
-		talb.exe.Enqueue(func() { talb.retryTxnBallotComplete(ballot) })
+		talb.exe.EnqueueFuncAsync(func() (bool, error) {
+			return talb.retryTxnBallotComplete(ballot)
+		})
 		return true
 	}
 	if abort && atomic.CompareAndSwapInt32(&talb.preAborted, 0, 1) {
-		talb.exe.Enqueue(talb.preAbort)
+		talb.exe.EnqueueFuncAsync(talb.preAbort)
 	}
 	abort = abort || atomic.LoadInt32(&talb.preAborted) == 1
 	if atomic.AddInt32(&talb.pendingVote, -1) == 0 {
-		talb.exe.Enqueue(talb.allTxnBallotsComplete)
+		talb.exe.EnqueueFuncAsync(talb.allTxnBallotsComplete)
 	}
 	return abort
 }
 
-func (talb *txnAwaitLocalBallots) preAbort() {
+func (talb *txnAwaitLocalBallots) preAbort() (bool, error) {
 	if talb.currentState == talb && !talb.preAbortedBool {
 		talb.preAbortedBool = true
 		for idx := 0; idx < len(talb.localActions); idx++ {
@@ -464,9 +466,10 @@ func (talb *txnAwaitLocalBallots) preAbort() {
 	} else {
 		panic(fmt.Sprintf("%v error: preAbort with txn in wrong state (or preAbort called multiple times: %v): %v\n", talb.Id, talb.currentState, talb.preAbortedBool))
 	}
+	return false, nil
 }
 
-func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() {
+func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() (bool, error) {
 	if talb.currentState == talb {
 		talb.nextState() // advance state FIRST!
 		ballots := make([]*Ballot, len(talb.localActions))
@@ -478,9 +481,10 @@ func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() {
 	} else {
 		panic(fmt.Sprintf("%v error: Ballots completed with txn in wrong state: %v\n", talb.Id, talb.currentState))
 	}
+	return false, nil
 }
 
-func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) {
+func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) (bool, error) {
 	if talb.currentState == talb {
 		talb.nextState()
 	}
@@ -489,17 +493,17 @@ func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) {
 	if talb.currentState == &talb.txnReceiveOutcome {
 		talb.stateChange.TxnBallotsComplete(ballot)
 	}
+	return false, nil
 }
 
 // Receive Outcome
 type txnReceiveOutcome struct {
 	*Txn
-	outcomeClock *VectorClock
+	outcomeClock *vc.VectorClockImmutable
 	aborted      bool
 }
 
-func (tro *txnReceiveOutcome) txnStateMachineComponentWitness() {}
-func (tro *txnReceiveOutcome) String() string                   { return "txnReceiveOutcome" }
+func (tro *txnReceiveOutcome) String() string { return "txnReceiveOutcome" }
 
 func (tro *txnReceiveOutcome) init(txn *Txn) {
 	tro.Txn = txn
@@ -522,7 +526,7 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	}
 	switch outcome.Which() {
 	case msgs.OUTCOME_COMMIT:
-		tro.outcomeClock = VectorClockFromData(outcome.Commit(), true)
+		tro.outcomeClock = vc.VectorClockFromData(outcome.Commit(), true)
 		/*
 			excess := tro.outcomeClock.Len - tro.TxnCap.Actions().Len()
 			fmt.Printf("%v ", excess)
@@ -559,8 +563,7 @@ type txnAwaitLocallyComplete struct {
 	activeFramesCount int32
 }
 
-func (talc *txnAwaitLocallyComplete) txnStateMachineComponentWitness() {}
-func (talc *txnAwaitLocallyComplete) String() string                   { return "txnAwaitLocallyComplete" }
+func (talc *txnAwaitLocallyComplete) String() string { return "txnAwaitLocallyComplete" }
 
 func (talc *txnAwaitLocallyComplete) init(txn *Txn) {
 	talc.Txn = txn
@@ -576,19 +579,20 @@ func (talc *txnAwaitLocallyComplete) start() {
 // Callback (from var-dispatcher (frames) back into txn)
 func (talc *txnAwaitLocallyComplete) LocallyComplete() {
 	result := atomic.AddInt32(&talc.activeFramesCount, -1)
-	server.DebugLog(talc.logger, "debug", "LocallyComplete", "TxnId", talc.Id, "pendingFrameCount", result)
+	utils.DebugLog(talc.logger, "debug", "LocallyComplete", "TxnId", talc.Id, "pendingFrameCount", result)
 	if result == 0 {
-		talc.exe.Enqueue(talc.locallyComplete)
+		talc.exe.EnqueueFuncAsync(talc.locallyComplete)
 	} else if result < 0 {
 		panic(fmt.Sprintf("%v activeFramesCount went -1!", talc.Id))
 	}
 }
 
-func (talc *txnAwaitLocallyComplete) locallyComplete() {
+func (talc *txnAwaitLocallyComplete) locallyComplete() (bool, error) {
 	if talc.currentState == talc {
 		talc.nextState() // do state first!
 		talc.stateChange.TxnLocallyComplete(talc.Txn)
 	}
+	return false, nil
 }
 
 // Receive Completion
@@ -597,8 +601,7 @@ type txnReceiveCompletion struct {
 	completed bool
 }
 
-func (trc *txnReceiveCompletion) txnStateMachineComponentWitness() {}
-func (trc *txnReceiveCompletion) String() string                   { return "txnReceiveCompletion" }
+func (trc *txnReceiveCompletion) String() string { return "txnReceiveCompletion" }
 
 func (trc *txnReceiveCompletion) init(txn *Txn) {
 	trc.Txn = txn
@@ -608,7 +611,7 @@ func (trc *txnReceiveCompletion) start() {}
 
 // Callback (from network/paxos)
 func (trc *txnReceiveCompletion) CompletionReceived() {
-	server.DebugLog(trc.logger, "debug", "CompletionReceived", "TxnId", trc.Id, "alreadyCompleted", trc.completed, "currentState", trc.currentState, "aborted", trc.aborted)
+	utils.DebugLog(trc.logger, "debug", "CompletionReceived", "TxnId", trc.Id, "alreadyCompleted", trc.completed, "currentState", trc.currentState, "aborted", trc.aborted)
 	if trc.completed {
 		// Be silent in this case.
 		return
