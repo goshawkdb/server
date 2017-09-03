@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/types"
 	"net"
@@ -183,7 +181,6 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		Fingerprints: make(map[Fingerprint]map[string]*common.Capability, len(config.ClientCertificateFingerprints)),
 	}
 
-	seg := capn.NewBuffer(nil)
 	allRootNamesMap := make(map[string]types.EmptyStruct)
 	for fingerprint, rootsMap := range config.ClientCertificateFingerprints {
 		fingerprintBytes, err := hex.DecodeString(fingerprint)
@@ -199,24 +196,16 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		for rootName, rootCaps := range rootsMap {
 			allRootNamesMap[rootName] = types.EmptyStructVal
 
-			var capability *common.Capability
-			if rootCaps.Read && rootCaps.Write {
-				capability = common.MaxCapability
-			} else {
-				cap := cmsgs.NewCapability(seg)
-				switch {
-				case rootCaps.Read && rootCaps.Write:
-					cap.SetReadWrite()
-				case rootCaps.Read:
-					cap.SetRead()
-				case rootCaps.Write:
-					cap.SetWrite()
-				default:
-					cap.SetNone()
-				}
-				capability = common.NewCapability(cap)
+			switch {
+			case rootCaps.Read && rootCaps.Write:
+				accountRootsMap[rootName] = common.ReadWriteCapability
+			case rootCaps.Read:
+				accountRootsMap[rootName] = common.ReadOnlyCapability
+			case rootCaps.Write:
+				accountRootsMap[rootName] = common.WriteOnlyCapability
+			default:
+				accountRootsMap[rootName] = common.NoneCapability
 			}
-			accountRootsMap[rootName] = capability
 		}
 	}
 	result.Roots = make([]string, 0, len(allRootNamesMap))

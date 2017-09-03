@@ -149,19 +149,22 @@ func (vc *versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability
 		return true
 	}
 	if c, found := vc.cache[*vUUId]; found {
-		if c.caps == common.MaxCapability {
+		if c.caps == common.ReadWriteCapability {
 			return true
 		}
 		capNew, capOld := cap.Which(), c.caps.Which()
 		switch {
 		case capNew == capOld:
+			return true
 		case capNew == cmsgs.CAPABILITY_NONE: // new is bottom, always fine
+			return true
 		case capOld == cmsgs.CAPABILITY_READWRITE: // old is top, always fine
+			return true
 		default:
 			return false
 		}
 	}
-	return true
+	return true // it must be pointing to something we're creating
 }
 
 func (vc *versionCache) UpdateFromCommit(txn *txnreader.TxnReader, outcome *msgs.Outcome) {
@@ -179,7 +182,7 @@ func (vc *versionCache) UpdateFromCommit(txn *txnreader.TxnReader, outcome *msgs
 				c = &cached{
 					txnId:      txnId,
 					clockElem:  clock.At(vUUId),
-					caps:       common.MaxCapability,
+					caps:       common.ReadWriteCapability,
 					value:      create.Value(),
 					references: create.References().ToArray(),
 				}
