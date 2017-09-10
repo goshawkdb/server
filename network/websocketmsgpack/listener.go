@@ -143,7 +143,7 @@ func (l *websocketListenerInner) configureMux() {
 	l.mux.Done()
 }
 
-func (l *websocketListenerInner) wsHandler(connNumber uint32, w http.ResponseWriter, r *http.Request, peerCerts []*x509.Certificate, roots map[string]*common.Capability) {
+func (l *websocketListenerInner) wsHandler(connNumber uint32, w http.ResponseWriter, r *http.Request, peerCerts []*x509.Certificate, roots map[string]common.Capability) {
 	logger := log.With(l.parentLogger, "subsystem", "connection", "dir", "incoming", "protocol", "websocket", "type", "client", "connNumber", connNumber)
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err == nil {

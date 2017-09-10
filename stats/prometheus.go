@@ -7,7 +7,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
-	msgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/configuration"
 	ghttp "goshawkdb.io/server/network/http"
@@ -174,7 +173,7 @@ func (pl *PrometheusListener) configureMux() {
 		peerCerts := req.TLS.PeerCertificates
 		if authenticated, _, roots := pl.getTopology().VerifyPeerCerts(peerCerts); authenticated {
 			if cap, found := roots[server.MetricsRootName]; found {
-				if capWhich := cap.Which(); capWhich == msgs.CAPABILITY_READ || capWhich == msgs.CAPABILITY_READWRITE {
+				if cap.CanRead() {
 					promHandler.ServeHTTP(w, req)
 					return
 				}

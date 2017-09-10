@@ -31,7 +31,7 @@ type ClientTxnSubmitter struct {
 	metrics      *cconn.ClientTxnMetrics
 }
 
-func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]*common.Capability, namespace []byte, cm sconn.ServerConnectionPublisher, actor actor.EnqueueActor, logger log.Logger, metrics *cconn.ClientTxnMetrics) *ClientTxnSubmitter {
+func NewClientTxnSubmitter(rmId common.RMId, bootCount uint32, roots map[common.VarUUId]common.Capability, namespace []byte, cm sconn.ServerConnectionPublisher, actor actor.EnqueueActor, logger log.Logger, metrics *cconn.ClientTxnMetrics) *ClientTxnSubmitter {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	sts := NewSimpleTxnSubmitter(rmId, bootCount, cm, actor, rng, logger)
 	return &ClientTxnSubmitter{

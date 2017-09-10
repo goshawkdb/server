@@ -21,7 +21,7 @@ type versionCache struct {
 type cached struct {
 	txnId      *common.TxnId
 	clockElem  uint64
-	caps       *common.Capability
+	caps       common.Capability
 	value      []byte
 	references []msgs.VarIdPos
 }
@@ -43,7 +43,7 @@ func (co cacheOverlay) String() string {
 	return fmt.Sprintf("@%v (%v) (inCache: %v, updateClient %v)", co.txnId, co.caps, co.inCache, co.updateClient)
 }
 
-func NewVersionCache(roots map[common.VarUUId]*common.Capability, namespace []byte) *versionCache {
+func NewVersionCache(roots map[common.VarUUId]common.Capability, namespace []byte) *versionCache {
 	cache := make(map[common.VarUUId]*cached)
 	for vUUId, caps := range roots {
 		cache[vUUId] = &cached{caps: caps}
@@ -75,7 +75,7 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 				return fmt.Errorf("Retry transaction should only include reads. Found %v", which)
 			} else if c, found := vc.cache[*vUUId]; !found {
 				return fmt.Errorf("Retry transaction has attempted to read from unknown object: %v", vUUId)
-			} else if cap := c.caps.Which(); !(cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE) {
+			} else if !c.caps.CanRead() {
 				return fmt.Errorf("Retry transaction has attempted illegal read from object: %v", vUUId)
 			} else if read := action.Read(); !bytes.Equal(c.txnId[:], read.Version()) {
 				return fmt.Errorf("Retry transaction has attempted read of object %v at wrong version.",
@@ -98,15 +98,12 @@ func (vc *versionCache) ValidateTransaction(ctxnId *common.TxnId, cTxn *cmsgs.Cl
 				if !found {
 					return fmt.Errorf("Transaction manipulates unknown object: %v", vUUId)
 				} else {
-					cap := c.caps.Which()
-					canRead := cap == cmsgs.CAPABILITY_READ || cap == cmsgs.CAPABILITY_READWRITE
-					canWrite := cap == cmsgs.CAPABILITY_WRITE || cap == cmsgs.CAPABILITY_READWRITE
 					switch {
-					case act == cmsgs.CLIENTACTION_READ && !canRead:
+					case act == cmsgs.CLIENTACTION_READ && !c.caps.CanRead():
 						return fmt.Errorf("Transaction has illegal read action on object: %v", vUUId)
-					case act == cmsgs.CLIENTACTION_WRITE && !canWrite:
+					case act == cmsgs.CLIENTACTION_WRITE && !c.caps.CanWrite():
 						return fmt.Errorf("Transaction has illegal write action on object: %v", vUUId)
-					case act == cmsgs.CLIENTACTION_READWRITE && cap != cmsgs.CAPABILITY_READWRITE:
+					case act == cmsgs.CLIENTACTION_READWRITE && c.caps != common.ReadWriteCapability:
 						return fmt.Errorf("Transaction has illegal readwrite action on object: %v", vUUId)
 					}
 
@@ -149,20 +146,8 @@ func (vc *versionCache) EnsureSubset(vUUId *common.VarUUId, cap cmsgs.Capability
 		return true
 	}
 	if c, found := vc.cache[*vUUId]; found {
-		if c.caps == common.ReadWriteCapability {
-			return true
-		}
-		capNew, capOld := cap.Which(), c.caps.Which()
-		switch {
-		case capNew == capOld:
-			return true
-		case capNew == cmsgs.CAPABILITY_NONE: // new is bottom, always fine
-			return true
-		case capOld == cmsgs.CAPABILITY_READWRITE: // old is top, always fine
-			return true
-		default:
-			return false
-		}
+		capability := common.NewCapability(cap)
+		return (c.caps & capability) == capability
 	}
 	return true // it must be pointing to something we're creating
 }
@@ -433,31 +418,16 @@ func (vc *versionCache) updateReachable(updateGraph map[common.VarUUId]*cacheOve
 
 // returns true iff we couldn't read the value before merge, but we
 // can after
-func (c *cached) mergeCaps(b *common.Capability) (gainedRead bool) {
+func (c *cached) mergeCaps(b common.Capability) (gainedRead bool) {
 	a := c.caps
 	c.caps = a.Union(b)
-	if a != c.caps { // change has happened
-		nCap := c.caps.Which()
-		nRead := nCap == cmsgs.CAPABILITY_READ || nCap == cmsgs.CAPABILITY_READWRITE
-		if a == nil {
-			return nRead
-		} else {
-			aCap := a.Which()
-			return nRead && aCap != cmsgs.CAPABILITY_READ && aCap != cmsgs.CAPABILITY_READWRITE
-		}
-	}
-	return false
+	return c.caps.CanRead() && (!a.CanRead())
 }
 
 func (c *cached) reachableReferences() []msgs.VarIdPos {
-	if c.caps == nil || len(c.references) == 0 {
-		return nil
-	}
-
-	switch c.caps.Which() {
-	case cmsgs.CAPABILITY_READ, cmsgs.CAPABILITY_READWRITE:
+	if len(c.references) > 0 && c.caps.CanRead() {
 		return c.references
-	default:
+	} else {
 		return nil
 	}
 }
@@ -473,20 +443,19 @@ func (u *update) AddToClientAction(hashCache *ch.ConsistentHashCache, seg *capn.
 		clientAction.SetWrite()
 		clientWrite := clientAction.Write()
 
-		switch c.caps.Which() {
-		case cmsgs.CAPABILITY_READ, cmsgs.CAPABILITY_READWRITE:
-			clientWrite.SetValue(c.value)
-			clientReferences := cmsgs.NewClientVarIdPosList(seg, len(c.references))
-			for idx, ref := range c.references {
-				varIdPos := clientReferences.At(idx)
-				varIdPos.SetVarId(ref.Id())
-				varIdPos.SetCapability(ref.Capability())
-				positions := common.Positions(ref.Positions())
-				hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
-			}
-			clientWrite.SetReferences(clientReferences)
-		default:
+		if !c.caps.CanRead() {
 			panic(fmt.Sprintf("Internal logic error: attempted to send client update with non-read capability (%v)", u.varUUId))
 		}
+
+		clientWrite.SetValue(c.value)
+		clientReferences := cmsgs.NewClientVarIdPosList(seg, len(c.references))
+		for idx, ref := range c.references {
+			varIdPos := clientReferences.At(idx)
+			varIdPos.SetVarId(ref.Id())
+			varIdPos.SetCapability(ref.Capability())
+			positions := common.Positions(ref.Positions())
+			hashCache.AddPosition(common.MakeVarUUId(ref.Id()), &positions)
+		}
+		clientWrite.SetReferences(clientReferences)
 	}
 }

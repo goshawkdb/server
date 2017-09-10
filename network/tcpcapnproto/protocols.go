@@ -401,8 +401,8 @@ type TLSCapnpClient struct {
 	remoteHost string
 	logger     log.Logger
 	peerCerts  []*x509.Certificate
-	roots      map[string]*common.Capability
-	rootsVar   map[common.VarUUId]*common.Capability
+	roots      map[string]common.Capability
+	rootsVar   map[common.VarUUId]common.Capability
 	namespace  []byte
 	submitter  *client.ClientTxnSubmitter
 	reader     *common.SocketReader
@@ -457,7 +457,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(tcc.roots))
 	idy := 0
-	rootsVar := make(map[common.VarUUId]*common.Capability, len(tcc.roots))
+	rootsVar := make(map[common.VarUUId]common.Capability, len(tcc.roots))
 	for idx, name := range tcc.topology.Roots {
 		if capability, found := tcc.roots[name]; found {
 			rootCap := rootsCap.At(idy)
@@ -465,7 +465,7 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 			vUUId := tcc.topology.RootVarUUIds[idx].VarUUId
 			rootCap.SetName(name)
 			rootCap.SetVarId(vUUId[:])
-			rootCap.SetCapability(capability.Capability)
+			rootCap.SetCapability(capability.AsMsg())
 			rootsVar[*vUUId] = capability
 		}
 	}
@@ -516,7 +516,7 @@ func (tcc *TLSCapnpClient) TopologyChanged(tc *network.ConnectionMsgTopologyChan
 			return errors.New("Client connection closed: No client certificate known")
 		} else if len(roots) == len(tcc.roots) {
 			for name, capsOld := range tcc.roots {
-				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
+				if capsNew, found := roots[name]; !found || capsNew != capsOld {
 					utils.DebugLog(tcc.logger, "debug", "TopologyChanged. Roots Changed.", "topology", topology)
 					return errors.New("Client connection closed: roots have changed")
 				}

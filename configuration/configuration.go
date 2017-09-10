@@ -9,7 +9,6 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
 	"goshawkdb.io/common"
-	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
@@ -32,7 +31,7 @@ type Configuration struct {
 	NoSync            bool
 	RMs               common.RMIds
 	RMsRemoved        map[common.RMId]types.EmptyStruct
-	Fingerprints      map[Fingerprint]map[string]*common.Capability
+	Fingerprints      map[Fingerprint]map[string]common.Capability
 	Roots             []string
 	NextConfiguration *NextConfiguration
 }
@@ -85,7 +84,7 @@ func (a *Configuration) EqualExternally(b *Configuration) bool {
 	for fingerprint, aRoots := range a.Fingerprints {
 		if bRoots, found := b.Fingerprints[fingerprint]; found && len(aRoots) == len(bRoots) {
 			for name, aRootCaps := range aRoots {
-				if bRootCaps, found := bRoots[name]; !found || !aRootCaps.Equal(bRootCaps) {
+				if bRootCaps, found := bRoots[name]; !found || aRootCaps != bRootCaps {
 					return false
 				}
 			}
@@ -118,10 +117,9 @@ func (config *Configuration) ToConfigurationJSON() *ConfigurationJSON {
 		fingerprints[hex.EncodeToString(fingerprint[:])] = accountRootsMap
 
 		for rootName, rootCaps := range rootsMap {
-			whichCap := rootCaps.Which()
 			accountRootsMap[rootName] = &CapabilityJSON{
-				Read:  whichCap == cmsgs.CAPABILITY_READ || whichCap == cmsgs.CAPABILITY_READWRITE,
-				Write: whichCap == cmsgs.CAPABILITY_WRITE || whichCap == cmsgs.CAPABILITY_READWRITE,
+				Read:  rootCaps.CanRead(),
+				Write: rootCaps.CanWrite(),
 			}
 		}
 	}
@@ -144,7 +142,7 @@ func (config *Configuration) Clone() *Configuration {
 		NoSync:            config.NoSync,
 		RMs:               make([]common.RMId, len(config.RMs)),
 		RMsRemoved:        make(map[common.RMId]types.EmptyStruct, len(config.RMsRemoved)),
-		Fingerprints:      make(map[Fingerprint]map[string]*common.Capability, len(config.Fingerprints)),
+		Fingerprints:      make(map[Fingerprint]map[string]common.Capability, len(config.Fingerprints)),
 		Roots:             make([]string, len(config.Roots)),
 		NextConfiguration: config.NextConfiguration.Clone(),
 	}
@@ -187,7 +185,7 @@ func (config *Configuration) EnsureClusterUUId(uuid uint64) uint64 {
 	return config.ClusterUUId
 }
 
-func (config *Configuration) VerifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]*common.Capability) {
+func (config *Configuration) VerifyPeerCerts(peerCerts []*x509.Certificate) (authenticated bool, hashsum [sha256.Size]byte, roots map[string]common.Capability) {
 	fingerprints := config.Fingerprints
 	for _, cert := range peerCerts {
 		hashsum = sha256.Sum256(cert.Raw)
@@ -292,13 +290,13 @@ func ConfigurationFromCap(config msgs.Configuration) *Configuration {
 
 	rootsMap := make(map[string]types.EmptyStruct)
 	fingerprints := config.Fingerprints()
-	fingerprintsMap := make(map[Fingerprint]map[string]*common.Capability, fingerprints.Len())
+	fingerprintsMap := make(map[Fingerprint]map[string]common.Capability, fingerprints.Len())
 	for idx, l := 0, fingerprints.Len(); idx < l; idx++ {
 		fingerprint := fingerprints.At(idx)
 		ary := [sha256.Size]byte{}
 		copy(ary[:], fingerprint.Sha256())
 		rootsCap := fingerprint.Roots()
-		roots := make(map[string]*common.Capability, rootsCap.Len())
+		roots := make(map[string]common.Capability, rootsCap.Len())
 		for idy, m := 0, rootsCap.Len(); idy < m; idy++ {
 			rootCap := rootsCap.At(idy)
 			name := rootCap.Name()
@@ -414,7 +412,7 @@ func (config *Configuration) AddToSegAutoRoot(seg *capn.Segment) msgs.Configurat
 		for name, capability := range roots {
 			rootCap := msgs.NewRoot(seg)
 			rootCap.SetName(name)
-			rootCap.SetCapability(capability.Capability)
+			rootCap.SetCapability(capability.AsMsg())
 			rootsCap.Set(idy, rootCap)
 			idy++
 		}

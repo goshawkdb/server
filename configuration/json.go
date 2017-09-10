@@ -178,7 +178,7 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		F:            config.F,
 		MaxRMCount:   config.MaxRMCount,
 		NoSync:       config.NoSync,
-		Fingerprints: make(map[Fingerprint]map[string]*common.Capability, len(config.ClientCertificateFingerprints)),
+		Fingerprints: make(map[Fingerprint]map[string]common.Capability, len(config.ClientCertificateFingerprints)),
 	}
 
 	allRootNamesMap := make(map[string]types.EmptyStruct)
@@ -190,22 +190,20 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		fingerprintAry := [sha256.Size]byte{}
 		copy(fingerprintAry[:], fingerprintBytes)
 
-		accountRootsMap := make(map[string]*common.Capability, len(rootsMap))
+		accountRootsMap := make(map[string]common.Capability, len(rootsMap))
 		result.Fingerprints[fingerprintAry] = accountRootsMap
 
 		for rootName, rootCaps := range rootsMap {
 			allRootNamesMap[rootName] = types.EmptyStructVal
 
-			switch {
-			case rootCaps.Read && rootCaps.Write:
-				accountRootsMap[rootName] = common.ReadWriteCapability
-			case rootCaps.Read:
-				accountRootsMap[rootName] = common.ReadOnlyCapability
-			case rootCaps.Write:
-				accountRootsMap[rootName] = common.WriteOnlyCapability
-			default:
-				accountRootsMap[rootName] = common.NoneCapability
+			cap := common.ReadWriteCapability
+			if !rootCaps.Read {
+				cap = cap.DenyRead()
 			}
+			if !rootCaps.Write {
+				cap = cap.DenyWrite()
+			}
+			accountRootsMap[rootName] = cap
 		}
 	}
 	result.Roots = make([]string, 0, len(allRootNamesMap))
