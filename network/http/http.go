@@ -57,7 +57,10 @@ func (hlwm *HttpListenerWithMux) acceptLoop() {
 				PrivateKey:  nodeCertPrivKeyPair.PrivateKey,
 			},
 		},
-		CipherSuites:             []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256},
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+		},
 		MinVersion:               tls.VersionTLS12,
 		PreferServerCipherSuites: true,
 		ClientCAs:                roots,

@@ -313,7 +313,7 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 			varIdPos := refs.At(idx)
 			varIdPos.SetId(root.VarUUId[:])
 			varIdPos.SetPositions((capn.UInt8List)(*root.Positions))
-			varIdPos.SetCapability(common.MaxCapability.Capability)
+			varIdPos.SetCapability(common.ReadWriteCapability.AsMsg())
 		}
 		rw.SetReferences(refs)
 	}

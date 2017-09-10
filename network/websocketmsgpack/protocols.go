@@ -39,8 +39,8 @@ type wssMsgPackClient struct {
 	bootCount         uint32
 	socket            *websocket.Conn
 	peerCerts         []*x509.Certificate
-	roots             map[string]*common.Capability
-	rootsVar          map[common.VarUUId]*common.Capability
+	roots             map[string]common.Capability
+	rootsVar          map[common.VarUUId]common.Capability
 	namespace         []byte
 	connectionManager connectionmanager.ConnectionManager
 	topology          *configuration.Topology
@@ -127,7 +127,7 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	wmpc.namespace = namespace
 
 	roots := make([]*cmsgs.Root, 0, len(wmpc.roots))
-	rootsVar := make(map[common.VarUUId]*common.Capability, len(wmpc.roots))
+	rootsVar := make(map[common.VarUUId]common.Capability, len(wmpc.roots))
 	for idx, name := range wmpc.topology.Roots {
 		if capability, found := wmpc.roots[name]; found {
 			vUUId := wmpc.topology.RootVarUUIds[idx].VarUUId
@@ -136,7 +136,7 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 				VarId:      vUUId[:],
 				Capability: &cmsgs.Capability{},
 			}
-			root.Capability.FromCapnp(capability.Capability)
+			root.Capability.FromCapnp(capability.AsMsg())
 			roots = append(roots, root)
 			rootsVar[*vUUId] = capability
 		}
@@ -191,7 +191,7 @@ func (wmpc *wssMsgPackClient) TopologyChanged(tc *network.ConnectionMsgTopologyC
 			return errors.New("WSS Client connection closed: No client certificate known")
 		} else if len(roots) == len(wmpc.roots) {
 			for name, capsOld := range wmpc.roots {
-				if capsNew, found := roots[name]; !found || !capsNew.Equal(capsOld) {
+				if capsNew, found := roots[name]; !found || capsNew != capsOld {
 					utils.DebugLog(wmpc.logger, "debug", "TopologyChanged. Roots changed.", "topology", topology)
 					return errors.New("WSS Client connection closed: roots have changed")
 				}

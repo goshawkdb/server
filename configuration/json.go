@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
-	cmsgs "goshawkdb.io/common/capnp"
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/types"
 	"net"
@@ -180,10 +178,9 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		F:            config.F,
 		MaxRMCount:   config.MaxRMCount,
 		NoSync:       config.NoSync,
-		Fingerprints: make(map[Fingerprint]map[string]*common.Capability, len(config.ClientCertificateFingerprints)),
+		Fingerprints: make(map[Fingerprint]map[string]common.Capability, len(config.ClientCertificateFingerprints)),
 	}
 
-	seg := capn.NewBuffer(nil)
 	allRootNamesMap := make(map[string]types.EmptyStruct)
 	for fingerprint, rootsMap := range config.ClientCertificateFingerprints {
 		fingerprintBytes, err := hex.DecodeString(fingerprint)
@@ -193,30 +190,20 @@ func (config *ConfigurationJSON) ToConfiguration() *Configuration {
 		fingerprintAry := [sha256.Size]byte{}
 		copy(fingerprintAry[:], fingerprintBytes)
 
-		accountRootsMap := make(map[string]*common.Capability, len(rootsMap))
+		accountRootsMap := make(map[string]common.Capability, len(rootsMap))
 		result.Fingerprints[fingerprintAry] = accountRootsMap
 
 		for rootName, rootCaps := range rootsMap {
 			allRootNamesMap[rootName] = types.EmptyStructVal
 
-			var capability *common.Capability
-			if rootCaps.Read && rootCaps.Write {
-				capability = common.MaxCapability
-			} else {
-				cap := cmsgs.NewCapability(seg)
-				switch {
-				case rootCaps.Read && rootCaps.Write:
-					cap.SetReadWrite()
-				case rootCaps.Read:
-					cap.SetRead()
-				case rootCaps.Write:
-					cap.SetWrite()
-				default:
-					cap.SetNone()
-				}
-				capability = common.NewCapability(cap)
+			cap := common.ReadWriteCapability
+			if !rootCaps.Read {
+				cap = cap.DenyRead()
 			}
-			accountRootsMap[rootName] = capability
+			if !rootCaps.Write {
+				cap = cap.DenyWrite()
+			}
+			accountRootsMap[rootName] = cap
 		}
 	}
 	result.Roots = make([]string, 0, len(allRootNamesMap))
