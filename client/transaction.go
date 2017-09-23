@@ -122,11 +122,11 @@ func (ts *TransactionSubmitter) calculateDisabledHashcodes() error {
 	return nil
 }
 
-func (ts *TransactionSubmitter) AddTransactionRecord(txnId *common.TxnId, tr *TransactionRecord) {
-	if _, found := ts.txns[*txnId]; found {
-		panic("Transaction already exists! " + txnId.String())
+func (ts *TransactionSubmitter) AddTransactionRecord(tr *TransactionRecord) {
+	if _, found := ts.txns[*tr.Id]; found {
+		panic("Transaction already exists! " + tr.Id.String())
 	}
-	ts.txns[*txnId] = tr
+	ts.txns[*tr.Id] = tr
 }
 
 type transactionOutcomeReceiver interface {
@@ -140,6 +140,7 @@ type TransactionRecord struct {
 	transactionOutcomeReceiver
 	cache       *Cache
 	birthday    time.Time
+	Id          *common.TxnId
 	origId      *common.TxnId
 	client      *cmsgs.ClientTxn
 	server      *msgs.Txn
@@ -201,7 +202,7 @@ func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader) error {
 	// exiting, this informs acceptors that we don't care about the
 	// answer so they shouldn't hang around waiting for the node to
 	// return. Of course, it's best effort.
-	senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id), tr.connPub, tr.acceptors...)
+	senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id), tr.connPub, tr.acceptors...)
 	if tr.sender != nil {
 		tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
 		tr.sender = nil
@@ -212,7 +213,7 @@ func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader) error {
 		// observe our death and tidy up anyway. If it's just this
 		// connection shutting down then there should be no
 		// problem with these msgs getting to the proposers.
-		senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionAbortMsg(txn.Id), tr.connPub, tr.active...)
+		senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionAbortMsg(tr.Id), tr.connPub, tr.active...)
 	}
 
 	switch {

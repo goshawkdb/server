@@ -143,6 +143,7 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 			"updatesLen", updates.Len(), "validLen", len(validUpdates))
 
 		if len(validUpdates) != 0 {
+			rts.bbe.Shrink(server.SubmissionMinSubmitDelay)
 			// we actually have to get the client to rerun
 			clientSeg := capn.NewBuffer(nil)
 			clientOutcome := cmsgs.NewClientTxnOutcome(clientSeg)
@@ -202,17 +203,21 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 	client.SetRetry(tr.client.Retry())
 	client.SetActions(tr.client.Actions())
 
-	return rts.SubmitRemoteClientTransaction(txnId, &client, cont)
+	return rts.submitRemoteClientTransaction(tr.origId, txnId, &client, cont)
 }
 
 func (rts *RemoteTransactionSubmitter) SubmitRemoteClientTransaction(txnId *common.TxnId, txn *cmsgs.ClientTxn, cont RemoteTxnCompletionContinuation) error {
+	return rts.submitRemoteClientTransaction(txnId, txnId, txn, cont)
+}
+
+func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, txnId *common.TxnId, txn *cmsgs.ClientTxn, cont RemoteTxnCompletionContinuation) error {
 	if rts.cont != nil {
 		return cont(nil, errors.New("Live Transaction already exists."))
 	}
 
 	if rts.topology.IsBlank() {
 		rts.bufferedSubmissions = append(rts.bufferedSubmissions, func() {
-			rts.SubmitRemoteClientTransaction(txnId, txn, cont)
+			rts.submitRemoteClientTransaction(origTxnId, txnId, txn, cont)
 		})
 		return nil
 	} else {
@@ -220,7 +225,8 @@ func (rts *RemoteTransactionSubmitter) SubmitRemoteClientTransaction(txnId *comm
 			TransactionSubmitter:       rts.TransactionSubmitter,
 			transactionOutcomeReceiver: rts,
 			cache:  rts.cache,
-			origId: txnId,
+			Id:     txnId,
+			origId: origTxnId,
 			client: txn,
 			bbe:    rts.bbe,
 		}
@@ -229,7 +235,7 @@ func (rts *RemoteTransactionSubmitter) SubmitRemoteClientTransaction(txnId *comm
 		}
 		rts.cont = cont
 		rts.resubmitCount = 0
-		rts.AddTransactionRecord(txnId, tr)
+		rts.AddTransactionRecord(tr)
 		tr.Submit()
 		if rts.metrics != nil {
 			rts.metrics.TxnSubmit.Inc()

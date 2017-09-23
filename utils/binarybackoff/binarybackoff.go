@@ -45,7 +45,7 @@ func (bbe *BinaryBackoffEngine) After(fun func()) {
 }
 
 func (bbe *BinaryBackoffEngine) Shrink(roundToZero time.Duration) {
-	bbe.period /= 2
+	bbe.period /= 3
 	if bbe.period < bbe.min {
 		bbe.period = bbe.min
 	}

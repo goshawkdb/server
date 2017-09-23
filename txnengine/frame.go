@@ -859,11 +859,6 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	}
 
 	posMap := make(map[common.VarUUId]*types.PosCapVer)
-	posMap[*fo.v.UUId] = &types.PosCapVer{
-		Positions:  fo.v.positions,
-		Capability: common.ReadWriteCapability,
-		Version:    fo.frameTxnId,
-	}
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
@@ -888,13 +883,20 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 		pos := common.Positions(origRef.Positions())
 		posMap[*vUUId] = &types.PosCapVer{
 			Positions:  &pos,
-			Capability: common.ReadWriteCapability,
+			Capability: common.NewCapability(origRef.Capability()),
 		}
 		varIdPos := refVarList.At(idx)
 		varIdPos.SetVarId(vUUId[:])
 		varIdPos.SetCapability(origRef.Capability())
 	}
 	fo.rollTxn = &ctxn
+	// we do this one last in case our own refs point at ourself and so
+	// we need to overwrite it to include the correct version
+	posMap[*fo.v.UUId] = &types.PosCapVer{
+		Positions:  fo.v.positions,
+		Capability: common.ReadWriteCapability,
+		Version:    fo.frameTxnId,
+	}
 	fo.rollTxnPos = posMap
 	return &ctxn, posMap
 }

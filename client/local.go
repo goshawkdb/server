@@ -30,12 +30,13 @@ func (ts *TransactionSubmitter) SubmitLocalServerTransaction(txnId *common.TxnId
 	tr := &TransactionRecord{
 		TransactionSubmitter:       ts,
 		transactionOutcomeReceiver: cont,
+		Id:     txnId,
 		origId: txnId,
 		server: txn,
 		active: active,
 		bbe:    bbe,
 	}
-	ts.AddTransactionRecord(txnId, tr)
+	ts.AddTransactionRecord(tr)
 	tr.Submit()
 }
 
@@ -50,6 +51,7 @@ func (ts *TransactionSubmitter) SubmitLocalClientTransaction(txnId *common.TxnId
 			TransactionSubmitter:       ts,
 			transactionOutcomeReceiver: cont,
 			cache:  NewCache(ts.rng, roots),
+			Id:     txnId,
 			origId: txnId,
 			client: txn,
 		}
@@ -57,7 +59,7 @@ func (ts *TransactionSubmitter) SubmitLocalClientTransaction(txnId *common.TxnId
 		if err := tr.formServerTxn(translationCallback, isTopologyTxn); err != nil {
 			return cont(nil, nil, err)
 		}
-		ts.AddTransactionRecord(txnId, tr)
+		ts.AddTransactionRecord(tr)
 		tr.Submit()
 		return nil
 	}

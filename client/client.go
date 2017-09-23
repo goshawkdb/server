@@ -108,18 +108,30 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			action.SetPositions((capn.UInt8List)(*c.positions))
 
 		case cmsgs.CLIENTACTIONTYPE_READONLY:
+			if !c.caps.CanRead() {
+				return nil, fmt.Errorf("Illegal read of %v", vUUId)
+			}
 			action.SetActionType(msgs.ACTIONTYPE_READONLY)
 			action.SetVersion(c.version[:])
 			action.SetUnmodified()
 
 		case cmsgs.CLIENTACTIONTYPE_WRITEONLY:
+			if !c.caps.CanWrite() {
+				return nil, fmt.Errorf("Illegal write of %v", vUUId)
+			}
 			action.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
 
 		case cmsgs.CLIENTACTIONTYPE_READWRITE:
+			if c.caps != common.ReadWriteCapability {
+				return nil, fmt.Errorf("Illegal read-write of %v", vUUId)
+			}
 			action.SetActionType(msgs.ACTIONTYPE_READWRITE)
 			action.SetVersion(c.version[:])
 
 		case cmsgs.CLIENTACTIONTYPE_ROLL:
+			if c.caps != common.ReadWriteCapability {
+				return nil, fmt.Errorf("Illegal roll of %v", vUUId)
+			}
 			action.SetActionType(msgs.ACTIONTYPE_ROLL)
 			action.SetVersion(c.version[:])
 
