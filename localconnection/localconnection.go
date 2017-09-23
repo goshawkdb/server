@@ -9,6 +9,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
 	loco "goshawkdb.io/server/types/localconnection"
@@ -32,7 +33,7 @@ type LocalConnection struct {
 	nextVarNumber     uint64
 	nextTxnNumber     uint64
 	rng               *rand.Rand
-	submitter         *client.SimpleTxnSubmitter
+	submitter         *client.TransactionSubmitter
 
 	inner localConnectionInner
 }
@@ -56,7 +57,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm connectionmanager
 		nextVarNumber:     0,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	lc.submitter = client.NewSimpleTxnSubmitter(rmId, bootCount, cm, lc, lc.rng, logger)
+	lc.submitter = client.NewTransactionSubmitter(rmId, bootCount, cm, lc, lc.rng, logger)
 
 	lci := &lc.inner
 	lci.LocalConnection = lc
@@ -164,7 +165,7 @@ type localConnectionMsgRunClientTxn struct {
 	*LocalConnection
 	txn                 *cmsgs.ClientTxn
 	isTopologyTxn       bool
-	varPosMap           map[common.VarUUId]*common.Positions
+	roots               map[common.VarUUId]*types.PosCapVer
 	translationCallback loco.TranslationCallback
 	txnReader           *txnreader.TxnReader
 	outcome             *msgs.Outcome
@@ -184,18 +185,15 @@ func (msg *localConnectionMsgRunClientTxn) Exec() (bool, error) {
 	txnId := msg.inner.nextTxnId()
 	txn.SetId(txnId[:])
 	utils.DebugLog(msg.inner.Logger, "debug", "Starting client txn.", "TxnId", txnId)
-	if varPosMap := msg.varPosMap; varPosMap != nil {
-		msg.submitter.EnsurePositions(varPosMap)
-	}
-	return false, msg.submitter.SubmitClientTransaction(msg.translationCallback, txn, txnId, msg.setOutcomeError, nil, msg.isTopologyTxn, nil)
+	return false, msg.submitter.SubmitLocalClientTransaction(txnId, txn, msg.isTopologyTxn, msg.roots, msg.translationCallback, msg.setOutcomeError)
 }
 
-func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, varPosMap map[common.VarUUId]*common.Positions, translationCallback loco.TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopologyTxn bool, roots map[common.VarUUId]*types.PosCapVer, translationCallback loco.TranslationCallback) (*txnreader.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunClientTxn{
 		LocalConnection:     lc,
 		txn:                 txn,
 		isTopologyTxn:       isTopologyTxn,
-		varPosMap:           varPosMap,
+		roots:               roots,
 		translationCallback: translationCallback,
 	}
 	msg.InitMsg(lc)
@@ -234,7 +232,7 @@ func (msg *localConnectionMsgRunTxn) Exec() (bool, error) {
 		txn.SetId(txnId[:])
 	}
 	utils.DebugLog(msg.inner.Logger, "debug", "Starting txn.", "TxnId", txnId)
-	msg.submitter.SubmitTransaction(txn, txnId, msg.activeRMs, msg.setOutcomeError, msg.backoff)
+	msg.submitter.SubmitLocalServerTransaction(txnId, txn, msg.activeRMs, msg.backoff, msg.setOutcomeError)
 	return false, nil
 }
 

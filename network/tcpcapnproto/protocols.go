@@ -17,6 +17,7 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/network"
 	"goshawkdb.io/server/router"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
@@ -398,14 +399,14 @@ func (tcs *TLSCapnpServer) createReader() {
 type TLSCapnpClient struct {
 	*TLSCapnpHandshaker
 	*network.Connection
-	remoteHost string
-	logger     log.Logger
-	peerCerts  []*x509.Certificate
-	roots      map[string]common.Capability
-	rootsVar   map[common.VarUUId]common.Capability
-	namespace  []byte
-	submitter  *client.ClientTxnSubmitter
-	reader     *common.SocketReader
+	remoteHost     string
+	logger         log.Logger
+	peerCerts      []*x509.Certificate
+	roots          map[string]common.Capability
+	rootsPosCapVer map[common.VarUUId]*types.PosCapVer
+	namespace      []byte
+	submitter      *client.RemoteTransactionSubmitter
+	reader         *common.SocketReader
 }
 
 func (tcc *TLSCapnpClient) finishHandshake() error {
@@ -457,20 +458,24 @@ func (tcc *TLSCapnpClient) makeHelloClient() *capn.Segment {
 	hello.SetNamespace(namespace)
 	rootsCap := cmsgs.NewRootList(seg, len(tcc.roots))
 	idy := 0
-	rootsVar := make(map[common.VarUUId]common.Capability, len(tcc.roots))
+	rootsPosCapVer := make(map[common.VarUUId]*types.PosCapVer, len(tcc.roots))
 	for idx, name := range tcc.topology.Roots {
 		if capability, found := tcc.roots[name]; found {
 			rootCap := rootsCap.At(idy)
 			idy++
-			vUUId := tcc.topology.RootVarUUIds[idx].VarUUId
+			root := tcc.topology.RootVarUUIds[idx]
 			rootCap.SetName(name)
-			rootCap.SetVarId(vUUId[:])
+			rootCap.SetVarId(root.VarUUId[:])
 			rootCap.SetCapability(capability.AsMsg())
-			rootsVar[*vUUId] = capability
+			rootsPosCapVer[*root.VarUUId] = &types.PosCapVer{
+				Positions:  root.Positions,
+				Capability: capability,
+				Version:    common.VersionZero,
+			}
 		}
 	}
 	hello.SetRoots(rootsCap)
-	tcc.rootsVar = rootsVar
+	tcc.rootsPosCapVer = rootsPosCapVer
 	return seg
 }
 
@@ -490,8 +495,7 @@ func (tcc *TLSCapnpClient) Run(conn *network.Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewClientTxnSubmitter(tcc.self, tcc.bootCount, tcc.rootsVar, tcc.namespace,
-			cm, tcc.Connection, tcc.logger, metrics)
+		tcc.submitter = client.NewRemoteTransactionSubmitter(tcc.self, tcc.bootCount, cm, tcc.Connection, tcc.Rng, tcc.logger, tcc.rootsPosCapVer, metrics)
 		if err := tcc.submitter.TopologyChanged(tcc.topology); err != nil {
 			return err
 		}
@@ -541,16 +545,12 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 		tcc.reader.Stop()
 		tcc.reader = nil
 	}
-	cont := func() {
-		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
-		tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
-		tcc.ShutdownCompleted()
+	if tcc.submitter != nil {
+		tcc.submitter.Shutdown()
 	}
-	if tcc.submitter == nil {
-		cont()
-	} else {
-		tcc.submitter.Shutdown(cont)
-	}
+	tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+	tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
+	tcc.ShutdownCompleted()
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }
 
@@ -566,7 +566,7 @@ func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *tx
 
 type serverConnectionsChanged struct {
 	actor.MsgSyncQuery
-	submitter *client.ClientTxnSubmitter
+	submitter *client.RemoteTransactionSubmitter
 	servers   map[common.RMId]*sconn.ServerConnection
 }
 
@@ -616,7 +616,8 @@ func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
 	case cmsgs.CLIENTMESSAGE_CLIENTTXNSUBMISSION:
 		// submitter is accessed from the connection go routine, so we must relay this
 		tcc.EnqueueFuncAsync(func() (bool, error) {
-			return false, tcc.submitTransaction(msg.ClientTxnSubmission())
+			tcc.submitTransaction(msg.ClientTxnSubmission())
+			return false, nil
 		})
 		return nil
 	default:
@@ -624,9 +625,9 @@ func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
 	}
 }
 
-func (tcc *TLSCapnpClient) submitTransaction(ctxn cmsgs.ClientTxn) error {
+func (tcc *TLSCapnpClient) submitTransaction(ctxn cmsgs.ClientTxn) {
 	origTxnId := common.MakeTxnId(ctxn.Id())
-	return tcc.submitter.SubmitClientTransaction(&ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) error {
+	tcc.submitter.SubmitRemoteClientTransaction(origTxnId, &ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) error {
 		switch {
 		case err != nil: // error is non-fatal to connection
 			return tcc.SendMessage(tcc.clientTxnError(&ctxn, err, origTxnId))

@@ -17,6 +17,7 @@ import (
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/network"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
@@ -40,11 +41,11 @@ type wssMsgPackClient struct {
 	socket            *websocket.Conn
 	peerCerts         []*x509.Certificate
 	roots             map[string]common.Capability
-	rootsVar          map[common.VarUUId]common.Capability
+	rootsPosCapVer    map[common.VarUUId]*types.PosCapVer
 	namespace         []byte
 	connectionManager connectionmanager.ConnectionManager
 	topology          *configuration.Topology
-	submitter         *client.ClientTxnSubmitter
+	submitter         *client.RemoteTransactionSubmitter
 	reader            *common.SocketReader
 	beater            *wssBeater
 }
@@ -126,26 +127,30 @@ func (wmpc *wssMsgPackClient) makeHelloClient() *cmsgs.HelloClientFromServer {
 	binary.BigEndian.PutUint32(namespace[8:], uint32(wmpc.self))
 	wmpc.namespace = namespace
 
-	roots := make([]*cmsgs.Root, 0, len(wmpc.roots))
-	rootsVar := make(map[common.VarUUId]common.Capability, len(wmpc.roots))
+	cRoots := make([]*cmsgs.Root, 0, len(wmpc.roots))
+	rootsPosCapVer := make(map[common.VarUUId]*types.PosCapVer, len(wmpc.roots))
 	for idx, name := range wmpc.topology.Roots {
 		if capability, found := wmpc.roots[name]; found {
-			vUUId := wmpc.topology.RootVarUUIds[idx].VarUUId
-			root := &cmsgs.Root{
+			root := wmpc.topology.RootVarUUIds[idx]
+			cRoot := &cmsgs.Root{
 				Name:       name,
-				VarId:      vUUId[:],
+				VarId:      root.VarUUId[:],
 				Capability: &cmsgs.Capability{},
 			}
-			root.Capability.FromCapnp(capability.AsMsg())
-			roots = append(roots, root)
-			rootsVar[*vUUId] = capability
+			cRoot.Capability.FromCapnp(capability.AsMsg())
+			cRoots = append(cRoots, cRoot)
+			rootsPosCapVer[*root.VarUUId] = &types.PosCapVer{
+				Positions:  root.Positions,
+				Capability: capability,
+				Version:    common.VersionZero,
+			}
 		}
 	}
 
-	wmpc.rootsVar = rootsVar
+	wmpc.rootsPosCapVer = rootsPosCapVer
 	return &cmsgs.HelloClientFromServer{
 		Namespace: namespace,
-		Roots:     roots,
+		Roots:     cRoots,
 	}
 }
 
@@ -165,8 +170,7 @@ func (wmpc *wssMsgPackClient) Run(conn *network.Connection) error {
 		wmpc.createBeater()
 		wmpc.createReader()
 
-		wmpc.submitter = client.NewClientTxnSubmitter(wmpc.self, wmpc.bootCount, wmpc.rootsVar, wmpc.namespace,
-			wmpc.connectionManager, wmpc.Connection, wmpc.logger, metrics)
+		wmpc.submitter = client.NewRemoteTransactionSubmitter(wmpc.self, wmpc.bootCount, wmpc.connectionManager, wmpc.Connection, wmpc.Rng, wmpc.logger, wmpc.rootsPosCapVer, metrics)
 		if err := wmpc.submitter.TopologyChanged(wmpc.topology); err != nil {
 			return err
 		}
@@ -212,16 +216,12 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 		wmpc.reader.Stop()
 		wmpc.reader = nil
 	}
-	cont := func() {
-		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
-		wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
-		wmpc.ShutdownCompleted()
+	if wmpc.submitter != nil {
+		wmpc.submitter.Shutdown()
 	}
-	if wmpc.submitter == nil {
-		cont()
-	} else {
-		wmpc.submitter.Shutdown(cont)
-	}
+	wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
+	wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
+	wmpc.ShutdownCompleted()
 	if wmpc.beater != nil {
 		wmpc.beater.Stop()
 		wmpc.beater = nil
@@ -240,7 +240,7 @@ func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn 
 
 type serverConnectionsChanged struct {
 	actor.MsgSyncQuery
-	submitter *client.ClientTxnSubmitter
+	submitter *client.RemoteTransactionSubmitter
 	servers   map[common.RMId]*sconn.ServerConnection
 }
 
@@ -297,7 +297,7 @@ func (wmpc *wssMsgPackClient) submitTransaction(ctxn *cmsgs.ClientTxn) error {
 	if err != nil { // error is non-fatal to connection
 		return wmpc.beater.SendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
 	}
-	return wmpc.submitter.SubmitClientTransaction(ctxnCapn, func(clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
+	return wmpc.submitter.SubmitRemoteClientTransaction(origTxnId, ctxnCapn, func(clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
 		switch {
 		case err != nil:
 			return wmpc.beater.SendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))

@@ -35,7 +35,7 @@ type Connection struct {
 	connectionManager connectionmanager.ConnectionManager
 	shuttingDown      bool
 	handshaker        Handshaker
-	rng               *rand.Rand
+	Rng               *rand.Rand
 	currentState      connectionStateMachineComponent
 	connectionDelay
 	connectionDial
@@ -55,7 +55,7 @@ func NewConnection(yesman Handshaker, cm connectionmanager.ConnectionManager, lo
 	c := &Connection{
 		connectionManager: cm,
 		handshaker:        yesman,
-		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
+		Rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	ci := &c.inner
@@ -253,7 +253,7 @@ func (cd *connectionDelay) init(conn *Connection) {
 func (cd *connectionDelay) start() (bool, error) {
 	cd.protocol = nil
 	if cd.delay == nil {
-		delay := server.ConnectionRestartDelayMin + time.Duration(cd.rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
+		delay := server.ConnectionRestartDelayMin + time.Duration(cd.Rng.Intn(server.ConnectionRestartDelayRangeMS))*time.Millisecond
 		cd.delay = time.AfterFunc(delay, func() { cd.EnqueueMsg(cd) })
 	}
 	return false, nil

@@ -179,7 +179,7 @@ func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBy
 	varCaps := make([]*msgs.Var, 0, actions.Len()>>1)
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
-		if action.Which() == msgs.ACTION_READ {
+		if action.ActionType() == msgs.ACTIONTYPE_READONLY {
 			// no point looking up the var itself as there's no way it'll
 			// point back to us.
 			continue

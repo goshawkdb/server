@@ -240,39 +240,10 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 			action.vUUId = common.MakeVarUUId(actionCap.VarId())
 		}
 
-		switch actionCap.Which() {
-		case msgs.ACTION_READ:
+		switch actionCap.ActionType() {
+		case msgs.ACTIONTYPE_CREATE:
 			if idx == actionIndex {
-				readCap := actionCap.Read()
-				readVsn := common.MakeTxnId(readCap.Version())
-				action.readVsn = readVsn
-			}
-
-		case msgs.ACTION_WRITE:
-			if idx == actionIndex {
-				action.writeTxnActions = actions
-				action.writeAction = &actionCap
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		case msgs.ACTION_READWRITE:
-			if idx == actionIndex {
-				readWriteCap := actionCap.Readwrite()
-				readVsn := common.MakeTxnId(readWriteCap.Version())
-				action.readVsn = readVsn
-				action.writeTxnActions = actions
-				action.writeAction = &actionCap
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		case msgs.ACTION_CREATE:
-			if idx == actionIndex {
-				createCap := actionCap.Create()
-				positions := common.Positions(createCap.Positions())
+				positions := common.Positions(actionCap.Positions())
 				action.writeTxnActions = actions
 				action.writeAction = &actionCap
 				action.createPositions = &positions
@@ -281,11 +252,33 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
 			}
 
-		case msgs.ACTION_ROLL:
+		case msgs.ACTIONTYPE_READONLY:
 			if idx == actionIndex {
-				rollCap := actionCap.Roll()
-				readVsn := common.MakeTxnId(rollCap.Version())
-				action.readVsn = readVsn
+				action.readVsn = common.MakeTxnId(actionCap.Version())
+			}
+
+		case msgs.ACTIONTYPE_WRITEONLY:
+			if idx == actionIndex {
+				action.writeTxnActions = actions
+				action.writeAction = &actionCap
+				txn.writes = append(txn.writes, action.vUUId)
+			} else {
+				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
+			}
+
+		case msgs.ACTIONTYPE_READWRITE:
+			if idx == actionIndex {
+				action.readVsn = common.MakeTxnId(actionCap.Version())
+				action.writeTxnActions = actions
+				action.writeAction = &actionCap
+				txn.writes = append(txn.writes, action.vUUId)
+			} else {
+				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
+			}
+
+		case msgs.ACTIONTYPE_ROLL:
+			if idx == actionIndex {
+				action.readVsn = common.MakeTxnId(actionCap.Version())
 				action.writeTxnActions = actions
 				action.writeAction = &actionCap
 				action.roll = true

@@ -283,30 +283,32 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 
 	switch {
 	case write == nil && read == nil: // discovery
-		action.SetRead()
-		action.Read().SetVersion(common.VersionZero[:])
+		action.SetVersion(common.VersionZero[:])
+		action.SetUnmodified()
+		action.SetActionType(msgs.ACTIONTYPE_READONLY)
 
 	case read == nil: // creation
-		action.SetCreate()
-		create := action.Create()
-		create.SetValue(write.Serialize())
-		create.SetReferences(msgs.NewVarIdPosList(seg, 0))
 		// When we create, we're creating with the blank topology. Blank
 		// topology has MaxRMCount = 0. But we never actually use
 		// positions of the topology var anyway. So the following code
 		// basically never does anything, and is just here for
 		// completeness, but it's still all safe.
 		positions := seg.NewUInt8List(int(write.MaxRMCount))
-		create.SetPositions(positions)
 		for idx, l := 0, positions.Len(); idx < l; idx++ {
 			positions.Set(idx, uint8(idx))
 		}
+		action.SetPositions(positions)
+		action.SetModified()
+		mod := action.Modified()
+		mod.SetValue(write.Serialize())
+		mod.SetReferences(msgs.NewVarIdPosList(seg, 0))
+		action.SetActionType(msgs.ACTIONTYPE_CREATE)
 
 	default: // modification
-		action.SetReadwrite()
-		rw := action.Readwrite()
-		rw.SetVersion(read.DBVersion[:])
-		rw.SetValue(write.Serialize())
+		action.SetVersion(read.DBVersion[:])
+		action.SetModified()
+		mod := action.Modified()
+		mod.SetValue(write.Serialize())
 		roots := write.RootVarUUIds
 		refs := msgs.NewVarIdPosList(seg, len(roots))
 		for idx, root := range roots {
@@ -315,7 +317,8 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 			varIdPos.SetPositions((capn.UInt8List)(*root.Positions))
 			varIdPos.SetCapability(common.ReadWriteCapability.AsMsg())
 		}
-		rw.SetReferences(refs)
+		mod.SetReferences(refs)
+		action.SetActionType(msgs.ACTIONTYPE_READWRITE)
 	}
 	txn.SetActions(common.SegToBytes(actionsSeg))
 
@@ -387,12 +390,12 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 		if !bytes.Equal(updateAction.VarId(), configuration.TopologyVarUUId[:]) {
 			return nil, fmt.Errorf("Internal error: unable to find action for topology from read of topology version 0")
 		}
-		if updateAction.Which() != msgs.ACTION_WRITE {
+		if updateAction.ActionType() != msgs.ACTIONTYPE_WRITEONLY {
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave non-write action")
 		}
-		write := updateAction.Write()
-		refs := write.References()
-		return configuration.TopologyFromCap(dbversion, &refs, write.Value())
+		mod := updateAction.Modified()
+		refs := mod.References()
+		return configuration.TopologyFromCap(dbversion, &refs, mod.Value())
 	}
 }
 
@@ -454,13 +457,13 @@ func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive
 			fmt.Errorf("Internal error: update action from readwrite of topology is not for topology! %v",
 				common.MakeVarUUId(updateAction.VarId()))
 	}
-	if updateAction.Which() != msgs.ACTION_WRITE {
+	if updateAction.ActionType() != msgs.ACTIONTYPE_WRITEONLY {
 		return false, false,
 			fmt.Errorf("Internal error: update action from readwrite of topology gave non-write action!")
 	}
-	writeAction := updateAction.Write()
-	refs := writeAction.References()
-	_, err = configuration.TopologyFromCap(dbversion, &refs, writeAction.Value())
+	mod := updateAction.Modified()
+	refs := mod.References()
+	_, err = configuration.TopologyFromCap(dbversion, &refs, mod.Value())
 	return false, false, err
 }
 
@@ -476,10 +479,11 @@ func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, confi
 		action := actions.At(idx)
 		vUUId := tt.localConnection.NextVarUUId()
 		action.SetVarId(vUUId[:])
-		action.SetCreate()
-		create := action.Create()
-		create.SetValue([]byte{})
-		create.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
+		action.SetModified()
+		mod := action.Modified()
+		mod.SetValue([]byte{})
+		mod.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
+		action.SetActionType(cmsgs.CLIENTACTIONTYPE_CREATE)
 		root := &roots[idx]
 		root.VarUUId = vUUId
 	}
@@ -501,10 +505,10 @@ func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, confi
 			if vUUId.Compare(root.VarUUId) != common.EQ {
 				return false, nil, fmt.Errorf("Internal error: actions changed order! At %v expecting %v, found %v", idx, root.VarUUId, vUUId)
 			}
-			if action.Which() != msgs.ACTION_CREATE {
-				return false, nil, fmt.Errorf("Internal error: actions changed type! At %v expecting create, found %v", idx, action.Which())
+			if action.ActionType() != msgs.ACTIONTYPE_CREATE {
+				return false, nil, fmt.Errorf("Internal error: actions changed type! At %v expecting create, found %v", idx, action.ActionType())
 			}
-			positions := action.Create().Positions()
+			positions := action.Positions()
 			root.Positions = (*common.Positions)(&positions)
 		}
 		utils.DebugLog(tt.inner.Logger, "debug", "Roots created.", "roots", roots)
