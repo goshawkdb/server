@@ -23,31 +23,25 @@ struct ActionListWrapper {
 
 struct Action {
   varId      @0: Data;
+  version    @1: Data;
+  positions  @2: List(UInt8);
   union {
-    read :group {
-      version    @1: Data;
-    }
-    write :group {
-      value      @2: Data;
-      references @3: List(Var.VarIdPos);
-    }
-    readwrite :group {
-      version    @4: Data;
-      value      @5: Data;
-      references @6: List(Var.VarIdPos);
-    }
-    create :group {
-      positions  @7: List(UInt8);
-      value      @8: Data;
-      references @9: List(Var.VarIdPos);
-    }
-    missing      @10: Void;
-    roll :group {
-      version    @11: Data;
-      value      @12: Data;
-      references @13: List(Var.VarIdPos);
+    unmodified   @3: Void;
+    modified :group {
+      value      @4: Data;
+      references @5: List(Var.VarIdPos);
     }
   }
+  actionType @6: ActionType;
+}
+
+enum ActionType {
+  create    @0;
+  readOnly  @1;
+  writeOnly @2;
+  readWrite @3;
+  missing   @4;
+  roll      @5;
 }
 
 struct Allocation {

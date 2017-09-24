@@ -511,64 +511,34 @@ func (s ActionListWrapper_List) Set(i int, item ActionListWrapper) {
 }
 
 type Action C.Struct
-type ActionRead Action
-type ActionWrite Action
-type ActionReadwrite Action
-type ActionCreate Action
-type ActionRoll Action
+type ActionModified Action
 type Action_Which uint16
 
 const (
-	ACTION_READ      Action_Which = 0
-	ACTION_WRITE     Action_Which = 1
-	ACTION_READWRITE Action_Which = 2
-	ACTION_CREATE    Action_Which = 3
-	ACTION_MISSING   Action_Which = 4
-	ACTION_ROLL      Action_Which = 5
+	ACTION_UNMODIFIED Action_Which = 0
+	ACTION_MODIFIED   Action_Which = 1
 )
 
-func NewAction(s *C.Segment) Action                     { return Action(s.NewStruct(8, 4)) }
-func NewRootAction(s *C.Segment) Action                 { return Action(s.NewRootStruct(8, 4)) }
-func AutoNewAction(s *C.Segment) Action                 { return Action(s.NewStructAR(8, 4)) }
-func ReadRootAction(s *C.Segment) Action                { return Action(s.Root(0).ToStruct()) }
-func (s Action) Which() Action_Which                    { return Action_Which(C.Struct(s).Get16(0)) }
-func (s Action) VarId() []byte                          { return C.Struct(s).GetObject(0).ToData() }
-func (s Action) SetVarId(v []byte)                      { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Action) Read() ActionRead                       { return ActionRead(s) }
-func (s Action) SetRead()                               { C.Struct(s).Set16(0, 0) }
-func (s ActionRead) Version() []byte                    { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionRead) SetVersion(v []byte)                { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s Action) Write() ActionWrite                     { return ActionWrite(s) }
-func (s Action) SetWrite()                              { C.Struct(s).Set16(0, 1) }
-func (s ActionWrite) Value() []byte                     { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionWrite) SetValue(v []byte)                 { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s ActionWrite) References() VarIdPos_List         { return VarIdPos_List(C.Struct(s).GetObject(2)) }
-func (s ActionWrite) SetReferences(v VarIdPos_List)     { C.Struct(s).SetObject(2, C.Object(v)) }
-func (s Action) Readwrite() ActionReadwrite             { return ActionReadwrite(s) }
-func (s Action) SetReadwrite()                          { C.Struct(s).Set16(0, 2) }
-func (s ActionReadwrite) Version() []byte               { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionReadwrite) SetVersion(v []byte)           { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s ActionReadwrite) Value() []byte                 { return C.Struct(s).GetObject(2).ToData() }
-func (s ActionReadwrite) SetValue(v []byte)             { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s ActionReadwrite) References() VarIdPos_List     { return VarIdPos_List(C.Struct(s).GetObject(3)) }
-func (s ActionReadwrite) SetReferences(v VarIdPos_List) { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Action) Create() ActionCreate                   { return ActionCreate(s) }
-func (s Action) SetCreate()                             { C.Struct(s).Set16(0, 3) }
-func (s ActionCreate) Positions() C.UInt8List           { return C.UInt8List(C.Struct(s).GetObject(1)) }
-func (s ActionCreate) SetPositions(v C.UInt8List)       { C.Struct(s).SetObject(1, C.Object(v)) }
-func (s ActionCreate) Value() []byte                    { return C.Struct(s).GetObject(2).ToData() }
-func (s ActionCreate) SetValue(v []byte)                { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s ActionCreate) References() VarIdPos_List        { return VarIdPos_List(C.Struct(s).GetObject(3)) }
-func (s ActionCreate) SetReferences(v VarIdPos_List)    { C.Struct(s).SetObject(3, C.Object(v)) }
-func (s Action) SetMissing()                            { C.Struct(s).Set16(0, 4) }
-func (s Action) Roll() ActionRoll                       { return ActionRoll(s) }
-func (s Action) SetRoll()                               { C.Struct(s).Set16(0, 5) }
-func (s ActionRoll) Version() []byte                    { return C.Struct(s).GetObject(1).ToData() }
-func (s ActionRoll) SetVersion(v []byte)                { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s ActionRoll) Value() []byte                      { return C.Struct(s).GetObject(2).ToData() }
-func (s ActionRoll) SetValue(v []byte)                  { C.Struct(s).SetObject(2, s.Segment.NewData(v)) }
-func (s ActionRoll) References() VarIdPos_List          { return VarIdPos_List(C.Struct(s).GetObject(3)) }
-func (s ActionRoll) SetReferences(v VarIdPos_List)      { C.Struct(s).SetObject(3, C.Object(v)) }
+func NewAction(s *C.Segment) Action                    { return Action(s.NewStruct(8, 5)) }
+func NewRootAction(s *C.Segment) Action                { return Action(s.NewRootStruct(8, 5)) }
+func AutoNewAction(s *C.Segment) Action                { return Action(s.NewStructAR(8, 5)) }
+func ReadRootAction(s *C.Segment) Action               { return Action(s.Root(0).ToStruct()) }
+func (s Action) Which() Action_Which                   { return Action_Which(C.Struct(s).Get16(0)) }
+func (s Action) VarId() []byte                         { return C.Struct(s).GetObject(0).ToData() }
+func (s Action) SetVarId(v []byte)                     { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Action) Version() []byte                       { return C.Struct(s).GetObject(1).ToData() }
+func (s Action) SetVersion(v []byte)                   { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s Action) Positions() C.UInt8List                { return C.UInt8List(C.Struct(s).GetObject(2)) }
+func (s Action) SetPositions(v C.UInt8List)            { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s Action) SetUnmodified()                        { C.Struct(s).Set16(0, 0) }
+func (s Action) Modified() ActionModified              { return ActionModified(s) }
+func (s Action) SetModified()                          { C.Struct(s).Set16(0, 1) }
+func (s ActionModified) Value() []byte                 { return C.Struct(s).GetObject(3).ToData() }
+func (s ActionModified) SetValue(v []byte)             { C.Struct(s).SetObject(3, s.Segment.NewData(v)) }
+func (s ActionModified) References() VarIdPos_List     { return VarIdPos_List(C.Struct(s).GetObject(4)) }
+func (s ActionModified) SetReferences(v VarIdPos_List) { C.Struct(s).SetObject(4, C.Object(v)) }
+func (s Action) ActionType() ActionType                { return ActionType(C.Struct(s).Get16(2)) }
+func (s Action) SetActionType(v ActionType)            { C.Struct(s).Set16(2, uint16(v)) }
 func (s Action) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -593,55 +563,47 @@ func (s Action) WriteJSON(w io.Writer) error {
 			return err
 		}
 	}
-	if s.Which() == ACTION_READ {
-		_, err = b.WriteString("\"read\":")
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"version\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Version()
+		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
 		}
-		{
-			s := s.Read()
-			err = b.WriteByte('{')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"version\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Version()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte('}')
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.Which() == ACTION_WRITE {
-		_, err = b.WriteString("\"write\":")
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"positions\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Positions()
 		{
-			s := s.Write()
-			err = b.WriteByte('{')
+			err = b.WriteByte('[')
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("\"value\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Value()
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
 				buf, err = json.Marshal(s)
 				if err != nil {
 					return err
@@ -651,233 +613,14 @@ func (s Action) WriteJSON(w io.Writer) error {
 					return err
 				}
 			}
-			err = b.WriteByte(',')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"references\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.References()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteJSON(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte('}')
-			if err != nil {
-				return err
-			}
+			err = b.WriteByte(']')
 		}
-	}
-	if s.Which() == ACTION_READWRITE {
-		_, err = b.WriteString("\"readwrite\":")
 		if err != nil {
 			return err
 		}
-		{
-			s := s.Readwrite()
-			err = b.WriteByte('{')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"version\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Version()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(',')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"value\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Value()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(',')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"references\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.References()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteJSON(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte('}')
-			if err != nil {
-				return err
-			}
-		}
 	}
-	if s.Which() == ACTION_CREATE {
-		_, err = b.WriteString("\"create\":")
-		if err != nil {
-			return err
-		}
-		{
-			s := s.Create()
-			err = b.WriteByte('{')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"positions\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Positions()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						buf, err = json.Marshal(s)
-						if err != nil {
-							return err
-						}
-						_, err = b.Write(buf)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(',')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"value\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Value()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(',')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"references\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.References()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteJSON(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte('}')
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.Which() == ACTION_MISSING {
-		_, err = b.WriteString("\"missing\":")
+	if s.Which() == ACTION_UNMODIFIED {
+		_, err = b.WriteString("\"unmodified\":")
 		if err != nil {
 			return err
 		}
@@ -887,33 +630,14 @@ func (s Action) WriteJSON(w io.Writer) error {
 			return err
 		}
 	}
-	if s.Which() == ACTION_ROLL {
-		_, err = b.WriteString("\"roll\":")
+	if s.Which() == ACTION_MODIFIED {
+		_, err = b.WriteString("\"modified\":")
 		if err != nil {
 			return err
 		}
 		{
-			s := s.Roll()
+			s := s.Modified()
 			err = b.WriteByte('{')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("\"version\":")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Version()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(',')
 			if err != nil {
 				return err
 			}
@@ -969,6 +693,21 @@ func (s Action) WriteJSON(w io.Writer) error {
 			if err != nil {
 				return err
 			}
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"actionType\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ActionType()
+		err = s.WriteJSON(b)
+		if err != nil {
+			return err
 		}
 	}
 	err = b.WriteByte('}')
@@ -1007,55 +746,47 @@ func (s Action) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
-	if s.Which() == ACTION_READ {
-		_, err = b.WriteString("read = ")
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("version = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Version()
+		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
 		}
-		{
-			s := s.Read()
-			err = b.WriteByte('(')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("version = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Version()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(')')
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.Which() == ACTION_WRITE {
-		_, err = b.WriteString("write = ")
+		_, err = b.Write(buf)
 		if err != nil {
 			return err
 		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("positions = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Positions()
 		{
-			s := s.Write()
-			err = b.WriteByte('(')
+			err = b.WriteByte('[')
 			if err != nil {
 				return err
 			}
-			_, err = b.WriteString("value = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Value()
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
 				buf, err = json.Marshal(s)
 				if err != nil {
 					return err
@@ -1065,233 +796,14 @@ func (s Action) WriteCapLit(w io.Writer) error {
 					return err
 				}
 			}
-			_, err = b.WriteString(", ")
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("references = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.References()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteCapLit(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(')')
-			if err != nil {
-				return err
-			}
+			err = b.WriteByte(']')
 		}
-	}
-	if s.Which() == ACTION_READWRITE {
-		_, err = b.WriteString("readwrite = ")
 		if err != nil {
 			return err
 		}
-		{
-			s := s.Readwrite()
-			err = b.WriteByte('(')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("version = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Version()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			_, err = b.WriteString(", ")
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("value = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Value()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			_, err = b.WriteString(", ")
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("references = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.References()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteCapLit(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(')')
-			if err != nil {
-				return err
-			}
-		}
 	}
-	if s.Which() == ACTION_CREATE {
-		_, err = b.WriteString("create = ")
-		if err != nil {
-			return err
-		}
-		{
-			s := s.Create()
-			err = b.WriteByte('(')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("positions = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Positions()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						buf, err = json.Marshal(s)
-						if err != nil {
-							return err
-						}
-						_, err = b.Write(buf)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			_, err = b.WriteString(", ")
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("value = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Value()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			_, err = b.WriteString(", ")
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("references = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.References()
-				{
-					err = b.WriteByte('[')
-					if err != nil {
-						return err
-					}
-					for i, s := range s.ToArray() {
-						if i != 0 {
-							_, err = b.WriteString(", ")
-						}
-						if err != nil {
-							return err
-						}
-						err = s.WriteCapLit(b)
-						if err != nil {
-							return err
-						}
-					}
-					err = b.WriteByte(']')
-				}
-				if err != nil {
-					return err
-				}
-			}
-			err = b.WriteByte(')')
-			if err != nil {
-				return err
-			}
-		}
-	}
-	if s.Which() == ACTION_MISSING {
-		_, err = b.WriteString("missing = ")
+	if s.Which() == ACTION_UNMODIFIED {
+		_, err = b.WriteString("unmodified = ")
 		if err != nil {
 			return err
 		}
@@ -1301,33 +813,14 @@ func (s Action) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
-	if s.Which() == ACTION_ROLL {
-		_, err = b.WriteString("roll = ")
+	if s.Which() == ACTION_MODIFIED {
+		_, err = b.WriteString("modified = ")
 		if err != nil {
 			return err
 		}
 		{
-			s := s.Roll()
+			s := s.Modified()
 			err = b.WriteByte('(')
-			if err != nil {
-				return err
-			}
-			_, err = b.WriteString("version = ")
-			if err != nil {
-				return err
-			}
-			{
-				s := s.Version()
-				buf, err = json.Marshal(s)
-				if err != nil {
-					return err
-				}
-				_, err = b.Write(buf)
-				if err != nil {
-					return err
-				}
-			}
-			_, err = b.WriteString(", ")
 			if err != nil {
 				return err
 			}
@@ -1383,6 +876,21 @@ func (s Action) WriteCapLit(w io.Writer) error {
 			if err != nil {
 				return err
 			}
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("actionType = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ActionType()
+		err = s.WriteCapLit(b)
+		if err != nil {
+			return err
 		}
 	}
 	err = b.WriteByte(')')
@@ -1400,7 +908,7 @@ func (s Action) MarshalCapLit() ([]byte, error) {
 
 type Action_List C.PointerList
 
-func NewActionList(s *C.Segment, sz int) Action_List { return Action_List(s.NewCompositeList(8, 4, sz)) }
+func NewActionList(s *C.Segment, sz int) Action_List { return Action_List(s.NewCompositeList(8, 5, sz)) }
 func (s Action_List) Len() int                       { return C.PointerList(s).Len() }
 func (s Action_List) At(i int) Action                { return Action(C.PointerList(s).At(i).ToStruct()) }
 func (s Action_List) ToArray() []Action {
@@ -1412,6 +920,110 @@ func (s Action_List) ToArray() []Action {
 	return a
 }
 func (s Action_List) Set(i int, item Action) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type ActionType uint16
+
+const (
+	ACTIONTYPE_CREATE    ActionType = 0
+	ACTIONTYPE_READONLY  ActionType = 1
+	ACTIONTYPE_WRITEONLY ActionType = 2
+	ACTIONTYPE_READWRITE ActionType = 3
+	ACTIONTYPE_MISSING   ActionType = 4
+	ACTIONTYPE_ROLL      ActionType = 5
+)
+
+func (c ActionType) String() string {
+	switch c {
+	case ACTIONTYPE_CREATE:
+		return "create"
+	case ACTIONTYPE_READONLY:
+		return "readOnly"
+	case ACTIONTYPE_WRITEONLY:
+		return "writeOnly"
+	case ACTIONTYPE_READWRITE:
+		return "readWrite"
+	case ACTIONTYPE_MISSING:
+		return "missing"
+	case ACTIONTYPE_ROLL:
+		return "roll"
+	default:
+		return ""
+	}
+}
+
+func ActionTypeFromString(c string) ActionType {
+	switch c {
+	case "create":
+		return ACTIONTYPE_CREATE
+	case "readOnly":
+		return ACTIONTYPE_READONLY
+	case "writeOnly":
+		return ACTIONTYPE_WRITEONLY
+	case "readWrite":
+		return ACTIONTYPE_READWRITE
+	case "missing":
+		return ACTIONTYPE_MISSING
+	case "roll":
+		return ACTIONTYPE_ROLL
+	default:
+		return 0
+	}
+}
+
+type ActionType_List C.PointerList
+
+func NewActionTypeList(s *C.Segment, sz int) ActionType_List {
+	return ActionType_List(s.NewUInt16List(sz))
+}
+func (s ActionType_List) Len() int            { return C.UInt16List(s).Len() }
+func (s ActionType_List) At(i int) ActionType { return ActionType(C.UInt16List(s).At(i)) }
+func (s ActionType_List) ToArray() []ActionType {
+	n := s.Len()
+	a := make([]ActionType, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s ActionType_List) Set(i int, item ActionType) { C.UInt16List(s).Set(i, uint16(item)) }
+func (s ActionType) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	buf, err = json.Marshal(s.String())
+	if err != nil {
+		return err
+	}
+	_, err = b.Write(buf)
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s ActionType) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s ActionType) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	_, err = b.WriteString(s.String())
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s ActionType) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
 
 type Allocation C.Struct
 

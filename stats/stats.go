@@ -13,6 +13,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/localconnection"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/connectionmanager"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
@@ -161,16 +162,19 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 
 	action := actions.At(0)
 	action.SetVarId(msg.root.VarUUId[:])
-	action.SetReadwrite()
-	rw := action.Readwrite()
-	rw.SetVersion(msg.vsn[:])
-	rw.SetValue(msg.json)
-	rw.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
-
+	action.SetModified()
+	mod := action.Modified()
+	mod.SetValue(msg.json)
+	mod.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
+	action.SetActionType(cmsgs.CLIENTACTIONTYPE_READWRITE)
 	ctxn.SetActions(actions)
 
-	varPosMap := make(map[common.VarUUId]*common.Positions)
-	varPosMap[*msg.root.VarUUId] = msg.root.Positions
+	varPosMap := make(map[common.VarUUId]*types.PosCapVer)
+	varPosMap[*msg.root.VarUUId] = &types.PosCapVer{
+		Positions:  msg.root.Positions,
+		Capability: common.ReadWriteCapability,
+		Version:    msg.vsn,
+	}
 
 	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json), "readVersion", msg.vsn)
 
@@ -220,10 +224,9 @@ func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool,
 		for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
 			updateAction := updateActions.At(idy)
 			if found = bytes.Equal(msg.root.VarUUId[:], updateAction.VarId()); found {
-				if updateAction.Which() == msgs.ACTION_WRITE {
+				if updateAction.ActionType() == msgs.ACTIONTYPE_WRITEONLY {
 					msg.vsn = common.MakeTxnId(update.TxnId())
-					updateWrite := updateAction.Write()
-					value = updateWrite.Value()
+					value = updateAction.Modified().Value()
 				} else {
 					// must be MISSING, which I'm really not sure should ever happen!
 					msg.vsn = common.VersionZero

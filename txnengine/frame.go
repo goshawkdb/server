@@ -11,6 +11,7 @@ import (
 	"goshawkdb.io/server"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/types"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/binarybackoff"
 	"goshawkdb.io/server/utils/status"
@@ -151,7 +152,7 @@ type frameOpen struct {
 	rollScheduled      *time.Time
 	rollActive         bool
 	rollTxn            *cmsgs.ClientTxn
-	rollTxnPos         map[common.VarUUId]*common.Positions
+	rollTxnPos         map[common.VarUUId]*types.PosCapVer
 }
 
 func (fo *frameOpen) init(f *frame) {
@@ -784,12 +785,12 @@ func (fo *frameOpen) scheduleRoll() {
 func (fo *frameOpen) startRoll(rollCB rollCallback) {
 	fo.rollActive = true
 	// must do roll txn creation in the main go-routine
-	ctxn, varPosMap := fo.createRollClientTxn()
+	ctxn, varPosVerMap := fo.createRollClientTxn()
 	utils.DebugLog(fo.v.vm.logger, "debug", "Starting roll.", "frame", fo.frame)
 	go func() {
 		// Yes, we really must mark these as topology txns so that they
 		// are allowed through during topology changes.
-		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, true, varPosMap, rollCB.rollTranslationCallback)
+		_, outcome, err := fo.v.vm.RunClientTransaction(ctxn, true, varPosVerMap, rollCB.rollTranslationCallback)
 		ow := ""
 		if outcome != nil {
 			ow = fmt.Sprint(outcome.Which())
@@ -823,42 +824,42 @@ type rollCallback struct {
 }
 
 // careful in here: we'll be running this inside localConnection's actor.
-func (rc rollCallback) rollTranslationCallback(cAction *cmsgs.ClientAction, action *msgs.Action, hashCodes []common.RMId, connections map[common.RMId]bool) error {
+func (rc rollCallback) rollTranslationCallback(cAction *cmsgs.ClientAction, action *msgs.Action, hashCodes []common.RMId, connections map[common.RMId]*sconn.ServerConnection) error {
 	// We cannot roll for anyone else. This could try to happen during
 	// immigration, which is very bad because we will probably have the
 	// wrong hashcodes so could cause divergence.
-	found := false
+	foundSelf := false
 	for _, rmId := range hashCodes {
-		if found = rmId == rc.v.vm.RMId; found {
+		if foundSelf = rmId == rc.v.vm.RMId; foundSelf {
 			break
-		}
-	}
-	if !found {
-		return AbortRollNotInPermutation
-	}
-	// If we're not first then first must not be active
-	if !rc.forceRoll && hashCodes[0] != rc.v.vm.RMId {
-		if connections[hashCodes[0]] {
+		} else if _, found := connections[rmId]; !rc.forceRoll && found {
+			// we're not forced, and there is someone else alive ahead of us who should be doing the roll.
 			return AbortRollNotFirst
 		}
+	}
+	if !foundSelf {
+		return AbortRollNotInPermutation
 	}
 	return nil
 }
 
-func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*common.Positions) {
+func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId]*types.PosCapVer) {
 	if fo.rollTxn != nil {
 		return fo.rollTxn, fo.rollTxnPos
 	}
-	var origWrite *msgs.Action
+	var origAction *msgs.Action
 	vUUIdBytes := fo.v.UUId[:]
 	txnActions := fo.frameTxnActions.Actions()
 	for idx, l := 0, txnActions.Len(); idx < l; idx++ {
 		action := txnActions.At(idx)
 		if bytes.Equal(action.VarId(), vUUIdBytes) {
-			origWrite = &action
+			origAction = &action
 			break
 		}
 	}
+
+	posMap := make(map[common.VarUUId]*types.PosCapVer)
+
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
 	ctxn.SetRetry(false)
@@ -866,44 +867,36 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	ctxn.SetActions(actions)
 	action := actions.At(0)
 	action.SetVarId(fo.v.UUId[:])
-	action.SetRoll()
-	roll := action.Roll()
-	roll.SetVersion(fo.frameTxnId[:])
-	var refs msgs.VarIdPos_List
-	switch origWrite.Which() {
-	case msgs.ACTION_WRITE:
-		ow := origWrite.Write()
-		roll.SetValue(ow.Value())
-		refs = ow.References()
-	case msgs.ACTION_READWRITE:
-		owr := origWrite.Readwrite()
-		roll.SetValue(owr.Value())
-		refs = owr.References()
-	case msgs.ACTION_CREATE:
-		oc := origWrite.Create()
-		roll.SetValue(oc.Value())
-		refs = oc.References()
-	case msgs.ACTION_ROLL:
-		owr := origWrite.Roll()
-		roll.SetValue(owr.Value())
-		refs = owr.References()
-	default:
-		panic(fmt.Sprintf("%v unexpected action type when building roll: %v", fo.frame, origWrite.Which()))
-	}
-	posMap := make(map[common.VarUUId]*common.Positions)
-	posMap[*fo.v.UUId] = fo.v.positions
-	refVarList := cmsgs.NewClientVarIdPosList(seg, refs.Len())
-	roll.SetReferences(refVarList)
-	for idx, l := 0, refs.Len(); idx < l; idx++ {
-		ref := refs.At(idx)
-		vUUId := common.MakeVarUUId(ref.Id())
-		pos := common.Positions(ref.Positions())
-		posMap[*vUUId] = &pos
+	action.SetActionType(cmsgs.CLIENTACTIONTYPE_ROLL)
+	action.SetModified()
+	modified := action.Modified()
+	origModified := origAction.Modified()
+	modified.SetValue(origModified.Value())
+	origRefs := origModified.References()
+
+	refVarList := cmsgs.NewClientVarIdPosList(seg, origRefs.Len())
+	modified.SetReferences(refVarList)
+	for idx, l := 0, origRefs.Len(); idx < l; idx++ {
+		origRef := origRefs.At(idx)
+		vUUId := common.MakeVarUUId(origRef.Id())
+		// these are needed because the translation verifies the refs are valid
+		pos := common.Positions(origRef.Positions())
+		posMap[*vUUId] = &types.PosCapVer{
+			Positions:  &pos,
+			Capability: common.NewCapability(origRef.Capability()),
+		}
 		varIdPos := refVarList.At(idx)
 		varIdPos.SetVarId(vUUId[:])
-		varIdPos.SetCapability(ref.Capability())
+		varIdPos.SetCapability(origRef.Capability())
 	}
 	fo.rollTxn = &ctxn
+	// we do this one last in case our own refs point at ourself and so
+	// we need to overwrite it to include the correct version
+	posMap[*fo.v.UUId] = &types.PosCapVer{
+		Positions:  fo.v.positions,
+		Capability: common.ReadWriteCapability,
+		Version:    fo.frameTxnId,
+	}
 	fo.rollTxnPos = posMap
 	return &ctxn, posMap
 }

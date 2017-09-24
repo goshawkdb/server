@@ -364,11 +364,11 @@ func (br badReads) combine(rmBal *rmBallot) {
 
 		if bra, found := br[*vUUId]; found {
 			bra.combine(&action, rmBal, txnId, clockElem)
-		} else if action.Which() == msgs.ACTION_READ {
+		} else if action.ActionType() == msgs.ACTIONTYPE_READONLY {
 			br[*vUUId] = &badReadAction{
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
-				txnId:     common.MakeTxnId(action.Read().Version()),
+				txnId:     common.MakeTxnId(action.Version()),
 				clockElem: clockElem - 1,
 				action:    &action,
 			}
@@ -403,29 +403,27 @@ func (bra *badReadAction) set(action *msgs.Action, rmBal *rmBallot, txnId *commo
 }
 
 func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
-	newActionType := action.Which()
-	braActionType := bra.action.Which()
+	newActionType := action.ActionType()
+	braActionType := bra.action.ActionType()
 
 	switch {
-	case braActionType != msgs.ACTION_READ && newActionType != msgs.ACTION_READ:
+	case braActionType != msgs.ACTIONTYPE_READONLY && newActionType != msgs.ACTIONTYPE_READONLY:
 		// They're both writes in some way. Just order the txns
 		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
 			bra.set(action, rmBal, txnId, clockElem)
 		}
 
-	case braActionType == msgs.ACTION_READ && newActionType == msgs.ACTION_READ:
-		braRead := bra.action.Read()
-		newRead := action.Read()
+	case braActionType == msgs.ACTIONTYPE_READONLY && newActionType == msgs.ACTIONTYPE_READONLY:
 		clockElem--
 		// If they read the same version, we really don't care.
-		if !bytes.Equal(braRead.Version(), newRead.Version()) {
+		if !bytes.Equal(bra.action.Version(), action.Version()) {
 			// They read different versions, but which version was the latter?
 			if clockElem > bra.clockElem {
-				bra.set(action, rmBal, common.MakeTxnId(newRead.Version()), clockElem)
+				bra.set(action, rmBal, common.MakeTxnId(action.Version()), clockElem)
 			}
 		}
 
-	case braActionType == msgs.ACTION_READ:
+	case braActionType == msgs.ACTIONTYPE_READONLY:
 		if bytes.Equal(bra.txnId[:], txnId[:]) {
 			// The write will obviously be in the past of the
 			// existing read, but it's better to have the write
@@ -438,13 +436,12 @@ func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *c
 		}
 
 	default: // Existing is not a read, but new is a read.
-		newRead := action.Read()
 		clockElem--
 		// If the read is a read of the existing write, better to keep the write
-		if !bytes.Equal(bra.txnId[:], newRead.Version()) {
+		if !bytes.Equal(bra.txnId[:], action.Version()) {
 			if clockElem > bra.clockElem {
 				// The read must be of some value which was written after our existing write.
-				bra.set(action, rmBal, common.MakeTxnId(newRead.Version()), clockElem)
+				bra.set(action, rmBal, common.MakeTxnId(action.Version()), clockElem)
 			}
 		}
 	}
@@ -474,37 +471,41 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 		clock := vectorclock.NewVectorClock().AsMutable()
 		for idy, bra := range *badReadActions {
 			action := bra.action
-			switch action.Which() {
-			case msgs.ACTION_READ:
+			switch action.ActionType() {
+			case msgs.ACTIONTYPE_READONLY:
 				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
-				newAction.SetMissing()
-			case msgs.ACTION_WRITE:
+				newAction.SetUnmodified()
+				newAction.SetActionType(msgs.ACTIONTYPE_MISSING)
+			case msgs.ACTIONTYPE_WRITEONLY:
 				actionsList.Set(idy, *action)
-			case msgs.ACTION_READWRITE:
-				readWrite := action.Readwrite()
+			case msgs.ACTIONTYPE_READWRITE:
 				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
-				newAction.SetWrite()
-				newWrite := newAction.Write()
-				newWrite.SetValue(readWrite.Value())
-				newWrite.SetReferences(readWrite.References())
-			case msgs.ACTION_CREATE:
-				create := action.Create()
+				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
+				newAction.SetModified()
+				newMod := newAction.Modified()
+				mod := action.Modified()
+				newMod.SetValue(mod.Value())
+				newMod.SetReferences(mod.References())
+			case msgs.ACTIONTYPE_CREATE:
 				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
-				newAction.SetWrite()
-				newWrite := newAction.Write()
-				newWrite.SetValue(create.Value())
-				newWrite.SetReferences(create.References())
-			case msgs.ACTION_ROLL:
-				roll := action.Roll()
+				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
+				newAction.SetModified()
+				newMod := newAction.Modified()
+				mod := action.Modified()
+				newMod.SetValue(mod.Value())
+				newMod.SetReferences(mod.References())
+			case msgs.ACTIONTYPE_ROLL:
 				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
-				newAction.SetWrite()
-				newWrite := newAction.Write()
-				newWrite.SetValue(roll.Value())
-				newWrite.SetReferences(roll.References())
+				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
+				newAction.SetModified()
+				newMod := newAction.Modified()
+				mod := action.Modified()
+				newMod.SetValue(mod.Value())
+				newMod.SetReferences(mod.References())
 			default:
 				panic(fmt.Sprintf("Unexpected action type (%v) for badread of %v at %v",
 					action.Which(), action.VarId(), txnId))
