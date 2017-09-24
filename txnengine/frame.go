@@ -201,7 +201,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 		}
 		action.frame = fo.frame
 		fo.calculateReadVoteClock()
-		if !action.VoteCommit(fo.readVoteClock) {
+		if !action.VoteCommit(fo.readVoteClock, nil) {
 			fo.ReadAborted(action)
 		}
 	default:
@@ -259,7 +259,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 		if fo.uncommittedReads == 0 {
 			fo.writes.Insert(action, uncommitted)
 			fo.calculateWriteVoteClock()
-			if !action.VoteCommit(fo.writeVoteClock) {
+			if !action.VoteCommit(fo.writeVoteClock, fo.v.subscriberIds) {
 				fo.WriteAborted(action, true)
 			}
 		} else {
@@ -329,7 +329,7 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 		if fo.uncommittedReads == 0 {
 			fo.writes.Insert(action, uncommitted)
 			fo.calculateWriteVoteClock()
-			if !action.VoteCommit(fo.writeVoteClock) {
+			if !action.VoteCommit(fo.writeVoteClock, fo.v.subscriberIds) {
 				fo.ReadWriteAborted(action, true)
 			}
 		} else {
@@ -522,7 +522,7 @@ func (fo *frameOpen) maybeStartWrites() {
 			next := node.Next()
 			if node.Value == postponed {
 				node.Value = uncommitted
-				if action := node.Key.(*localAction); !action.VoteCommit(fo.writeVoteClock) {
+				if action := node.Key.(*localAction); !action.VoteCommit(fo.writeVoteClock, fo.v.subscriberIds) {
 					if action.IsRead() {
 						fo.ReadWriteAborted(action, false)
 					} else {

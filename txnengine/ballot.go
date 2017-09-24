@@ -40,20 +40,16 @@ func (v Vote) ToVoteEnum() msgs.VoteEnum {
 }
 
 type Ballot struct {
-	VarUUId *common.VarUUId
-	Data    []byte
-	VoteCap *msgs.Vote
-	Clock   *vc.VectorClockImmutable
-	Vote    Vote
+	VarUUId     *common.VarUUId
+	Data        []byte
+	VoteCap     *msgs.Vote
+	Clock       *vc.VectorClockImmutable
+	Subscribers []common.ClientId
+	Vote        Vote
 }
 
 func (b *Ballot) String() string {
 	return fmt.Sprintf("%v %v", b.VarUUId, b.Vote)
-}
-
-type BallotBuilder struct {
-	*Ballot
-	Clock *vc.VectorClockMutable
 }
 
 func BallotFromData(data []byte) *Ballot {
@@ -64,6 +60,12 @@ func BallotFromData(data []byte) *Ballot {
 	ballotCap := msgs.ReadRootBallot(seg)
 	voteCap := ballotCap.Vote()
 	vUUId := common.MakeVarUUId(ballotCap.VarId())
+	subsCap := ballotCap.Subscribers()
+	subs := make([]common.ClientId, subsCap.Len())
+	for idx, l := 0, subsCap.Len(); idx < l; idx++ {
+		clientId := common.MakeClientId(subsCap.At(idx))
+		subs[idx] = *clientId
+	}
 	return &Ballot{
 		VarUUId: vUUId,
 		Data:    data,
@@ -77,10 +79,16 @@ func (ballot *Ballot) Aborted() bool {
 	return ballot.Vote != Commit
 }
 
-func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *vc.VectorClockMutable) *BallotBuilder {
+type BallotBuilder struct {
+	*Ballot
+	Clock *vc.VectorClockMutable
+}
+
+func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *vc.VectorClockMutable, subscriberIds []common.ClientId) *BallotBuilder {
 	ballot := &Ballot{
-		VarUUId: vUUId,
-		Vote:    vote,
+		VarUUId:     vUUId,
+		Vote:        vote,
+		Subscribers: subscriberIds,
 	}
 	return &BallotBuilder{
 		Ballot: ballot,
@@ -95,6 +103,11 @@ func (ballot *BallotBuilder) buildSeg() (*capn.Segment, msgs.Ballot) {
 	clockData := ballot.Clock.AsData()
 	ballot.Ballot.Clock = vc.VectorClockFromData(clockData, false)
 	ballotCap.SetClock(clockData)
+	subscribersCap := seg.NewDataList(len(ballot.Subscribers))
+	for idx, sub := range ballot.Subscribers {
+		subscribersCap.Set(idx, sub[:])
+	}
+	ballotCap.SetSubscribers(subscribersCap)
 	return seg, ballotCap
 }
 

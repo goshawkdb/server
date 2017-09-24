@@ -176,8 +176,8 @@ func (arb *acceptorReceiveBallots) String() string {
 
 func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) {
 	// We can accept a ballot from instanceRMId at any point up until
-	// we've received a TLC from instanceRMId (see notes in ALC re
-	// retry). Note an acceptor can change it's mind!
+	// we've received a TLC from instanceRMId. Note an acceptor can
+	// change it's mind!
 	if arb.currentState == &arb.acceptorDeleteFromDisk {
 		arb.Log("error", "Received ballot after all TLCs have been received.", "instanceRMId", instanceRMId)
 	}
@@ -327,16 +327,10 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	// away TLCs received from proposers/learners. However,
 	// proposers/learners wait until all acceptors have given the same
 	// answer before issuing any TLCs, so if we are here, we cannot
-	// have received any TLCs from anyone... unless we're a retry!  If
-	// the txn is a retry then proposers start as soon as they have any
-	// ballot, and the ballot accumulator will return a result
-	// immediately. However, other ballots can continue to arrive even
-	// after a proposer has received F+1 equal outcomes from
-	// acceptors. In that case, the acceptor can be here, waiting for
-	// TLCs, and can even have received some TLCs when it now receives
-	// another ballot. It cannot ignore that ballot because to do so
-	// opens the possibility that the acceptors do not arrive at the
-	// same outcome and the txn will block.
+	// have received any TLCs from anyone.
+
+	// TODO - given the simplification of taking out retries, the
+	// following can be simplified.
 
 	allocs := aalc.ballotAccumulator.txn.Txn.Allocations()
 	aalc.pendingTLC = make(map[common.RMId]types.EmptyStruct, allocs.Len())
@@ -382,6 +376,7 @@ func (aalc *acceptorAwaitLocallyComplete) String() string {
 }
 
 func (aalc *acceptorAwaitLocallyComplete) TxnLocallyCompleteReceived(sender common.RMId) {
+	// TODO - not sure if we need to cope with this complexity any more
 	aalc.tlcsReceived[sender] = types.EmptyStructVal
 	if aalc.currentState == aalc {
 		delete(aalc.pendingTLC, sender)

@@ -8,6 +8,7 @@ import (
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
 	eng "goshawkdb.io/server/txnengine"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/status"
 	"goshawkdb.io/server/utils/txnreader"
@@ -91,16 +92,17 @@ type rmBallot struct {
 func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
 	ba := NewBallotAccumulator(txn, logger)
 	ba.outcome = outcome
+	// All instances that went to disk must be complete.
+	if ba.incompleteVars != instances.Len() {
+		panic(fmt.Sprintf("%v: Expected to find %d instances, but found %d.", txn.Id, ba.incompleteVars, instances.Len()))
+	}
+	ba.incompleteVars = 0
 
 	for idx, l := 0, instances.Len(); idx < l; idx++ {
-		// All instances that went to disk must be complete. But in the
-		// case of a retry, not all instances must be complete before
-		// going to disk.
-		ba.incompleteVars--
 		instancesForVar := instances.At(idx)
-		acceptedInstances := instancesForVar.Instances()
 		vUUId := common.MakeVarUUId(instancesForVar.VarId())
 		vBallot := ba.vUUIdToBallots[*vUUId]
+		acceptedInstances := instancesForVar.Instances()
 		rmBals := rmBallots(make([]*rmBallot, acceptedInstances.Len()))
 		vBallot.rmToBallot = rmBals
 		for idy, m := 0, acceptedInstances.Len(); idy < m; idy++ {
@@ -156,13 +158,13 @@ func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *inst
 }
 
 func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
-	// Even in the case of retries, we must wait until we have at least
-	// F+1 results for one var, otherwise we run the risk of
-	// timetravel: a slow learner could issue a badread based on not
-	// being caught up. By waiting for at least F+1 ballots for a var
-	// (they don't have to be the same ballot!), we avoid this as there
-	// must be at least one voter who isn't in the past.
-	if !(ba.dirty && (ba.incompleteVars == 0 || ba.txn.Txn.Retry())) {
+	// We must wait until we have at least F+1 results for one var,
+	// otherwise we run the risk of timetravel: a slow learner could
+	// issue a badread based on not being caught up. By waiting for at
+	// least F+1 ballots for a var (they don't have to be the same
+	// ballot!), we avoid this as there must be at least one voter who
+	// isn't in the past.
+	if ba.dirty || ba.incompleteVars != 0 {
 		return nil
 	}
 	ba.dirty = false
@@ -171,6 +173,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	aborted, deadlock := false, false
 
 	vUUIds := common.VarUUIds(make([]*common.VarUUId, 0, len(ba.vUUIdToBallots)))
+	commitSubscribers := make(map[common.ClientId]types.EmptyStruct)
 	br := NewBadReads()
 	utils.DebugLog(ba.logger, "debug", "determineOutcome")
 	for _, vBallot := range ba.vUUIdToBallots {
@@ -179,9 +182,12 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 		}
 		vUUIds = append(vUUIds, vBallot.vUUId)
 		if vBallot.result == nil {
-			vBallot.CalculateResult(br, combinedClock)
+			vBallot.CalculateResult(br, combinedClock, commitSubscribers)
 		} else if !vBallot.result.Aborted() {
 			combinedClock.MergeInMax(vBallot.result.Clock)
+			for _, clientId := range vBallot.result.Subscribers {
+				commitSubscribers[clientId] = types.EmptyStructVal
+			}
 		}
 		aborted = aborted || vBallot.result.Aborted()
 		deadlock = deadlock || vBallot.result.Vote == eng.AbortDeadlock
@@ -255,7 +261,6 @@ func (ba *BallotAccumulator) AddInstancesToSeg(seg *capn.Segment) msgs.Instances
 func (ba *BallotAccumulator) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("Ballot Accumulator for %v", ba.txn.Id))
 	sc.Emit(fmt.Sprintf("- incomplete var count: %v", ba.incompleteVars))
-	sc.Emit(fmt.Sprintf("- retry? %v", ba.txn.Txn.Retry()))
 	sc.Join()
 }
 
@@ -265,10 +270,10 @@ type varBallotReducer struct {
 	badReads
 }
 
-func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClockMutable) {
+func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClockMutable, commitSubscribers map[common.ClientId]types.EmptyStruct) {
 	reducer := &varBallotReducer{
 		vUUId:         vb.vUUId,
-		BallotBuilder: eng.NewBallotBuilder(vb.vUUId, eng.Commit, vectorclock.NewVectorClock().AsMutable()),
+		BallotBuilder: eng.NewBallotBuilder(vb.vUUId, eng.Commit, vectorclock.NewVectorClock().AsMutable(), nil),
 		badReads:      br,
 	}
 	for _, rmBal := range vb.rmToBallot {
@@ -276,6 +281,9 @@ func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClock
 	}
 	if !reducer.Aborted() {
 		clock.MergeInMax(reducer.Clock)
+		for _, clientId := range reducer.Subscribers {
+			commitSubscribers[clientId] = types.EmptyStructVal
+		}
 	}
 	vb.result = reducer.ToBallot()
 }
@@ -293,6 +301,7 @@ func (cur *varBallotReducer) combineVote(rmBal *rmBallot) {
 	switch {
 	case cur.Vote == eng.Commit && new.Vote == eng.Commit:
 		curClock.MergeInMax(newClock)
+		cur.Subscribers = append(cur.Subscribers, new.Subscribers...)
 
 	case cur.Vote == eng.AbortDeadlock && curClock.Len() == 0:
 		// Do nothing - ignore the new ballot
@@ -301,12 +310,14 @@ func (cur *varBallotReducer) combineVote(rmBal *rmBallot) {
 		cur.Vote = eng.AbortDeadlock
 		cur.VoteCap = new.VoteCap
 		cur.Clock = newClock.AsMutable()
+		cur.Subscribers = nil
 
 	case cur.Vote == eng.Commit:
 		// new.Vote != eng.Commit otherwise we'd have hit first case.
 		cur.Vote = new.Vote
 		cur.VoteCap = new.VoteCap
 		cur.Clock = newClock.AsMutable()
+		cur.Subscribers = nil
 
 	case new.Vote == eng.Commit:
 		// But we know cur.Vote != eng.Commit. Do nothing.

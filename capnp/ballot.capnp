@@ -8,18 +8,19 @@ $Go.import("goshawkdb.io/server/capnp");
 using Txn = import "transaction.capnp";
 
 struct Ballot {
-  varId @0: Data;
-  clock @1: Data;
-  vote  @2: Vote;
+  varId       @0: Data;
+  clock       @1: Data;
+  subscribers @2: List(Data);
+  vote        @3: Vote;
 }
 
 struct Vote {
   union {
-    commit                @0: Void;
+    commit        @0: Void;
     abortBadRead :group {
       txnId      @1: Data;
       txnActions @2: Data;
     }
-    abortDeadlock         @3: Void;
+    abortDeadlock @3: Void;
   }
 }

@@ -17,9 +17,8 @@ import (
 	"time"
 )
 
-type VarWriteSubscriber struct {
-	Observe func(v *Var, value []byte, references *msgs.VarIdPos_List, txn *Txn)
-	Cancel  func(v *Var)
+type VarCommitSubscriber struct {
+	Cancel func(v *Var)
 }
 
 type Var struct {
@@ -29,7 +28,8 @@ type Var struct {
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
-	subscribers     map[common.TxnId]*VarWriteSubscriber
+	subscribers     map[common.ClientId]VarCommitSubscriber
+	subscriberIds   []common.ClientId
 	exe             *dispatcher.Executor
 	db              *db.Databases
 	vm              *VarManager
@@ -92,7 +92,8 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
-		subscribers:     make(map[common.TxnId]*VarWriteSubscriber),
+		subscribers:     make(map[common.ClientId]VarCommitSubscriber),
+		subscriberIds:   nil,
 		exe:             exe,
 		db:              db,
 		vm:              vm,
@@ -100,38 +101,11 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	}
 }
 
-func (v *Var) AddWriteSubscriber(txnId *common.TxnId, sub *VarWriteSubscriber) {
-	v.subscribers[*txnId] = sub
-}
-
-func (v *Var) RemoveWriteSubscriber(txnId *common.TxnId) {
-	delete(v.subscribers, *txnId)
-	v.maybeMakeInactive()
-}
-
 func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 	utils.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
 	v.poisson.AddThen(enqueuedAt)
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()
-
-	if isRead && action.Retry {
-		if voted := v.curFrame.ReadRetry(action); !voted {
-			v.AddWriteSubscriber(action.Id,
-				&VarWriteSubscriber{
-					Observe: func(v *Var, value []byte, refs *msgs.VarIdPos_List, newtxn *Txn) {
-						if voted := v.curFrame.ReadRetry(action); voted {
-							v.RemoveWriteSubscriber(action.Id)
-						}
-					},
-					Cancel: func(v *Var) {
-						action.VoteDeadlock(v.curFrame.frameTxnClock)
-						v.RemoveWriteSubscriber(action.Id)
-					},
-				})
-		}
-		return
-	}
 
 	switch {
 	case isRead && isWrite:
@@ -150,9 +124,6 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
 	switch {
-	case action.Retry:
-		v.RemoveWriteSubscriber(action.Id)
-
 	case action.frame == nil:
 		if (isWrite && !v.curFrame.WriteLearnt(action)) ||
 			(!isWrite && isRead && !v.curFrame.ReadLearnt(action)) {
@@ -191,16 +162,6 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 
 	if positions != nil {
 		v.positions = positions
-	}
-
-	if len(v.subscribers) != 0 {
-		actionCap := action.writeAction
-		modifiedCap := actionCap.Modified()
-		value := modifiedCap.Value()
-		references := modifiedCap.References()
-		for _, sub := range v.subscribers {
-			sub.Observe(v, value, &references, action.Txn)
-		}
 	}
 
 	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
@@ -300,6 +261,7 @@ func (v *Var) isOnDisk(cancelSubs bool) bool {
 			for _, sub := range v.subscribers {
 				sub.Cancel(v)
 			}
+			v.subscriberIds = nil
 		}
 		return true
 	}
@@ -332,7 +294,7 @@ func (v *Var) Status(sc *status.StatusConsumer) {
 	}
 	sc.Emit("- CurFrame:")
 	v.curFrame.Status(sc.Fork())
-	sc.Emit(fmt.Sprintf("- Subscribers: %v", len(v.subscribers)))
+	sc.Emit(fmt.Sprintf("- SubscriberIds: %v", v.subscriberIds))
 	sc.Emit(fmt.Sprintf("- Idle? %v", v.isIdle()))
 	sc.Emit(fmt.Sprintf("- IsOnDisk? %v", v.isOnDisk(false)))
 	sc.Join()

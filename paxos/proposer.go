@@ -9,7 +9,6 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
 	eng "goshawkdb.io/server/txnengine"
-	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/senders"
 	"goshawkdb.io/server/utils/status"
@@ -252,12 +251,6 @@ func (pab *proposerAwaitBallots) start() {
 	txnId := pab.txn.TxnReader.Id
 	pab.submitter = txnId.RMId(pab.proposerManager.RMId)
 	pab.submitterBootCount = txnId.BootCount()
-	if pab.txn.Retry {
-		// We need to observe whether or not the submitter dies. If it
-		// does die, we should tidy up (abort) asap otherwise we have a
-		// leak which may never trigger.
-		pab.proposerManager.AddServerConnectionSubscriber(pab)
-	}
 }
 
 func (pab *proposerAwaitBallots) proposerStateMachineComponentWitness() {}
@@ -273,13 +266,7 @@ func (pab *proposerAwaitBallots) TxnBallotsComplete(ballots ...*eng.Ballot) {
 		}
 		pab.nextState()
 
-	} else if pab.txn.Retry && pab.currentState == &pab.proposerReceiveOutcomes {
-		utils.DebugLog(pab, "debug", "TxnBallotsComplete (retry) callback with existing proposals.")
-		if !pab.allAcceptorsAgreed {
-			pab.proposerManager.AddToPaxosProposals(pab.txnId, ballots, pab.proposerManager.RMId)
-		}
-
-	} else if !pab.txn.Retry {
+	} else {
 		pab.Log("error", "TxnBallotsComplete callback invoked in wrong state.",
 			"currentState", pab.currentState)
 	}
@@ -296,27 +283,6 @@ func (pab *proposerAwaitBallots) Abort() (bool, error) {
 	return false, nil
 }
 
-func (pab *proposerAwaitBallots) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
-	if conn, found := conns[pab.submitter]; !found || conn.BootCount != pab.submitterBootCount {
-		pab.maybeAbortRetry()
-	}
-}
-func (pab *proposerAwaitBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
-	if rmId == pab.submitter {
-		pab.maybeAbortRetry()
-	}
-}
-func (pab *proposerAwaitBallots) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
-	if conn.RMId == pab.submitter && conn.BootCount != pab.submitterBootCount {
-		pab.maybeAbortRetry()
-	}
-	done()
-}
-
-func (pab *proposerAwaitBallots) maybeAbortRetry() {
-	pab.proposerManager.Exe.EnqueueFuncAsync(pab.Abort)
-}
-
 // receive outcomes
 
 type proposerReceiveOutcomes struct {
@@ -331,9 +297,6 @@ func (pro *proposerReceiveOutcomes) init(proposer *Proposer) {
 }
 
 func (pro *proposerReceiveOutcomes) start() {
-	if pro.txn != nil && pro.txn.Retry {
-		pro.proposerManager.RemoveServerConnectionSubscriber(&pro.proposerAwaitBallots)
-	}
 	if pro.outcome != nil {
 		// we've received enough outcomes already!
 		pro.nextState()
@@ -350,10 +313,6 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 	if pro.mode == proposerTLCSender {
 		// Consensus already reached and we've been to disk. So this
 		// *must* be a duplicate: safe to ignore.
-
-		// Even in the case where it's a retry, we actually don't care
-		// that we could be receiving this *after* sending a TLC because
-		// all we need to know is that it aborted, not the details.
 		return
 	}
 
@@ -389,10 +348,6 @@ func (pro *proposerReceiveOutcomes) BallotOutcomeReceived(sender common.RMId, ou
 		// should only advance to the next state if we're currently
 		// waiting for ballot outcomes.
 		if pro.currentState == pro {
-			pro.nextState()
-		} else if pro.currentState == &pro.proposerAwaitBallots && pro.txn.Retry {
-			// Advance currentState to proposerReceiveOutcomes, the
-			// start() of which will immediately call nextState() again.
 			pro.nextState()
 		}
 	}

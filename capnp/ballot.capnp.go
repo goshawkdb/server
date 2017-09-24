@@ -12,16 +12,18 @@ import (
 
 type Ballot C.Struct
 
-func NewBallot(s *C.Segment) Ballot      { return Ballot(s.NewStruct(0, 3)) }
-func NewRootBallot(s *C.Segment) Ballot  { return Ballot(s.NewRootStruct(0, 3)) }
-func AutoNewBallot(s *C.Segment) Ballot  { return Ballot(s.NewStructAR(0, 3)) }
-func ReadRootBallot(s *C.Segment) Ballot { return Ballot(s.Root(0).ToStruct()) }
-func (s Ballot) VarId() []byte           { return C.Struct(s).GetObject(0).ToData() }
-func (s Ballot) SetVarId(v []byte)       { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Ballot) Clock() []byte           { return C.Struct(s).GetObject(1).ToData() }
-func (s Ballot) SetClock(v []byte)       { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s Ballot) Vote() Vote              { return Vote(C.Struct(s).GetObject(2).ToStruct()) }
-func (s Ballot) SetVote(v Vote)          { C.Struct(s).SetObject(2, C.Object(v)) }
+func NewBallot(s *C.Segment) Ballot          { return Ballot(s.NewStruct(0, 4)) }
+func NewRootBallot(s *C.Segment) Ballot      { return Ballot(s.NewRootStruct(0, 4)) }
+func AutoNewBallot(s *C.Segment) Ballot      { return Ballot(s.NewStructAR(0, 4)) }
+func ReadRootBallot(s *C.Segment) Ballot     { return Ballot(s.Root(0).ToStruct()) }
+func (s Ballot) VarId() []byte               { return C.Struct(s).GetObject(0).ToData() }
+func (s Ballot) SetVarId(v []byte)           { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Ballot) Clock() []byte               { return C.Struct(s).GetObject(1).ToData() }
+func (s Ballot) SetClock(v []byte)           { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s Ballot) Subscribers() C.DataList     { return C.DataList(C.Struct(s).GetObject(2)) }
+func (s Ballot) SetSubscribers(v C.DataList) { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s Ballot) Vote() Vote                  { return Vote(C.Struct(s).GetObject(3).ToStruct()) }
+func (s Ballot) SetVote(v Vote)              { C.Struct(s).SetObject(3, C.Object(v)) }
 func (s Ballot) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -61,6 +63,43 @@ func (s Ballot) WriteJSON(w io.Writer) error {
 			return err
 		}
 		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"subscribers\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
 		if err != nil {
 			return err
 		}
@@ -139,6 +178,43 @@ func (s Ballot) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	_, err = b.WriteString("subscribers = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
 	_, err = b.WriteString("vote = ")
 	if err != nil {
 		return err
@@ -165,7 +241,7 @@ func (s Ballot) MarshalCapLit() ([]byte, error) {
 
 type Ballot_List C.PointerList
 
-func NewBallotList(s *C.Segment, sz int) Ballot_List { return Ballot_List(s.NewCompositeList(0, 3, sz)) }
+func NewBallotList(s *C.Segment, sz int) Ballot_List { return Ballot_List(s.NewCompositeList(0, 4, sz)) }
 func (s Ballot_List) Len() int                       { return C.PointerList(s).Len() }
 func (s Ballot_List) At(i int) Ballot                { return Ballot(C.PointerList(s).At(i).ToStruct()) }
 func (s Ballot_List) ToArray() []Ballot {

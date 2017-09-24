@@ -25,7 +25,6 @@ type TxnLocalStateChange interface {
 type Txn struct {
 	logger       log.Logger
 	Id           *common.TxnId
-	Retry        bool
 	writes       []*common.VarUUId
 	localActions []localAction
 	voter        bool
@@ -86,21 +85,21 @@ func (action *localAction) IsImmigrant() bool {
 
 func (action *localAction) VoteDeadlock(clock *vc.VectorClockMutable) {
 	if action.ballot == nil {
-		action.ballot = NewBallotBuilder(action.vUUId, AbortDeadlock, clock).ToBallot()
+		action.ballot = NewBallotBuilder(action.vUUId, AbortDeadlock, clock, nil).ToBallot()
 		action.voteCast(action.ballot, true)
 	}
 }
 
 func (action *localAction) VoteBadRead(clock *vc.VectorClockMutable, txnId *common.TxnId, actions *txnreader.TxnActions) {
 	if action.ballot == nil {
-		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock).CreateBadReadBallot(txnId, actions)
+		action.ballot = NewBallotBuilder(action.vUUId, AbortBadRead, clock, nil).CreateBadReadBallot(txnId, actions)
 		action.voteCast(action.ballot, true)
 	}
 }
 
-func (action *localAction) VoteCommit(clock *vc.VectorClockMutable) bool {
+func (action *localAction) VoteCommit(clock *vc.VectorClockMutable, subscribers []common.ClientId) bool {
 	if action.ballot == nil {
-		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock).ToBallot()
+		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock, subscribers).ToBallot()
 		return !action.voteCast(action.ballot, false)
 	}
 	return false
@@ -199,7 +198,6 @@ func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnL
 	txn := &Txn{
 		logger:      logger,
 		Id:          txnId,
-		Retry:       txnCap.Retry(),
 		writes:      make([]*common.VarUUId, 0, actionsList.Len()),
 		TxnReader:   reader,
 		exe:         exe,
@@ -349,7 +347,6 @@ func (txn *Txn) Status(sc *status.StatusConsumer) {
 	sc.Emit(txn.Id.String())
 	sc.Emit(fmt.Sprintf("- Local Actions: %v", txn.localActions))
 	sc.Emit(fmt.Sprintf("- Current State: %v", txn.currentState))
-	sc.Emit(fmt.Sprintf("- Retry? %v", txn.Retry))
 	sc.Emit(fmt.Sprintf("- PreAborted? %v", txn.preAbortedBool))
 	sc.Emit(fmt.Sprintf("- Aborted? %v", txn.aborted))
 	sc.Emit(fmt.Sprintf("- Outcome Clock: %v", txn.outcomeClock))
@@ -375,9 +372,7 @@ func (tdb *txnDetermineLocalBallots) String() string { return "txnDetermineLocal
 
 func (tdb *txnDetermineLocalBallots) init(txn *Txn) {
 	tdb.Txn = txn
-	if !tdb.Retry {
-		atomic.StoreInt32(&tdb.pendingVote, int32(len(tdb.localActions)))
-	}
+	atomic.StoreInt32(&tdb.pendingVote, int32(len(tdb.localActions)))
 }
 
 func (tdb *txnDetermineLocalBallots) start() {
@@ -412,12 +407,6 @@ func (talb *txnAwaitLocalBallots) init(txn *Txn) {
 func (talb *txnAwaitLocalBallots) start() {}
 
 func (talb *txnAwaitLocalBallots) voteCast(ballot *Ballot, abort bool) bool {
-	if talb.Retry {
-		talb.exe.EnqueueFuncAsync(func() (bool, error) {
-			return talb.retryTxnBallotComplete(ballot)
-		})
-		return true
-	}
 	if abort && atomic.CompareAndSwapInt32(&talb.preAborted, 0, 1) {
 		talb.exe.EnqueueFuncAsync(talb.preAbort)
 	}
@@ -477,18 +466,6 @@ func (talb *txnAwaitLocalBallots) allTxnBallotsComplete() (bool, error) {
 	return false, nil
 }
 
-func (talb *txnAwaitLocalBallots) retryTxnBallotComplete(ballot *Ballot) (bool, error) {
-	if talb.currentState == talb {
-		talb.nextState()
-	}
-	// Up until we actually receive the outcome, we should pass on all
-	// of these to the proposer.
-	if talb.currentState == &talb.txnReceiveOutcome {
-		talb.stateChange.TxnBallotsComplete(ballot)
-	}
-	return false, nil
-}
-
 // Receive Outcome
 type txnReceiveOutcome struct {
 	*Txn
@@ -509,9 +486,6 @@ func (tro *txnReceiveOutcome) BallotOutcomeReceived(outcome *msgs.Outcome) {
 	if tro.outcomeClock != nil || tro.aborted {
 		// We've already been here. Be silent if we receive extra outcomes.
 		return
-	}
-	if tro.Retry && tro.currentState == &tro.txnAwaitLocalBallots {
-		tro.nextState()
 	}
 	if tro.currentState != tro {
 		// We've received the outcome too early! Be noisy!

@@ -76,7 +76,6 @@ func (tr *TxnReader) AsDeflated() *TxnReader {
 			seg := capn.NewBuffer(nil)
 			root := msgs.NewRootTxn(seg)
 			root.SetId(cap.Id())
-			root.SetRetry(cap.Retry())
 			root.SetActions(actions.Data)
 			root.SetAllocations(cap.Allocations())
 			root.SetTwoFInc(cap.TwoFInc())

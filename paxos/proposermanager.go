@@ -239,19 +239,6 @@ func (pm *ProposerManager) NewPaxosProposals(txn *txnreader.TxnReader, twoFInc i
 	}
 }
 
-func (pm *ProposerManager) AddToPaxosProposals(txnId *common.TxnId, ballots []*eng.Ballot, rmId common.RMId) {
-	utils.DebugLog(pm.logger, "debug", "Adding ballot to Paxos.", "TxnId", txnId, "instance", rmId)
-	instId := instanceIdPrefix([instanceIdPrefixLen]byte{})
-	instIdSlice := instId[:]
-	copy(instIdSlice, txnId[:])
-	binary.BigEndian.PutUint32(instIdSlice[common.KeyLen:], uint32(rmId))
-	if prop, found := pm.proposals[instId]; found {
-		prop.AddBallots(ballots)
-	} else {
-		pm.logger.Log("error", "Adding ballot to Paxos, unable to find proposals.", "TxnId", txnId, "RMId", rmId)
-	}
-}
-
 // from network
 func (pm *ProposerManager) OneBTxnVotesReceived(sender common.RMId, txnId *common.TxnId, oneBTxnVotes msgs.OneBTxnVotes) {
 	utils.DebugLog(pm.logger, "debug", "1B received.", "TxnId", txnId, "sender", sender, "instance", common.RMId(oneBTxnVotes.RmId()))
@@ -493,7 +480,7 @@ func MakeAbortBallots(txn *txnreader.TxnReader, alloc *msgs.Allocation) []*eng.B
 	for idx, l := 0, actionIndices.Len(); idx < l; idx++ {
 		action := actions.At(int(actionIndices.At(idx)))
 		vUUId := common.MakeVarUUId(action.VarId())
-		ballots[idx] = eng.NewBallotBuilder(vUUId, eng.AbortDeadlock, nil).ToBallot()
+		ballots[idx] = eng.NewBallotBuilder(vUUId, eng.AbortDeadlock, nil, nil).ToBallot()
 	}
 	return ballots
 }

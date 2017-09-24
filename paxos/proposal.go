@@ -71,24 +71,6 @@ func (p *proposal) Start() {
 	p.maybeSendTwoA()
 }
 
-func (p *proposal) AddBallots(ballots []*eng.Ballot) {
-	added := false
-	for _, ballot := range ballots {
-		if _, found := p.instances[*ballot.VarUUId]; found {
-			continue
-		}
-		pi := newProposalInstance(p, ballot)
-		p.instances[*ballot.VarUUId] = pi
-		pi.init()
-		pi.start()
-		added = true
-	}
-	if added {
-		p.maybeSendOneA()
-		p.maybeSendTwoA()
-	}
-}
-
 func (p *proposal) maybeSendOneA() {
 	pendingPromises := p.pending[:0]
 	for _, pi := range p.instances {
