@@ -8,9 +8,10 @@ $Go.import("goshawkdb.io/server/capnp");
 using Outcome = import "outcome.capnp";
 
 struct AcceptorState {
-  outcome   @0: Outcome.Outcome;
-  sendToAll @1: Bool;
-  instances @2: List(InstancesForVar);
+  outcome     @0: Outcome.Outcome;
+  sendToAll   @1: Bool;
+  instances   @2: List(InstancesForVar);
+  subscribers @3: List(Data);
 }
 
 struct InstancesForVar {

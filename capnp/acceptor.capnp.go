@@ -12,9 +12,9 @@ import (
 
 type AcceptorState C.Struct
 
-func NewAcceptorState(s *C.Segment) AcceptorState      { return AcceptorState(s.NewStruct(8, 2)) }
-func NewRootAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewRootStruct(8, 2)) }
-func AutoNewAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewStructAR(8, 2)) }
+func NewAcceptorState(s *C.Segment) AcceptorState      { return AcceptorState(s.NewStruct(8, 3)) }
+func NewRootAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewRootStruct(8, 3)) }
+func AutoNewAcceptorState(s *C.Segment) AcceptorState  { return AcceptorState(s.NewStructAR(8, 3)) }
 func ReadRootAcceptorState(s *C.Segment) AcceptorState { return AcceptorState(s.Root(0).ToStruct()) }
 func (s AcceptorState) Outcome() Outcome               { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
 func (s AcceptorState) SetOutcome(v Outcome)           { C.Struct(s).SetObject(0, C.Object(v)) }
@@ -24,6 +24,8 @@ func (s AcceptorState) Instances() InstancesForVar_List {
 	return InstancesForVar_List(C.Struct(s).GetObject(1))
 }
 func (s AcceptorState) SetInstances(v InstancesForVar_List) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s AcceptorState) Subscribers() C.DataList             { return C.DataList(C.Struct(s).GetObject(2)) }
+func (s AcceptorState) SetSubscribers(v C.DataList)         { C.Struct(s).SetObject(2, C.Object(v)) }
 func (s AcceptorState) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -86,6 +88,43 @@ func (s AcceptorState) WriteJSON(w io.Writer) error {
 					return err
 				}
 				err = s.WriteJSON(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"subscribers\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
 				if err != nil {
 					return err
 				}
@@ -180,6 +219,43 @@ func (s AcceptorState) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("subscribers = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -196,7 +272,7 @@ func (s AcceptorState) MarshalCapLit() ([]byte, error) {
 type AcceptorState_List C.PointerList
 
 func NewAcceptorStateList(s *C.Segment, sz int) AcceptorState_List {
-	return AcceptorState_List(s.NewCompositeList(8, 2, sz))
+	return AcceptorState_List(s.NewCompositeList(8, 3, sz))
 }
 func (s AcceptorState_List) Len() int { return C.PointerList(s).Len() }
 func (s AcceptorState_List) At(i int) AcceptorState {

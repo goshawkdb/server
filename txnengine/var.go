@@ -29,7 +29,7 @@ type Var struct {
 	curFrameOnDisk  *frame
 	writeInProgress func()
 	subscribers     map[common.ClientId]VarCommitSubscriber
-	subscriberIds   []common.ClientId
+	subscriberIds   common.ClientIds
 	exe             *dispatcher.Executor
 	db              *db.Databases
 	vm              *VarManager

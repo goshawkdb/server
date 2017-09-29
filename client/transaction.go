@@ -187,6 +187,10 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, txn *
 }
 
 func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader) error {
+	if tr.sender != nil {
+		tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
+		tr.sender = nil
+	}
 	// If we're a retry then we have a specific Abort message to
 	// send which helps tidy up garbage in the case that this node
 	// *isn't* going down (connection dying only, and !completed).
@@ -198,15 +202,17 @@ func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader) error {
 	// transaction if the txnSender only manages to send to some but
 	// not all active voters.
 
+	// TODO ^^ that comment is wrong - TSC doesn't go to voters! Also,
+	// there's the chance here that the TSC is going to acceptors
+	// before the acceptor has received any votes! I think the TSCs
+	// should be going only to the known acceptors at this point, not
+	// all of them.
+
 	// OSS is safe here - see above. In the case that the node's
 	// exiting, this informs acceptors that we don't care about the
 	// answer so they shouldn't hang around waiting for the node to
 	// return. Of course, it's best effort.
 	senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id), tr.connPub, tr.acceptors...)
-	if tr.sender != nil {
-		tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
-		tr.sender = nil
-	}
 	completed := tr.outcome != nil
 	if !completed && tr.server.Retry() {
 		// If this msg doesn't make it then proposers should

@@ -146,7 +146,7 @@ type frameOpen struct {
 	uncommittedReads   uint
 	writeVoteClock     *vc.VectorClockMutable
 	writes             *sl.SkipList
-	clientWrites       map[[common.ClientLen]byte]types.EmptyStruct
+	clientWrites       map[common.ClientId]types.EmptyStruct
 	uncommittedWrites  uint
 	rwPresent          bool
 	rollScheduled      *time.Time
@@ -160,7 +160,7 @@ func (fo *frameOpen) init(f *frame) {
 	fo.reads = sl.New(f.v.rng)
 	fo.learntFutureReads = []*localAction{}
 	fo.writes = sl.New(f.v.rng)
-	fo.clientWrites = make(map[[common.ClientLen]byte]types.EmptyStruct)
+	fo.clientWrites = make(map[common.ClientId]types.EmptyStruct)
 }
 
 func (fo *frameOpen) start()         {}
@@ -245,7 +245,7 @@ func (fo *frameOpen) ReadCommitted(action *localAction) {
 func (fo *frameOpen) AddWrite(action *localAction) {
 	txn := action.Txn
 	utils.DebugLog(fo.v.vm.logger, "debug", "AddWrite", "frame", fo.frame, "TxnId", txn.Id)
-	cid := txn.Id.ClientId()
+	cid := txn.Id.ClientId(common.RMIdEmpty)
 	_, found := fo.clientWrites[cid]
 	switch {
 	case fo.currentState != fo:
@@ -279,7 +279,7 @@ func (fo *frameOpen) WriteAborted(action *localAction, permitInactivate bool) {
 	if node := fo.writes.Get(action); node != nil && node.Value == uncommitted {
 		node.Remove()
 		fo.uncommittedWrites--
-		delete(fo.clientWrites, txn.Id.ClientId())
+		delete(fo.clientWrites, txn.Id.ClientId(common.RMIdEmpty))
 		action.frame = nil
 		if fo.writes.Len() == 0 {
 			fo.writeVoteClock = nil

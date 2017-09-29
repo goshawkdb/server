@@ -133,12 +133,13 @@ func (am *AcceptorManager) loadFromData(txnId *common.TxnId, data []byte) error 
 
 	instId := instanceId([instanceIdLen]byte{})
 	instIdSlice := instId[:]
-
-	outcome := state.Outcome()
 	copy(instIdSlice, txnId[:])
 
+	outcome := state.Outcome()
+	subsCap := state.Subscribers().ToArray()
+
 	instances := state.Instances()
-	acc := AcceptorFromData(txnId, &outcome, state.SendToAll(), &instances, am)
+	acc := AcceptorFromData(txnId, &outcome, subsCap, state.SendToAll(), &instances, am)
 	aInst := &acceptorInstances{acceptor: acc}
 	am.acceptors[*txnId] = aInst
 	if am.metrics != nil {
@@ -329,8 +330,9 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 
 func (am *AcceptorManager) TxnSubmissionCompleteReceived(sender common.RMId, txnId *common.TxnId, tsc msgs.TxnSubmissionComplete) {
 	if aInst, found := am.acceptors[*txnId]; found && aInst.acceptor != nil {
-		utils.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "sender", sender)
-		aInst.acceptor.TxnSubmissionCompleteReceived(sender)
+		clientId := common.MakeClientId(tsc.ClientId())
+		utils.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "clientId", clientId)
+		aInst.acceptor.TxnSubmissionCompleteReceived(*clientId)
 	}
 }
 

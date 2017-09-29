@@ -40,11 +40,11 @@ func NewAcceptor(txn *txnreader.TxnReader, am *AcceptorManager) *Acceptor {
 	return a
 }
 
-func AcceptorFromData(txnId *common.TxnId, outcome *msgs.Outcome, sendToAll bool, instances *msgs.InstancesForVar_List, am *AcceptorManager) *Acceptor {
+func AcceptorFromData(txnId *common.TxnId, outcome *msgs.Outcome, subsCap [][]byte, sendToAll bool, instances *msgs.InstancesForVar_List, am *AcceptorManager) *Acceptor {
 	outcomeEqualId := (*outcomeEqualId)(outcome)
 	txn := txnreader.TxnReaderFromData(outcome.Txn())
 	a := NewAcceptor(txn, am)
-	a.ballotAccumulator = BallotAccumulatorFromData(txn, outcomeEqualId, instances, a)
+	a.ballotAccumulator = BallotAccumulatorFromData(txn, outcomeEqualId, subsCap, instances, a)
 	a.outcome = outcomeEqualId
 	a.sendToAll = sendToAll
 	a.sendToAllOnDisk = sendToAll
@@ -86,8 +86,7 @@ func (a *Acceptor) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Current State: %v", a.currentState))
 	sc.Emit(fmt.Sprintf("- Outcome determined? %v", a.outcome != nil))
 	sc.Emit(fmt.Sprintf("- Pending TLC: %v", a.pendingTLC))
-	sc.Emit(fmt.Sprintf("- Received TLC: %v", a.tlcsReceived))
-	sc.Emit(fmt.Sprintf("- Received TSC: %v", a.tscReceived))
+	sc.Emit(fmt.Sprintf("- Pending TSC: %v", a.pendingTSC))
 	a.ballotAccumulator.Status(sc.Fork())
 	sc.Join()
 }
@@ -125,8 +124,9 @@ type acceptorReceiveBallots struct {
 	*Acceptor
 	ballotAccumulator     *BallotAccumulator
 	outcome               *outcomeEqualId
+	subscribers           common.ClientIds
 	txn                   *txnreader.TxnReader
-	txnSubmitter          common.RMId
+	txnSubmitterRM        common.RMId
 	txnSubmitterBootCount uint32
 	txnSender             *senders.RepeatingSender
 }
@@ -135,7 +135,7 @@ func (arb *acceptorReceiveBallots) init(a *Acceptor, txn *txnreader.TxnReader) {
 	arb.Acceptor = a
 	arb.ballotAccumulator = NewBallotAccumulator(txn, arb.Acceptor)
 	arb.txn = txn
-	arb.txnSubmitter = txn.Id.RMId(a.acceptorManager.RMId)
+	arb.txnSubmitterRM = txn.Id.RMId(a.acceptorManager.RMId)
 	arb.txnSubmitterBootCount = txn.Id.BootCount()
 }
 
@@ -181,25 +181,26 @@ func (arb *acceptorReceiveBallots) BallotAccepted(instanceRMId common.RMId, inst
 	if arb.currentState == &arb.acceptorDeleteFromDisk {
 		arb.Log("error", "Received ballot after all TLCs have been received.", "instanceRMId", instanceRMId)
 	}
-	outcome := arb.ballotAccumulator.BallotReceived(instanceRMId, inst, vUUId, txn)
+	outcome, subscribers := arb.ballotAccumulator.BallotReceived(instanceRMId, inst, vUUId, txn)
 	if outcome != nil && !outcome.Equal(arb.outcome) {
 		arb.outcome = outcome
+		arb.subscribers = subscribers
 		arb.nextState(&arb.acceptorWriteToDisk)
 	}
 }
 
 func (arb *acceptorReceiveBallots) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
-	if conn, found := conns[arb.txnSubmitter]; !found || (conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0) {
+	if conn, found := conns[arb.txnSubmitterRM]; !found || (conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0) {
 		arb.enqueueCreateTxnSender()
 	}
 }
 func (arb *acceptorReceiveBallots) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
-	if rmId == arb.txnSubmitter {
+	if rmId == arb.txnSubmitterRM {
 		arb.enqueueCreateTxnSender()
 	}
 }
 func (arb *acceptorReceiveBallots) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
-	if conn.RMId == arb.txnSubmitter && conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
+	if conn.RMId == arb.txnSubmitterRM && conn.BootCount != arb.txnSubmitterBootCount && arb.txnSubmitterBootCount > 0 {
 		arb.enqueueCreateTxnSender()
 	}
 	done()
@@ -215,7 +216,7 @@ func (arb *acceptorReceiveBallots) createTxnSender() (bool, error) {
 		seg := capn.NewBuffer(nil)
 		msg := msgs.NewRootMessage(seg)
 		msg.SetTxnSubmission(arb.txn.Data)
-		activeRMs := make([]common.RMId, 0, arb.txn.Txn.TwoFInc())
+		activeRMs := make(common.RMIds, 0, arb.txn.Txn.TwoFInc())
 		allocs := arb.txn.Txn.Allocations()
 		for idx := 0; idx < allocs.Len(); idx++ {
 			alloc := allocs.At(idx)
@@ -236,9 +237,10 @@ func (arb *acceptorReceiveBallots) createTxnSender() (bool, error) {
 
 type acceptorWriteToDisk struct {
 	*Acceptor
-	outcomeOnDisk   *outcomeEqualId
-	sendToAll       bool
-	sendToAllOnDisk bool
+	outcomeOnDisk     *outcomeEqualId
+	sendToAll         bool
+	sendToAllOnDisk   bool
+	subscribersOnDisk common.ClientIds
 }
 
 func (awtd *acceptorWriteToDisk) init(a *Acceptor, txn *txnreader.TxnReader) {
@@ -259,6 +261,12 @@ func (awtd *acceptorWriteToDisk) start() {
 	state.SetOutcome(*outcomeCap)
 	state.SetSendToAll(awtd.sendToAll)
 	state.SetInstances(awtd.ballotAccumulator.AddInstancesToSeg(stateSeg))
+	subscribers := awtd.subscribers
+	dataList := stateSeg.NewDataList(len(subscribers))
+	for idx, subscriber := range subscribers {
+		dataList.Set(idx, subscriber[:])
+	}
+	state.SetSubscribers(dataList)
 
 	data := common.SegToBytes(stateSeg)
 
@@ -276,7 +284,7 @@ func (awtd *acceptorWriteToDisk) start() {
 		} else if ran != nil {
 			utils.DebugLog(awtd, "debug", "Writing 2B to disk...done.")
 			awtd.acceptorManager.Exe.EnqueueFuncAsync(func() (bool, error) {
-				awtd.writeDone(outcome, sendToAll)
+				awtd.writeDone(outcome, sendToAll, subscribers)
 				return false, nil
 			})
 		}
@@ -288,13 +296,14 @@ func (awtd *acceptorWriteToDisk) String() string {
 	return "acceptorWriteToDisk"
 }
 
-func (awtd *acceptorWriteToDisk) writeDone(outcome *outcomeEqualId, sendToAll bool) {
+func (awtd *acceptorWriteToDisk) writeDone(outcome *outcomeEqualId, sendToAll bool, subscribers common.ClientIds) {
 	// There could have been a number a outcomes determined in quick
 	// succession. We only "won" if we got here and our outcome is
 	// still the right one.
 	if awtd.outcome == outcome && awtd.currentState == awtd {
 		awtd.outcomeOnDisk = outcome
 		awtd.sendToAllOnDisk = sendToAll
+		awtd.subscribersOnDisk = subscribers
 		awtd.nextState(nil)
 	}
 }
@@ -304,17 +313,15 @@ func (awtd *acceptorWriteToDisk) writeDone(outcome *outcomeEqualId, sendToAll bo
 type acceptorAwaitLocallyComplete struct {
 	*Acceptor
 	pendingTLC    map[common.RMId]types.EmptyStruct
-	tlcsReceived  map[common.RMId]types.EmptyStruct
+	pendingTSC    map[common.ClientId]types.EmptyStruct
 	tgcRecipients common.RMIds
-	tscReceived   bool
 	twoBSender    *twoBTxnVotesSender
-	txnSubmitter  common.RMId
+	txnSubmitter  common.ClientId
 }
 
 func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *txnreader.TxnReader) {
 	aalc.Acceptor = a
-	aalc.tlcsReceived = make(map[common.RMId]types.EmptyStruct, aalc.ballotAccumulator.txn.Txn.Allocations().Len())
-	aalc.txnSubmitter = txn.Id.RMId(a.acceptorManager.RMId)
+	aalc.txnSubmitter = txn.Id.ClientId(a.acceptorManager.RMId)
 }
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
@@ -329,12 +336,9 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	// answer before issuing any TLCs, so if we are here, we cannot
 	// have received any TLCs from anyone.
 
-	// TODO - given the simplification of taking out retries, the
-	// following can be simplified.
-
 	allocs := aalc.ballotAccumulator.txn.Txn.Allocations()
 	aalc.pendingTLC = make(map[common.RMId]types.EmptyStruct, allocs.Len())
-	aalc.tgcRecipients = make([]common.RMId, 0, allocs.Len())
+	aalc.tgcRecipients = make(common.RMIds, 0, allocs.Len())
 
 	var rmsRemoved map[common.RMId]types.EmptyStruct
 	if aalc.acceptorManager.Topology != nil {
@@ -349,23 +353,31 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 			continue
 		}
 		if aalc.sendToAllOnDisk || active {
-			if _, found := aalc.tlcsReceived[rmId]; !found {
-				aalc.pendingTLC[rmId] = types.EmptyStructVal
-			}
+			aalc.pendingTLC[rmId] = types.EmptyStructVal
 			aalc.tgcRecipients = append(aalc.tgcRecipients, rmId)
 		}
 	}
 
-	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
-		aalc.tscReceived = true
+	subscribers := make(common.ClientIds, 1+len(aalc.subscribersOnDisk))
+	subscribers[0] = aalc.txnSubmitter
+	copy(subscribers[1:], aalc.subscribersOnDisk)
+
+	aalc.pendingTSC = make(map[common.ClientId]types.EmptyStruct, len(subscribers))
+	subscribersRMs := make(map[common.RMId]types.EmptyStruct, len(subscribers))
+	for _, subscriber := range subscribers {
+		if _, found := rmsRemoved[subscriber.RMId()]; found {
+			continue
+		}
+		aalc.pendingTSC[subscriber] = types.EmptyStructVal
+		subscribersRMs[subscriber.RMId()] = types.EmptyStructVal
 	}
 
-	if len(aalc.pendingTLC) == 0 && aalc.tscReceived {
+	if len(aalc.pendingTLC) == 0 && len(aalc.pendingTSC) == 0 {
 		aalc.maybeDelete()
 
 	} else {
 		utils.DebugLog(aalc, "debug", "Adding sender for 2B.")
-		aalc.twoBSender = newTwoBTxnVotesSender(aalc, (*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, aalc.txnSubmitter, aalc.tgcRecipients...)
+		aalc.twoBSender = newTwoBTxnVotesSender(aalc, (*msgs.Outcome)(aalc.outcomeOnDisk), aalc.txnId, aalc.tgcRecipients, subscribers, subscribersRMs)
 		aalc.acceptorManager.AddServerConnectionSubscriber(aalc.twoBSender)
 	}
 }
@@ -376,20 +388,16 @@ func (aalc *acceptorAwaitLocallyComplete) String() string {
 }
 
 func (aalc *acceptorAwaitLocallyComplete) TxnLocallyCompleteReceived(sender common.RMId) {
-	// TODO - not sure if we need to cope with this complexity any more
-	aalc.tlcsReceived[sender] = types.EmptyStructVal
 	if aalc.currentState == aalc {
 		delete(aalc.pendingTLC, sender)
 		aalc.maybeDelete()
 	}
 }
 
-func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(sender common.RMId) {
-	// Submitter will issues TSCs after FInc outcomes so we can receive this early, which is fine.
-	if !aalc.tscReceived {
-		aalc.tscReceived = true
-		aalc.maybeDelete()
-	}
+func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(clientId common.ClientId) {
+	// Submitters will issues TSCs after FInc outcomes so we can receive this early, which is fine.
+	delete(aalc.pendingTSC, clientId)
+	aalc.maybeDelete()
 }
 
 func (aalc *acceptorAwaitLocallyComplete) TopologyChanged(topology *configuration.Topology) {
@@ -409,13 +417,15 @@ func (aalc *acceptorAwaitLocallyComplete) TopologyChanged(topology *configuratio
 	for rmId := range rmsRemoved {
 		aalc.TxnLocallyCompleteReceived(rmId)
 	}
-	if _, found := rmsRemoved[aalc.txnSubmitter]; found {
-		aalc.TxnSubmissionCompleteReceived(aalc.txnSubmitter)
+	for clientId := range aalc.pendingTSC {
+		if _, found := rmsRemoved[clientId.RMId()]; found {
+			aalc.TxnSubmissionCompleteReceived(clientId)
+		}
 	}
 }
 
 func (aalc *acceptorAwaitLocallyComplete) maybeDelete() {
-	if aalc.currentState == aalc && aalc.tscReceived && len(aalc.pendingTLC) == 0 {
+	if aalc.currentState == aalc && len(aalc.pendingTSC) == 0 && len(aalc.pendingTLC) == 0 {
 		aalc.nextState(nil)
 	}
 }
@@ -476,46 +486,55 @@ func (adfd *acceptorDeleteFromDisk) deletionDone() (bool, error) {
 // 2B Sender
 
 type twoBTxnVotesSender struct {
-	msg          []byte
-	recipients   []common.RMId
-	submitterMsg []byte
-	submitter    common.RMId
+	recipientsMsg  []byte
+	recipients     common.RMIds
+	subscribersMsg []byte
+	subscribersRMs map[common.RMId]types.EmptyStruct
 }
 
-func newTwoBTxnVotesSender(logger log.Logger, outcome *msgs.Outcome, txnId *common.TxnId, submitter common.RMId, recipients ...common.RMId) *twoBTxnVotesSender {
-	submitterSeg := capn.NewBuffer(nil)
-	submitterMsg := msgs.NewRootMessage(submitterSeg)
-	submitterMsg.SetSubmissionOutcome(*outcome)
+func newTwoBTxnVotesSender(logger log.Logger, outcome *msgs.Outcome, txnId *common.TxnId, recipients common.RMIds, subscribers common.ClientIds, subscribersRMs map[common.RMId]types.EmptyStruct) *twoBTxnVotesSender {
+	subscribersSeg := capn.NewBuffer(nil)
+	subscribersMsg := msgs.NewRootMessage(subscribersSeg)
+	submissionOutcome := msgs.NewTxnSubmissionOutcome(subscribersSeg)
+	submissionOutcome.SetOutcome(*outcome)
+	subscribersCap := subscribersSeg.NewDataList(len(subscribers))
+	for idx, subscriber := range subscribers {
+		subscribersCap.Set(idx, subscriber[:])
+	}
+	submissionOutcome.SetSubscribers(subscribersCap)
+	subscribersMsg.SetSubmissionOutcome(submissionOutcome)
 
 	if outcome.Which() == msgs.OUTCOME_ABORT {
 		abort := outcome.Abort()
 		abort.SetResubmit() // nuke out the updates as proposers don't need them.
 	}
 
-	seg := capn.NewBuffer(nil)
-	msg := msgs.NewRootMessage(seg)
-	twoB := msgs.NewTwoBTxnVotes(seg)
-	msg.SetTwoBTxnVotes(twoB)
+	receipientsSeg := capn.NewBuffer(nil)
+	receipientsMsg := msgs.NewRootMessage(receipientsSeg)
+	twoB := msgs.NewTwoBTxnVotes(receipientsSeg)
+	receipientsMsg.SetTwoBTxnVotes(twoB)
 	twoB.SetOutcome(*outcome)
 
-	utils.DebugLog(logger, "debug", "Sending 2B.", "recipients", recipients, "submitter", submitter)
+	utils.DebugLog(logger, "debug", "Sending 2B.", "recipients", recipients, "subscribers", subscribers)
 
 	return &twoBTxnVotesSender{
-		msg:          common.SegToBytes(seg),
-		recipients:   recipients,
-		submitterMsg: common.SegToBytes(submitterSeg),
-		submitter:    submitter,
+		recipientsMsg:  common.SegToBytes(receipientsSeg),
+		recipients:     recipients,
+		subscribersMsg: common.SegToBytes(subscribersSeg),
+		subscribersRMs: subscribersRMs,
 	}
 }
 
 func (s *twoBTxnVotesSender) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
 	for _, rmId := range s.recipients {
 		if conn, found := conns[rmId]; found {
-			conn.Send(s.msg)
+			conn.Send(s.recipientsMsg)
 		}
 	}
-	if conn, found := conns[s.submitter]; found {
-		conn.Send(s.submitterMsg)
+	for rmId := range s.subscribersRMs {
+		if conn, found := conns[rmId]; found {
+			conn.Send(s.subscribersMsg)
+		}
 	}
 }
 
@@ -523,13 +542,13 @@ func (s *twoBTxnVotesSender) ConnectionLost(common.RMId, map[common.RMId]*sconn.
 
 func (s *twoBTxnVotesSender) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
 	defer done()
-	for _, recipient := range s.recipients {
-		if recipient == conn.RMId {
-			conn.Send(s.msg)
+	for _, rmId := range s.recipients {
+		if rmId == conn.RMId {
+			conn.Send(s.recipientsMsg)
 			break
 		}
 	}
-	if s.submitter == conn.RMId {
-		conn.Send(s.submitterMsg)
+	if _, found := s.subscribersRMs[conn.RMId]; found {
+		conn.Send(s.subscribersMsg)
 	}
 }

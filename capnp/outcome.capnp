@@ -5,6 +5,11 @@ $Go.import("goshawkdb.io/server/capnp");
 
 @0xe10cac715301f488;
 
+struct TxnSubmissionOutcome {
+  outcome     @0: Outcome;
+  subscribers @1: List(Data);
+}
+
 struct Outcome {
   id  @0: List(OutcomeId);
   txn @1: Data;

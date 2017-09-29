@@ -25,7 +25,7 @@ struct Message {
     flushed               @1:  Void;
     connectionError       @2:  Text;
     txnSubmission         @3:  Data;
-    submissionOutcome     @4:  Outcome.Outcome;
+    submissionOutcome     @4:  Outcome.TxnSubmissionOutcome;
     submissionComplete    @5:  TxnCompletion.TxnSubmissionComplete;
     submissionAbort       @6:  TxnCompletion.TxnSubmissionAbort;
     oneATxnVotes          @7:  PTV.OneATxnVotes;

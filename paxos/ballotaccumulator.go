@@ -21,6 +21,7 @@ type BallotAccumulator struct {
 	txn            *txnreader.TxnReader
 	vUUIdToBallots map[common.VarUUId]*varBallot
 	outcome        *outcomeEqualId
+	subscribers    common.ClientIds
 	incompleteVars int
 	dirty          bool
 }
@@ -89,7 +90,7 @@ type rmBallot struct {
 	roundNumber  paxosNumber
 }
 
-func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
+func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId, subsCap [][]byte, instances *msgs.InstancesForVar_List, logger log.Logger) *BallotAccumulator {
 	ba := NewBallotAccumulator(txn, logger)
 	ba.outcome = outcome
 	// All instances that went to disk must be complete.
@@ -117,12 +118,18 @@ func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId
 		vBallot.result = eng.BallotFromData(instancesForVar.Result())
 	}
 
+	subscribers := make(common.ClientIds, len(subsCap))
+	for idx, bites := range subsCap {
+		subscribers[idx] = *(common.MakeClientId(bites))
+	}
+	ba.subscribers = subscribers
+
 	return ba
 }
 
 // For every vUUId involved in this txn, we should see fInc * ballots:
 // one from each RM voting for each vUUId.
-func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) *outcomeEqualId {
+func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) (*outcomeEqualId, common.ClientIds) {
 	ba.txn = ba.txn.Combine(txn)
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
@@ -157,15 +164,15 @@ func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *inst
 	return ba.determineOutcome()
 }
 
-func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
-	// We must wait until we have at least F+1 results for one var,
+func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.ClientIds) {
+	// We must wait until we have at least F+1 results for all vars,
 	// otherwise we run the risk of timetravel: a slow learner could
 	// issue a badread based on not being caught up. By waiting for at
 	// least F+1 ballots for a var (they don't have to be the same
 	// ballot!), we avoid this as there must be at least one voter who
 	// isn't in the past.
-	if ba.dirty || ba.incompleteVars != 0 {
-		return nil
+	if !(ba.dirty && ba.incompleteVars == 0) {
+		return nil, nil
 	}
 	ba.dirty = false
 
@@ -177,9 +184,6 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 	br := NewBadReads()
 	utils.DebugLog(ba.logger, "debug", "determineOutcome")
 	for _, vBallot := range ba.vUUIdToBallots {
-		if len(vBallot.rmToBallot) < vBallot.voters {
-			continue
-		}
 		vUUIds = append(vUUIds, vBallot.vUUId)
 		if vBallot.result == nil {
 			vBallot.CalculateResult(br, combinedClock, commitSubscribers)
@@ -221,6 +225,7 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 		} else {
 			abort.SetRerun(br.AddToSeg(seg))
 		}
+		ba.subscribers = nil
 
 	} else {
 		outcome.SetTxn(ba.txn.Data)
@@ -228,19 +233,21 @@ func (ba *BallotAccumulator) determineOutcome() *outcomeEqualId {
 		if len(ba.vUUIdToBallots) > combinedClock.Len() {
 			panic(fmt.Sprintf("Ballot outcome clock too short! %v, %v, %v", ba.txn.Id, ba.vUUIdToBallots, combinedClock))
 		}
+		subscribers := make(common.ClientIds, 0, len(commitSubscribers))
+		for subscriber := range commitSubscribers {
+			subscribers = append(subscribers, subscriber)
+		}
+		ba.subscribers = subscribers
 	}
 
 	ba.outcome = (*outcomeEqualId)(&outcome)
-	return ba.outcome
+	return ba.outcome, ba.subscribers
 }
 
 func (ba *BallotAccumulator) AddInstancesToSeg(seg *capn.Segment) msgs.InstancesForVar_List {
 	instances := msgs.NewInstancesForVarList(seg, len(ba.vUUIdToBallots)-ba.incompleteVars)
 	idx := 0
 	for vUUId, vBallot := range ba.vUUIdToBallots {
-		if len(vBallot.rmToBallot) < vBallot.voters {
-			continue
-		}
 		vUUIdCopy := vUUId
 		instancesForVar := instances.At(idx)
 		idx++

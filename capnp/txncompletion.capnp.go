@@ -233,19 +233,21 @@ func (s TxnGloballyComplete_List) Set(i int, item TxnGloballyComplete) {
 type TxnSubmissionComplete C.Struct
 
 func NewTxnSubmissionComplete(s *C.Segment) TxnSubmissionComplete {
-	return TxnSubmissionComplete(s.NewStruct(0, 1))
+	return TxnSubmissionComplete(s.NewStruct(0, 2))
 }
 func NewRootTxnSubmissionComplete(s *C.Segment) TxnSubmissionComplete {
-	return TxnSubmissionComplete(s.NewRootStruct(0, 1))
+	return TxnSubmissionComplete(s.NewRootStruct(0, 2))
 }
 func AutoNewTxnSubmissionComplete(s *C.Segment) TxnSubmissionComplete {
-	return TxnSubmissionComplete(s.NewStructAR(0, 1))
+	return TxnSubmissionComplete(s.NewStructAR(0, 2))
 }
 func ReadRootTxnSubmissionComplete(s *C.Segment) TxnSubmissionComplete {
 	return TxnSubmissionComplete(s.Root(0).ToStruct())
 }
-func (s TxnSubmissionComplete) TxnId() []byte     { return C.Struct(s).GetObject(0).ToData() }
-func (s TxnSubmissionComplete) SetTxnId(v []byte) { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s TxnSubmissionComplete) TxnId() []byte        { return C.Struct(s).GetObject(0).ToData() }
+func (s TxnSubmissionComplete) SetTxnId(v []byte)    { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s TxnSubmissionComplete) ClientId() []byte     { return C.Struct(s).GetObject(1).ToData() }
+func (s TxnSubmissionComplete) SetClientId(v []byte) { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s TxnSubmissionComplete) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -261,6 +263,25 @@ func (s TxnSubmissionComplete) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.TxnId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"clientId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ClientId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -306,6 +327,25 @@ func (s TxnSubmissionComplete) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("clientId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ClientId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -322,7 +362,7 @@ func (s TxnSubmissionComplete) MarshalCapLit() ([]byte, error) {
 type TxnSubmissionComplete_List C.PointerList
 
 func NewTxnSubmissionCompleteList(s *C.Segment, sz int) TxnSubmissionComplete_List {
-	return TxnSubmissionComplete_List(s.NewCompositeList(0, 1, sz))
+	return TxnSubmissionComplete_List(s.NewCompositeList(0, 2, sz))
 }
 func (s TxnSubmissionComplete_List) Len() int { return C.PointerList(s).Len() }
 func (s TxnSubmissionComplete_List) At(i int) TxnSubmissionComplete {

@@ -10,6 +10,184 @@ import (
 	"io"
 )
 
+type TxnSubmissionOutcome C.Struct
+
+func NewTxnSubmissionOutcome(s *C.Segment) TxnSubmissionOutcome {
+	return TxnSubmissionOutcome(s.NewStruct(0, 2))
+}
+func NewRootTxnSubmissionOutcome(s *C.Segment) TxnSubmissionOutcome {
+	return TxnSubmissionOutcome(s.NewRootStruct(0, 2))
+}
+func AutoNewTxnSubmissionOutcome(s *C.Segment) TxnSubmissionOutcome {
+	return TxnSubmissionOutcome(s.NewStructAR(0, 2))
+}
+func ReadRootTxnSubmissionOutcome(s *C.Segment) TxnSubmissionOutcome {
+	return TxnSubmissionOutcome(s.Root(0).ToStruct())
+}
+func (s TxnSubmissionOutcome) Outcome() Outcome            { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
+func (s TxnSubmissionOutcome) SetOutcome(v Outcome)        { C.Struct(s).SetObject(0, C.Object(v)) }
+func (s TxnSubmissionOutcome) Subscribers() C.DataList     { return C.DataList(C.Struct(s).GetObject(1)) }
+func (s TxnSubmissionOutcome) SetSubscribers(v C.DataList) { C.Struct(s).SetObject(1, C.Object(v)) }
+func (s TxnSubmissionOutcome) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"outcome\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Outcome()
+		err = s.WriteJSON(b)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"subscribers\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s TxnSubmissionOutcome) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s TxnSubmissionOutcome) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("outcome = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Outcome()
+		err = s.WriteCapLit(b)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("subscribers = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribers()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				buf, err = json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				_, err = b.Write(buf)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s TxnSubmissionOutcome) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type TxnSubmissionOutcome_List C.PointerList
+
+func NewTxnSubmissionOutcomeList(s *C.Segment, sz int) TxnSubmissionOutcome_List {
+	return TxnSubmissionOutcome_List(s.NewCompositeList(0, 2, sz))
+}
+func (s TxnSubmissionOutcome_List) Len() int { return C.PointerList(s).Len() }
+func (s TxnSubmissionOutcome_List) At(i int) TxnSubmissionOutcome {
+	return TxnSubmissionOutcome(C.PointerList(s).At(i).ToStruct())
+}
+func (s TxnSubmissionOutcome_List) ToArray() []TxnSubmissionOutcome {
+	n := s.Len()
+	a := make([]TxnSubmissionOutcome, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s TxnSubmissionOutcome_List) Set(i int, item TxnSubmissionOutcome) {
+	C.PointerList(s).Set(i, C.Object(item))
+}
+
 type Outcome C.Struct
 type OutcomeAbort Outcome
 type Outcome_Which uint16

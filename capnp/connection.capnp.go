@@ -326,8 +326,10 @@ func (s Message) SetTxnSubmission(v []byte) {
 	C.Struct(s).Set16(0, 3)
 	C.Struct(s).SetObject(0, s.Segment.NewData(v))
 }
-func (s Message) SubmissionOutcome() Outcome { return Outcome(C.Struct(s).GetObject(0).ToStruct()) }
-func (s Message) SetSubmissionOutcome(v Outcome) {
+func (s Message) SubmissionOutcome() TxnSubmissionOutcome {
+	return TxnSubmissionOutcome(C.Struct(s).GetObject(0).ToStruct())
+}
+func (s Message) SetSubmissionOutcome(v TxnSubmissionOutcome) {
 	C.Struct(s).Set16(0, 4)
 	C.Struct(s).SetObject(0, C.Object(v))
 }
