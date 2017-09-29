@@ -20,6 +20,8 @@ func (s Txn) Id() []byte                       { return C.Struct(s).GetObject(0)
 func (s Txn) SetId(v []byte)                   { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
 func (s Txn) IsTopology() bool                 { return C.Struct(s).Get1(0) }
 func (s Txn) SetIsTopology(v bool)             { C.Struct(s).Set1(0, v) }
+func (s Txn) Subscribe() bool                  { return C.Struct(s).Get1(1) }
+func (s Txn) SetSubscribe(v bool)              { C.Struct(s).Set1(1, v) }
 func (s Txn) Actions() []byte                  { return C.Struct(s).GetObject(1).ToData() }
 func (s Txn) SetActions(v []byte)              { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
 func (s Txn) Allocations() Allocation_List     { return Allocation_List(C.Struct(s).GetObject(2)) }
@@ -62,6 +64,25 @@ func (s Txn) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.IsTopology()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"subscribe\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribe()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -207,6 +228,25 @@ func (s Txn) WriteCapLit(w io.Writer) error {
 	}
 	{
 		s := s.IsTopology()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("subscribe = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscribe()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err

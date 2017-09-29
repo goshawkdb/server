@@ -8,6 +8,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/poisson"
 	"goshawkdb.io/server/utils/status"
@@ -17,10 +18,6 @@ import (
 	"time"
 )
 
-type VarCommitSubscriber struct {
-	Cancel func(v *Var)
-}
-
 type Var struct {
 	UUId            *common.VarUUId
 	positions       *common.Positions
@@ -28,7 +25,7 @@ type Var struct {
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
-	subscribers     map[common.ClientId]VarCommitSubscriber
+	subscribers     map[common.ClientId]types.EmptyStruct
 	subscriberIds   common.ClientIds
 	exe             *dispatcher.Executor
 	db              *db.Databases
@@ -92,7 +89,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
-		subscribers:     make(map[common.ClientId]VarCommitSubscriber),
+		subscribers:     make(map[common.ClientId]types.EmptyStruct),
 		subscriberIds:   nil,
 		exe:             exe,
 		db:              db,
@@ -104,6 +101,14 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 	utils.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
 	v.poisson.AddThen(enqueuedAt)
+
+	if action.Txn.TxnReader.Txn.Subscribe() {
+		clientId := action.Id.ClientId(v.vm.RMId)
+		if _, found := v.subscribers[clientId]; !found {
+			v.subscribers[clientId] = types.EmptyStructVal
+			v.subscriberIds = append(v.subscriberIds, clientId)
+		}
+	}
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
@@ -255,17 +260,8 @@ func (v *Var) isIdle() bool {
 	return len(v.subscribers) == 0 && v.writeInProgress == nil && v.curFrame.isIdle()
 }
 
-func (v *Var) isOnDisk(cancelSubs bool) bool {
-	if v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty() {
-		if cancelSubs {
-			for _, sub := range v.subscribers {
-				sub.Cancel(v)
-			}
-			v.subscriberIds = nil
-		}
-		return true
-	}
-	return false
+func (v *Var) isOnDisk() bool {
+	return v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty()
 }
 
 func (v *Var) applyToSelf(fun func()) {
@@ -296,6 +292,6 @@ func (v *Var) Status(sc *status.StatusConsumer) {
 	v.curFrame.Status(sc.Fork())
 	sc.Emit(fmt.Sprintf("- SubscriberIds: %v", v.subscriberIds))
 	sc.Emit(fmt.Sprintf("- Idle? %v", v.isIdle()))
-	sc.Emit(fmt.Sprintf("- IsOnDisk? %v", v.isOnDisk(false)))
+	sc.Emit(fmt.Sprintf("- IsOnDisk? %v", v.isOnDisk()))
 	sc.Join()
 }

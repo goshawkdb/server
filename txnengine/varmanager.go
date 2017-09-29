@@ -120,7 +120,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var), createIfMissing bool, uuid *com
 func (vm *VarManager) checkAllDisk() {
 	if od := vm.onDisk; od != nil {
 		for _, v := range vm.active {
-			if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ && !v.isOnDisk(true) {
+			if v.UUId.Compare(configuration.TopologyVarUUId) != common.EQ && !v.isOnDisk() {
 				return
 			}
 		}

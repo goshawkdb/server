@@ -35,16 +35,21 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 	case msgs.MESSAGE_TXNSUBMISSION:
 		r.ProposerDispatcher.TxnReceived(sender, txnreader.TxnReaderFromData(msg.TxnSubmission()))
 	case msgs.MESSAGE_SUBMISSIONOUTCOME:
-		outcome := msg.SubmissionOutcome()
+		subOutcome := msg.SubmissionOutcome()
+		outcome := subOutcome.Outcome()
 		txn := txnreader.TxnReaderFromData(outcome.Txn())
 		txnId := txn.Id
-		connNumber := txnId.ConnectionCount()
-		bootNumber := txnId.BootCount()
-		if conn := r.ConnectionManager.GetClient(bootNumber, connNumber); conn == nil {
-			// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-			senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.ConnectionManager, sender)
-		} else {
-			conn.SubmissionOutcomeReceived(sender, txn, &outcome)
+		subscribers := subOutcome.Subscribers()
+		for idx, l := 0, subscribers.Len(); idx < l; idx++ {
+			clientId := common.MakeClientId(subscribers.At(idx))
+			connNumber := clientId.ConnectionCount()
+			bootNumber := clientId.BootCount()
+			if conn := r.ConnectionManager.GetClient(bootNumber, connNumber); conn == nil {
+				// OSS is safe here - it's the default action on receipt of outcome for unknown client.
+				senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.ConnectionManager, sender)
+			} else {
+				conn.SubmissionOutcomeReceived(sender, txn, &outcome)
+			}
 		}
 	case msgs.MESSAGE_SUBMISSIONCOMPLETE:
 		tsc := msg.SubmissionComplete()
