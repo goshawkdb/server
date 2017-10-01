@@ -78,7 +78,7 @@ func ProposerFromData(pm *ProposerManager, txnId *common.TxnId, data []byte, top
 	// and just need to send out TLCs.
 	state := msgs.ReadRootProposerState(seg)
 	acceptorsCap := state.Acceptors()
-	acceptors := make([]common.RMId, acceptorsCap.Len())
+	acceptors := make(common.RMIds, acceptorsCap.Len())
 	for idx := range acceptors {
 		acceptors[idx] = common.RMId(acceptorsCap.At(idx))
 	}
@@ -171,7 +171,7 @@ func (p *Proposer) TopologyChanged(topology *configuration.Topology) {
 	}
 	// create new acceptors slice because the initial slice can be
 	// shared with proposals.
-	acceptors := make([]common.RMId, 0, len(p.acceptors))
+	acceptors := make(common.RMIds, 0, len(p.acceptors))
 	for _, rmId := range p.acceptors {
 		if _, found := rmsRemoved[rmId]; !found {
 			acceptors = append(acceptors, rmId)

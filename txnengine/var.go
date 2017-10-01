@@ -9,6 +9,7 @@ import (
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
 	"goshawkdb.io/server/types"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/poisson"
 	"goshawkdb.io/server/utils/status"
@@ -25,8 +26,8 @@ type Var struct {
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
-	subscribers     map[common.ClientId]types.EmptyStruct
-	subscriberIds   common.ClientIds
+	subscribers     map[common.TxnId]types.EmptyStruct
+	subscriberIds   common.TxnIds
 	exe             *dispatcher.Executor
 	db              *db.Databases
 	vm              *VarManager
@@ -89,7 +90,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
-		subscribers:     make(map[common.ClientId]types.EmptyStruct),
+		subscribers:     make(map[common.TxnId]types.EmptyStruct),
 		subscriberIds:   nil,
 		exe:             exe,
 		db:              db,
@@ -98,16 +99,69 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	}
 }
 
+func (v *Var) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
+	// We iterate through subscribers and not subscriberIds because
+	// it's safe to delete from a map whilst iterating.
+	for subId := range v.subscribers {
+		subRM := subId.RMId(v.vm.RMId)
+		if conn, found := conns[subRM]; !found || (conn.BootCount != subId.BootCount() && subId.BootCount() > 0) {
+			v.removeSubscriber(subId)
+		}
+	}
+}
+
+func (v *Var) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
+	for subId := range v.subscribers {
+		subRM := subId.RMId(v.vm.RMId)
+		if subRM == rmId {
+			v.removeSubscriber(subId)
+		}
+	}
+}
+
+func (v *Var) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
+	for subId := range v.subscribers {
+		subRM := subId.RMId(v.vm.RMId)
+		if subRM == conn.RMId && conn.BootCount != subId.BootCount() && subId.BootCount() > 0 {
+			v.removeSubscriber(subId)
+		}
+	}
+	done()
+}
+
+func (v *Var) addSubscriber(subId common.TxnId) {
+	if _, found := v.subscribers[subId]; !found {
+		v.subscribers[subId] = types.EmptyStructVal
+		v.subscriberIds = append(v.subscriberIds, subId)
+		if len(v.subscribers) == 1 {
+			v.vm.AddServerConnectionSubscriber(v)
+		}
+	}
+}
+
+func (v *Var) removeSubscriber(subId common.TxnId) {
+	if _, found := v.subscribers[subId]; found {
+		delete(v.subscribers, subId)
+		for idx, id := range v.subscriberIds {
+			if id.Compare(&subId) == common.EQ {
+				v.subscriberIds[idx] = v.subscriberIds[0]
+				v.subscriberIds = v.subscriberIds[1:]
+				break
+			}
+		}
+		if len(v.subscribers) == 0 {
+			v.vm.RemoveServerConnectionSubscriber(v)
+			v.maybeMakeInactive()
+		}
+	}
+}
+
 func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 	utils.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
 	v.poisson.AddThen(enqueuedAt)
 
 	if action.Txn.TxnReader.Txn.Subscribe() {
-		clientId := action.Id.ClientId(v.vm.RMId)
-		if _, found := v.subscribers[clientId]; !found {
-			v.subscribers[clientId] = types.EmptyStructVal
-			v.subscriberIds = append(v.subscriberIds, clientId)
-		}
+		v.addSubscriber(*action.Id)
 	}
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()

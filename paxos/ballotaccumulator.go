@@ -21,7 +21,7 @@ type BallotAccumulator struct {
 	txn            *txnreader.TxnReader
 	vUUIdToBallots map[common.VarUUId]*varBallot
 	outcome        *outcomeEqualId
-	subscribers    common.ClientIds
+	subscribers    common.TxnIds
 	incompleteVars int
 	dirty          bool
 }
@@ -118,9 +118,9 @@ func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId
 		vBallot.result = eng.BallotFromData(instancesForVar.Result())
 	}
 
-	subscribers := make(common.ClientIds, len(subsCap))
+	subscribers := make(common.TxnIds, len(subsCap))
 	for idx, bites := range subsCap {
-		subscribers[idx] = *(common.MakeClientId(bites))
+		subscribers[idx] = *(common.MakeTxnId(bites))
 	}
 	ba.subscribers = subscribers
 
@@ -129,7 +129,7 @@ func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId
 
 // For every vUUId involved in this txn, we should see fInc * ballots:
 // one from each RM voting for each vUUId.
-func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) (*outcomeEqualId, common.ClientIds) {
+func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *instance, vUUId *common.VarUUId, txn *txnreader.TxnReader) (*outcomeEqualId, common.TxnIds) {
 	ba.txn = ba.txn.Combine(txn)
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
@@ -164,7 +164,7 @@ func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *inst
 	return ba.determineOutcome()
 }
 
-func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.ClientIds) {
+func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.TxnIds) {
 	// We must wait until we have at least F+1 results for all vars,
 	// otherwise we run the risk of timetravel: a slow learner could
 	// issue a badread based on not being caught up. By waiting for at
@@ -180,7 +180,7 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.ClientI
 	aborted, deadlock := false, false
 
 	vUUIds := common.VarUUIds(make([]*common.VarUUId, 0, len(ba.vUUIdToBallots)))
-	commitSubscribers := make(map[common.ClientId]types.EmptyStruct)
+	commitSubscribers := make(map[common.TxnId]types.EmptyStruct)
 	br := NewBadReads()
 	utils.DebugLog(ba.logger, "debug", "determineOutcome")
 	for _, vBallot := range ba.vUUIdToBallots {
@@ -189,8 +189,8 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.ClientI
 			vBallot.CalculateResult(br, combinedClock, commitSubscribers)
 		} else if !vBallot.result.Aborted() {
 			combinedClock.MergeInMax(vBallot.result.Clock)
-			for _, clientId := range vBallot.result.Subscribers {
-				commitSubscribers[clientId] = types.EmptyStructVal
+			for _, subId := range vBallot.result.Subscribers {
+				commitSubscribers[subId] = types.EmptyStructVal
 			}
 		}
 		aborted = aborted || vBallot.result.Aborted()
@@ -233,9 +233,9 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.ClientI
 		if len(ba.vUUIdToBallots) > combinedClock.Len() {
 			panic(fmt.Sprintf("Ballot outcome clock too short! %v, %v, %v", ba.txn.Id, ba.vUUIdToBallots, combinedClock))
 		}
-		subscribers := make(common.ClientIds, 0, len(commitSubscribers))
-		for subscriber := range commitSubscribers {
-			subscribers = append(subscribers, subscriber)
+		subscribers := make(common.TxnIds, 0, len(commitSubscribers))
+		for subId := range commitSubscribers {
+			subscribers = append(subscribers, subId)
 		}
 		ba.subscribers = subscribers
 	}
@@ -277,7 +277,7 @@ type varBallotReducer struct {
 	badReads
 }
 
-func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClockMutable, commitSubscribers map[common.ClientId]types.EmptyStruct) {
+func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClockMutable, commitSubscribers map[common.TxnId]types.EmptyStruct) {
 	reducer := &varBallotReducer{
 		vUUId:         vb.vUUId,
 		BallotBuilder: eng.NewBallotBuilder(vb.vUUId, eng.Commit, vectorclock.NewVectorClock().AsMutable(), nil),
@@ -288,8 +288,8 @@ func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClock
 	}
 	if !reducer.Aborted() {
 		clock.MergeInMax(reducer.Clock)
-		for _, clientId := range reducer.Subscribers {
-			commitSubscribers[clientId] = types.EmptyStructVal
+		for _, subId := range reducer.Subscribers {
+			commitSubscribers[subId] = types.EmptyStructVal
 		}
 	}
 	vb.result = reducer.ToBallot()

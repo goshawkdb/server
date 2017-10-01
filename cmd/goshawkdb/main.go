@@ -241,6 +241,7 @@ func (s *server) start() {
 	// msg from TopologyTransmogrifier so there is still sufficient
 	// write barriers.
 	router.Dispatchers = dispatchers
+	cm.RegisterSelf()
 	s.addStatusEmitter(router)
 	s.addOnShutdown(router.ShutdownSync)
 

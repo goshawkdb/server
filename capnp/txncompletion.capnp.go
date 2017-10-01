@@ -246,8 +246,10 @@ func ReadRootTxnSubmissionComplete(s *C.Segment) TxnSubmissionComplete {
 }
 func (s TxnSubmissionComplete) TxnId() []byte        { return C.Struct(s).GetObject(0).ToData() }
 func (s TxnSubmissionComplete) SetTxnId(v []byte)    { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s TxnSubmissionComplete) ClientId() []byte     { return C.Struct(s).GetObject(1).ToData() }
-func (s TxnSubmissionComplete) SetClientId(v []byte) { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s TxnSubmissionComplete) SubscriberId() []byte { return C.Struct(s).GetObject(1).ToData() }
+func (s TxnSubmissionComplete) SetSubscriberId(v []byte) {
+	C.Struct(s).SetObject(1, s.Segment.NewData(v))
+}
 func (s TxnSubmissionComplete) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -276,12 +278,12 @@ func (s TxnSubmissionComplete) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"clientId\":")
+	_, err = b.WriteString("\"subscriberId\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.ClientId()
+		s := s.SubscriberId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -331,12 +333,12 @@ func (s TxnSubmissionComplete) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("clientId = ")
+	_, err = b.WriteString("subscriberId = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.ClientId()
+		s := s.SubscriberId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err

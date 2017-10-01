@@ -330,9 +330,9 @@ func (am *AcceptorManager) TxnLocallyCompleteReceived(sender common.RMId, txnId 
 
 func (am *AcceptorManager) TxnSubmissionCompleteReceived(sender common.RMId, txnId *common.TxnId, tsc msgs.TxnSubmissionComplete) {
 	if aInst, found := am.acceptors[*txnId]; found && aInst.acceptor != nil {
-		clientId := common.MakeClientId(tsc.ClientId())
-		utils.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "clientId", clientId)
-		aInst.acceptor.TxnSubmissionCompleteReceived(*clientId)
+		subId := common.MakeTxnId(tsc.SubscriberId())
+		utils.DebugLog(am.logger, "debug", "TSC received. Acceptor found.", "TxnId", txnId, "subscriberId", subId)
+		aInst.acceptor.TxnSubmissionCompleteReceived(*subId)
 	}
 }
 

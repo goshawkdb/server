@@ -280,7 +280,7 @@ func (oneB *proposalOneB) String() string                    { return "ProposalI
 
 func (oneB *proposalOneB) init(pi *proposalInstance) {
 	oneB.proposalInstance = pi
-	oneB.promisesReceivedFrom = make([]common.RMId, 0, oneB.fInc)
+	oneB.promisesReceivedFrom = make(common.RMIds, 0, oneB.fInc)
 }
 
 func (oneB *proposalOneB) start() {

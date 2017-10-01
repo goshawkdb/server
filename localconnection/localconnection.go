@@ -121,19 +121,21 @@ func (lc *LocalConnection) Status(sc *status.StatusConsumer) {
 type localConnectionMsgOutcomeReceived struct {
 	*LocalConnection
 	sender  common.RMId
+	subId   *common.TxnId
 	txn     *txnreader.TxnReader
 	outcome *msgs.Outcome
 }
 
 func (msg localConnectionMsgOutcomeReceived) Exec() (bool, error) {
 	utils.DebugLog(msg.inner.Logger, "debug", "Received submission outcome.", "TxnId", msg.txn.Id)
-	return false, msg.submitter.SubmissionOutcomeReceived(msg.sender, msg.txn, msg.outcome)
+	return false, msg.submitter.SubmissionOutcomeReceived(msg.sender, msg.subId, msg.txn, msg.outcome)
 }
 
-func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
+func (lc *LocalConnection) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	lc.EnqueueMsg(localConnectionMsgOutcomeReceived{
 		LocalConnection: lc,
 		sender:          sender,
+		subId:           subId,
 		txn:             txn,
 		outcome:         outcome,
 	})

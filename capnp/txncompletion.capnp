@@ -14,8 +14,8 @@ struct TxnGloballyComplete {
 }
 
 struct TxnSubmissionComplete {
-  txnId    @0: Data;
-  clientId @1: Data;
+  txnId        @0: Data;
+  subscriberId @1: Data;
 }
 
 struct TxnSubmissionAbort {

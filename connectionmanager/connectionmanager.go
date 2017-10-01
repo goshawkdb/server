@@ -89,15 +89,19 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, certificate []byte
 		panic(err) // "impossible"
 	}
 
-	// register ourself
-	cm.ServerEstablished(&sconn.ServerConnection{
-		RMId:         rmId,
-		BootCount:    bootCount,
-		Sender:       router,
-		ShutdownSync: func() {},
-	})
-
 	return cm
+}
+
+func (cm *ConnectionManager) RegisterSelf() {
+	// We do not try to use Flushed here because at this point we have
+	// no idea how much of the various different dispatchers have fully
+	// started up and registered.
+	cm.ServerEstablished(&sconn.ServerConnection{
+		RMId:         cm.self,
+		BootCount:    cm.bootCount,
+		Sender:       cm.router,
+		ShutdownSync: func() {}, // main takes care of shutting down router
+	})
 }
 
 type connectionManagerMsgServerEstablished struct {
@@ -687,16 +691,16 @@ func (subs serverConnSubscribers) ServerConnEstablished(cd *connectionManagerMsg
 		wg.Add(1)
 		ob.ConnectionEstablished(cd.ServerConnection, rmToServerCopy, wg.Done)
 	}
-	// we do this because wg is edge triggered, so if subs.subscribers
-	// is empty, we have to have something that goes from 1 to 0
-	wg.Done()
-	go func() {
-		if callback != nil {
+	if callback != nil {
+		// we do this because wg is edge triggered, so if subs.subscribers
+		// is empty, we have to have something that goes from 1 to 0
+		wg.Done()
+		go func() {
 			utils.DebugLog(subs.inner.Logger, "debug", "ServerConnEstablished. Expecting callbacks.")
 			wg.WaitUntilEither(subs.ConnectionManager.Mailbox.Terminated)
 			callback()
-		}
-	}()
+		}()
+	}
 }
 
 func (subs serverConnSubscribers) ServerConnLost(rmId common.RMId) {

@@ -177,13 +177,13 @@ func (oa *OutcomeAccumulator) getOutcome(outcome *outcomeEqualId) *txnOutcome {
 	if empty == nil {
 		empty = &txnOutcome{
 			outcome:              outcome,
-			acceptors:            make([]common.RMId, len(oa.acceptors)),
+			acceptors:            make(common.RMIds, len(oa.acceptors)),
 			outcomeReceivedCount: 0,
 		}
 		oa.allKnownOutcomes = append(oa.allKnownOutcomes, empty)
 	} else {
 		empty.outcome = outcome
-		empty.acceptors = make([]common.RMId, len(oa.acceptors))
+		empty.acceptors = make(common.RMIds, len(oa.acceptors))
 		empty.outcomeReceivedCount = 0
 	}
 	return empty

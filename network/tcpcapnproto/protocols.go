@@ -545,12 +545,21 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 		tcc.reader.Stop()
 		tcc.reader = nil
 	}
-	if tcc.submitter != nil {
-		tcc.submitter.Shutdown()
+	// The submitter, and indeed this entire connection (albeit without
+	// the socket), must hang around until all the txns within the
+	// submitter have been completed - one way or another. Otherwise,
+	// if this connection dies but this node stays up, we could create
+	// dangling transactions.
+	onceEmpty := func() {
+		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
+		tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
+		tcc.ShutdownCompleted()
 	}
-	tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
-	tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
-	tcc.ShutdownCompleted()
+	if tcc.submitter == nil {
+		onceEmpty()
+	} else {
+		tcc.submitter.Shutdown(onceEmpty)
+	}
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }
 
@@ -558,9 +567,9 @@ func (tcc *TLSCapnpClient) String() string {
 	return fmt.Sprintf("TLSCapnpClient %d from %s", tcc.connectionNumber, tcc.remoteHost)
 }
 
-func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
+func (tcc *TLSCapnpClient) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	tcc.EnqueueFuncAsync(func() (bool, error) {
-		return false, tcc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
+		return false, tcc.submitter.SubmissionOutcomeReceived(sender, subId, txn, outcome)
 	})
 }
 

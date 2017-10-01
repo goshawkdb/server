@@ -7,8 +7,8 @@ import (
 	"goshawkdb.io/server"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types/connectionmanager"
 	"goshawkdb.io/server/types/localconnection"
-	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils/status"
 )
 
@@ -17,7 +17,7 @@ type VarDispatcher struct {
 	varmanagers []*VarManager
 }
 
-func NewVarDispatcher(count uint8, rmId common.RMId, cm topology.TopologyPublisher, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarDispatcher {
+func NewVarDispatcher(count uint8, rmId common.RMId, cm connectionmanager.ConnectionManager, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarDispatcher {
 	vd := &VarDispatcher{
 		varmanagers: make([]*VarManager, count),
 	}

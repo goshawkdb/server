@@ -19,13 +19,15 @@ type Dispatchers struct {
 }
 
 func NewDispatchers(cm connectionmanager.ConnectionManager, rmId common.RMId, bootCount uint32, count uint8, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *Dispatchers {
-	// It actually doesn't matter at this point what order we start up
-	// the acceptors. This is because we are called from the
-	// ConnectionManager constructor, and its actor loop hasn't been
-	// started at this point. Thus whilst AddSender msgs can be sent,
-	// none will be processed until after we return from this. So an
-	// acceptor sending 2B msgs to a proposer will not get sent until
-	// after all the proposers have been loaded off disk.
+	// All these dispatchers will synchronously create workers and do
+	// loading. That loading will async call
+	// cm.AddServerConnectionSubscriber and such like. This could lead
+	// to local acceptors trying to message local proposers (eg sending
+	// 2B/outcome messages) which is racy - AcceptorDispatcher is
+	// created before ProposerDispatcher. To avoid this problem, the cm
+	// starts off without the local node registered and only after this
+	// call has completed is the cm told to register itself, but which
+	// point we can be sure all the ProposerDispatchers/Managers exist.
 
 	d := &Dispatchers{
 		db:                 db,

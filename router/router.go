@@ -41,14 +41,14 @@ func (r Router) Dispatch(sender common.RMId, msgType msgs.Message_Which, msg msg
 		txnId := txn.Id
 		subscribers := subOutcome.Subscribers()
 		for idx, l := 0, subscribers.Len(); idx < l; idx++ {
-			clientId := common.MakeClientId(subscribers.At(idx))
-			connNumber := clientId.ConnectionCount()
-			bootNumber := clientId.BootCount()
+			subId := common.MakeTxnId(subscribers.At(idx))
+			connNumber := subId.ConnectionCount()
+			bootNumber := subId.BootCount()
 			if conn := r.ConnectionManager.GetClient(bootNumber, connNumber); conn == nil {
 				// OSS is safe here - it's the default action on receipt of outcome for unknown client.
-				senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId), r.ConnectionManager, sender)
+				senders.NewOneShotSender(r.logger, paxos.MakeTxnSubmissionCompleteMsg(txnId, subId), r.ConnectionManager, sender)
 			} else {
-				conn.SubmissionOutcomeReceived(sender, txn, &outcome)
+				conn.SubmissionOutcomeReceived(sender, subId, txn, &outcome)
 			}
 		}
 	case msgs.MESSAGE_SUBMISSIONCOMPLETE:

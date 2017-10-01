@@ -216,12 +216,21 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 		wmpc.reader.Stop()
 		wmpc.reader = nil
 	}
-	if wmpc.submitter != nil {
-		wmpc.submitter.Shutdown()
+	// The submitter, and indeed this entire connection (albeit without
+	// the socket), must hang around until all the txns within the
+	// submitter have been completed - one way or another. Otherwise,
+	// if this connection dies but this node stays up, we could create
+	// dangling transactions.
+	onceEmpty := func() {
+		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
+		wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
+		wmpc.ShutdownCompleted()
 	}
-	wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
-	wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
-	wmpc.ShutdownCompleted()
+	if wmpc.submitter == nil {
+		onceEmpty()
+	} else {
+		wmpc.submitter.Shutdown(onceEmpty)
+	}
 	if wmpc.beater != nil {
 		wmpc.beater.Stop()
 		wmpc.beater = nil
@@ -232,9 +241,9 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	}
 }
 
-func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
+func (wmpc *wssMsgPackClient) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) {
 	wmpc.EnqueueFuncAsync(func() (bool, error) {
-		return false, wmpc.submitter.SubmissionOutcomeReceived(sender, txn, outcome)
+		return false, wmpc.submitter.SubmissionOutcomeReceived(sender, subId, txn, outcome)
 	})
 }
 

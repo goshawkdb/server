@@ -15,7 +15,6 @@ func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationC
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
 	txnCap.SetId(tr.client.Id())
-	txnCap.SetRetry(tr.client.Retry())
 	txnCap.SetIsTopology(isTopologyTxn)
 	txnCap.SetTwoFInc(tr.topology.TwoFInc)
 	txnCap.SetTopologyVersion(tr.topology.Version)

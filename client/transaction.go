@@ -34,6 +34,7 @@ type TransactionSubmitter struct {
 	actor               actor.EnqueueActor
 	rng                 *rand.Rand
 	bufferedSubmissions []func() // only needed for client txns
+	shuttingDown        func()
 }
 
 func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger) *TransactionSubmitter {
@@ -48,13 +49,18 @@ func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.S
 	}
 }
 
-func (ts *TransactionSubmitter) Shutdown() {
-	for _, tr := range ts.txns {
-		if err := tr.terminate(nil); err != nil {
-			ts.logger.Log("error", err)
+func (ts *TransactionSubmitter) Shutdown(onceEmpty func()) {
+	ts.shuttingDown = onceEmpty
+	if len(ts.txns) == 0 {
+		onceEmpty()
+	} else {
+		for subId, tr := range ts.txns {
+			subIdCopy := subId
+			if err := tr.terminate(nil, &subIdCopy); err != nil {
+				ts.logger.Log("error", err)
+			}
 		}
 	}
-	ts.txns = nil
 }
 
 func (ts *TransactionSubmitter) Status(sc *status.StatusConsumer) {
@@ -67,12 +73,12 @@ func (ts *TransactionSubmitter) Status(sc *status.StatusConsumer) {
 	sc.Join()
 }
 
-func (ts *TransactionSubmitter) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
-	if tr, found := ts.txns[*txn.Id]; found {
-		return tr.SubmissionOutcomeReceived(sender, txn, outcome)
+func (ts *TransactionSubmitter) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
+	if tr, found := ts.txns[*subId]; found {
+		return tr.SubmissionOutcomeReceived(sender, subId, txn, outcome)
 	} else {
 		// OSS is safe here - it's the default action on receipt of an unknown txnid
-		senders.NewOneShotSender(ts.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id), ts.connPub, sender)
+		senders.NewOneShotSender(ts.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, subId), ts.connPub, sender)
 		return nil
 	}
 }
@@ -126,11 +132,12 @@ func (ts *TransactionSubmitter) AddTransactionRecord(tr *TransactionRecord) {
 	if _, found := ts.txns[*tr.Id]; found {
 		panic("Transaction already exists! " + tr.Id.String())
 	}
-	ts.txns[*tr.Id] = tr
+	if tr.shuttingDown == nil {
+		ts.txns[*tr.Id] = tr
+	}
 }
 
 type transactionOutcomeReceiver interface {
-	Terminated(*TransactionRecord) error
 	Committed(*txnreader.TxnReader, *TransactionRecord) error
 	Aborted(*txnreader.TxnReader, *TransactionRecord) error
 }
@@ -154,6 +161,9 @@ type TransactionRecord struct {
 }
 
 func (tr *TransactionRecord) Submit() {
+	if tr.shuttingDown != nil {
+		return
+	}
 	tr.birthday = time.Now()
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
@@ -178,57 +188,60 @@ func (tr *TransactionRecord) Submit() {
 	}
 }
 
-func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
+func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	if tr.outcome, _ = tr.accumulator.BallotOutcomeReceived(sender, outcome); tr.outcome != nil {
 		delete(tr.txns, *txn.Id)
-		return tr.terminate(txn)
+		err := tr.terminate(txn, subId)
+		if tr.shuttingDown != nil && len(tr.txns) == 0 {
+			tr.shuttingDown()
+		}
+		return err
 	}
 	return nil
 }
 
-func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader) error {
-	if tr.sender != nil {
-		tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
-		tr.sender = nil
-	}
-	// If we're a retry then we have a specific Abort message to
-	// send which helps tidy up garbage in the case that this node
-	// *isn't* going down (connection dying only, and !completed).
+func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader, subId *common.TxnId) error {
+	completed := txn != nil
+	// If this node is going down then we have to rely on others
+	// noticing, and tidying up for us.
 	//
-	// But, if we're not a retry, then we must *not* cancel the
-	// sender (unless completed!): in the case that this node
-	// *isn't* going down then no one else will react to the loss of
-	// this connection and so we could end up with a dangling
-	// transaction if the txnSender only manages to send to some but
-	// not all active voters.
+	// If the node is staying up, but this client connection is going
+	// down then we must hang around to tidy up ourselves (otherwise we
+	// could be left with dangling txns if our txnsubmitter only sent
+	// to some but not all proposers).
+	//
+	// So we only remove stuff when we really are completed.
+	if completed {
+		if tr.sender != nil {
+			tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
+			tr.sender = nil
+		}
 
-	// TODO ^^ that comment is wrong - TSC doesn't go to voters! Also,
-	// there's the chance here that the TSC is going to acceptors
-	// before the acceptor has received any votes! I think the TSCs
-	// should be going only to the known acceptors at this point, not
-	// all of them.
+		// We now send TSC to all acceptors. There is a chance that some
+		// will not have received any votes yet so we have the risk of
+		// TSCs arriving first. But the acceptors will ignore that, so
+		// it's safe, and eventually when they do send us an outcome,
+		// we'll respond with another TSC - if we're completed then this
+		// tr will have been removed from tr.txns - so this is all safe
+		// really.
+		senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id, subId), tr.connPub, tr.acceptors...)
 
-	// OSS is safe here - see above. In the case that the node's
-	// exiting, this informs acceptors that we don't care about the
-	// answer so they shouldn't hang around waiting for the node to
-	// return. Of course, it's best effort.
-	senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id), tr.connPub, tr.acceptors...)
-	completed := tr.outcome != nil
-	if !completed && tr.server.Retry() {
-		// If this msg doesn't make it then proposers should
-		// observe our death and tidy up anyway. If it's just this
-		// connection shutting down then there should be no
-		// problem with these msgs getting to the proposers.
-		senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionAbortMsg(tr.Id), tr.connPub, tr.active...)
-	}
-
-	switch {
-	case !completed:
-		return tr.Terminated(tr)
-	case tr.outcome.Which() == msgs.OUTCOME_COMMIT:
-		return tr.Committed(txn, tr)
-	default:
-		return tr.Aborted(txn, tr)
+		if tr.outcome.Which() == msgs.OUTCOME_COMMIT {
+			return tr.Committed(txn, tr)
+		} else {
+			return tr.Aborted(txn, tr)
+		}
+	} else {
+		/* TODO adjust to subscribe
+		if !completed && tr.server.Retry() {
+			// If this msg doesn't make it then proposers should
+			// observe our death and tidy up anyway. If it's just this
+			// connection shutting down then there should be no
+			// problem with these msgs getting to the proposers.
+			senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionAbortMsg(tr.Id), tr.connPub, tr.active...)
+		}
+		*/
+		return nil
 	}
 }
 

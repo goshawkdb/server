@@ -21,5 +21,5 @@ type ClientConnection interface {
 	actor.ShutdownableActor
 	server.ServerConnectionSubscriber
 	Status(*status.StatusConsumer)
-	SubmissionOutcomeReceived(common.RMId, *txnreader.TxnReader, *msgs.Outcome)
+	SubmissionOutcomeReceived(common.RMId, *common.TxnId, *txnreader.TxnReader, *msgs.Outcome)
 }

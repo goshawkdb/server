@@ -11,14 +11,18 @@ import (
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types/connectionmanager"
+	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/proxy"
 	"goshawkdb.io/server/utils/status"
 	"time"
 )
 
 type VarManager struct {
+	sconn.ServerConnectionPublisher
 	localconnection.LocalConnection
 	logger           log.Logger
 	Topology         *configuration.Topology
@@ -36,22 +40,20 @@ func init() {
 	db.DB.Vars = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, tp topology.TopologyPublisher, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarManager {
+func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, cm connectionmanager.ConnectionManager, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarManager {
 	vm := &VarManager{
-		LocalConnection: lc,
-		logger:          logger, // varDispatcher creates the context for us
-		RMId:            rmId,
-		db:              db,
-		active:          make(map[common.VarUUId]*Var),
-		RollAllowed:     false,
-		tw:              tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
-		exe:             exe,
+		ServerConnectionPublisher: proxy.NewServerConnectionPublisherProxy(exe, cm, logger),
+		LocalConnection:           lc,
+		logger:                    logger, // varDispatcher creates the context for us
+		RMId:                      rmId,
+		db:                        db,
+		active:                    make(map[common.VarUUId]*Var),
+		RollAllowed:               false,
+		tw:                        tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
+		exe:                       exe,
 	}
-	exe.EnqueueFuncAsync(func() (bool, error) {
-		vm.Topology = tp.AddTopologySubscriber(topology.VarSubscriber, vm)
-		vm.RollAllowed = vm.Topology != nil && vm.Topology.NextConfiguration == nil
-		return false, nil
-	})
+	vm.Topology = cm.AddTopologySubscriber(topology.VarSubscriber, vm)
+	vm.RollAllowed = vm.Topology != nil && vm.Topology.NextConfiguration == nil
 	return vm
 }
 

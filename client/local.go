@@ -1,7 +1,6 @@
 package client
 
 import (
-	"errors"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
@@ -13,10 +12,6 @@ import (
 )
 
 type LocalTxnCompletionContinuation func(*txnreader.TxnReader, *msgs.Outcome, error) error
-
-func (cont LocalTxnCompletionContinuation) Terminated(tr *TransactionRecord) error {
-	return cont(nil, nil, errors.New("Submitter terminating"))
-}
 
 func (cont LocalTxnCompletionContinuation) Committed(txn *txnreader.TxnReader, tr *TransactionRecord) error {
 	return cont(txn, tr.outcome, nil)

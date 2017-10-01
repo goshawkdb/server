@@ -124,7 +124,7 @@ type acceptorReceiveBallots struct {
 	*Acceptor
 	ballotAccumulator     *BallotAccumulator
 	outcome               *outcomeEqualId
-	subscribers           common.ClientIds
+	subscribers           common.TxnIds
 	txn                   *txnreader.TxnReader
 	txnSubmitterRM        common.RMId
 	txnSubmitterBootCount uint32
@@ -240,7 +240,7 @@ type acceptorWriteToDisk struct {
 	outcomeOnDisk     *outcomeEqualId
 	sendToAll         bool
 	sendToAllOnDisk   bool
-	subscribersOnDisk common.ClientIds
+	subscribersOnDisk common.TxnIds
 }
 
 func (awtd *acceptorWriteToDisk) init(a *Acceptor, txn *txnreader.TxnReader) {
@@ -296,7 +296,7 @@ func (awtd *acceptorWriteToDisk) String() string {
 	return "acceptorWriteToDisk"
 }
 
-func (awtd *acceptorWriteToDisk) writeDone(outcome *outcomeEqualId, sendToAll bool, subscribers common.ClientIds) {
+func (awtd *acceptorWriteToDisk) writeDone(outcome *outcomeEqualId, sendToAll bool, subscribers common.TxnIds) {
 	// There could have been a number a outcomes determined in quick
 	// succession. We only "won" if we got here and our outcome is
 	// still the right one.
@@ -313,15 +313,13 @@ func (awtd *acceptorWriteToDisk) writeDone(outcome *outcomeEqualId, sendToAll bo
 type acceptorAwaitLocallyComplete struct {
 	*Acceptor
 	pendingTLC    map[common.RMId]types.EmptyStruct
-	pendingTSC    map[common.ClientId]types.EmptyStruct
+	pendingTSC    map[common.TxnId]types.EmptyStruct
 	tgcRecipients common.RMIds
 	twoBSender    *twoBTxnVotesSender
-	txnSubmitter  common.ClientId
 }
 
 func (aalc *acceptorAwaitLocallyComplete) init(a *Acceptor, txn *txnreader.TxnReader) {
 	aalc.Acceptor = a
-	aalc.txnSubmitter = txn.Id.ClientId(a.acceptorManager.RMId)
 }
 
 func (aalc *acceptorAwaitLocallyComplete) start() {
@@ -358,18 +356,19 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 		}
 	}
 
-	subscribers := make(common.ClientIds, 1+len(aalc.subscribersOnDisk))
-	subscribers[0] = aalc.txnSubmitter
+	subscribers := make(common.TxnIds, 1+len(aalc.subscribersOnDisk))
+	subscribers[0] = *aalc.txnId
 	copy(subscribers[1:], aalc.subscribersOnDisk)
 
-	aalc.pendingTSC = make(map[common.ClientId]types.EmptyStruct, len(subscribers))
+	aalc.pendingTSC = make(map[common.TxnId]types.EmptyStruct, len(subscribers))
 	subscribersRMs := make(map[common.RMId]types.EmptyStruct, len(subscribers))
-	for _, subscriber := range subscribers {
-		if _, found := rmsRemoved[subscriber.RMId()]; found {
+	for _, subId := range subscribers {
+		subIdRM := subId.RMId(aalc.acceptorManager.RMId)
+		if _, found := rmsRemoved[subIdRM]; found {
 			continue
 		}
-		aalc.pendingTSC[subscriber] = types.EmptyStructVal
-		subscribersRMs[subscriber.RMId()] = types.EmptyStructVal
+		aalc.pendingTSC[subId] = types.EmptyStructVal
+		subscribersRMs[subIdRM] = types.EmptyStructVal
 	}
 
 	if len(aalc.pendingTLC) == 0 && len(aalc.pendingTSC) == 0 {
@@ -394,9 +393,9 @@ func (aalc *acceptorAwaitLocallyComplete) TxnLocallyCompleteReceived(sender comm
 	}
 }
 
-func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(clientId common.ClientId) {
+func (aalc *acceptorAwaitLocallyComplete) TxnSubmissionCompleteReceived(subId common.TxnId) {
 	// Submitters will issues TSCs after FInc outcomes so we can receive this early, which is fine.
-	delete(aalc.pendingTSC, clientId)
+	delete(aalc.pendingTSC, subId)
 	aalc.maybeDelete()
 }
 
@@ -417,9 +416,9 @@ func (aalc *acceptorAwaitLocallyComplete) TopologyChanged(topology *configuratio
 	for rmId := range rmsRemoved {
 		aalc.TxnLocallyCompleteReceived(rmId)
 	}
-	for clientId := range aalc.pendingTSC {
-		if _, found := rmsRemoved[clientId.RMId()]; found {
-			aalc.TxnSubmissionCompleteReceived(clientId)
+	for subId := range aalc.pendingTSC {
+		if _, found := rmsRemoved[subId.RMId(aalc.acceptorManager.RMId)]; found {
+			aalc.TxnSubmissionCompleteReceived(subId)
 		}
 	}
 }
@@ -492,14 +491,14 @@ type twoBTxnVotesSender struct {
 	subscribersRMs map[common.RMId]types.EmptyStruct
 }
 
-func newTwoBTxnVotesSender(logger log.Logger, outcome *msgs.Outcome, txnId *common.TxnId, recipients common.RMIds, subscribers common.ClientIds, subscribersRMs map[common.RMId]types.EmptyStruct) *twoBTxnVotesSender {
+func newTwoBTxnVotesSender(logger log.Logger, outcome *msgs.Outcome, txnId *common.TxnId, recipients common.RMIds, subscribers common.TxnIds, subscribersRMs map[common.RMId]types.EmptyStruct) *twoBTxnVotesSender {
 	subscribersSeg := capn.NewBuffer(nil)
 	subscribersMsg := msgs.NewRootMessage(subscribersSeg)
 	submissionOutcome := msgs.NewTxnSubmissionOutcome(subscribersSeg)
 	submissionOutcome.SetOutcome(*outcome)
 	subscribersCap := subscribersSeg.NewDataList(len(subscribers))
-	for idx, subscriber := range subscribers {
-		subscribersCap.Set(idx, subscriber[:])
+	for idx, subId := range subscribers {
+		subscribersCap.Set(idx, subId[:])
 	}
 	submissionOutcome.SetSubscribers(subscribersCap)
 	subscribersMsg.SetSubmissionOutcome(submissionOutcome)

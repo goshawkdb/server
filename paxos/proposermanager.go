@@ -423,7 +423,7 @@ func (pm *ProposerManager) Status(sc *status.StatusConsumer) {
 
 func GetAcceptorsFromTxn(txnCap msgs.Txn) common.RMIds {
 	twoFInc := int(txnCap.TwoFInc())
-	acceptors := make([]common.RMId, twoFInc)
+	acceptors := make(common.RMIds, twoFInc)
 	allocations := txnCap.Allocations()
 	idx := 0
 	for l := allocations.Len(); idx < l && idx < twoFInc; idx++ {
@@ -444,12 +444,13 @@ func MakeTxnLocallyCompleteMsg(txnId *common.TxnId) []byte {
 	return common.SegToBytes(seg)
 }
 
-func MakeTxnSubmissionCompleteMsg(txnId *common.TxnId) []byte {
+func MakeTxnSubmissionCompleteMsg(txnId, subscriberId *common.TxnId) []byte {
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	tsc := msgs.NewTxnSubmissionComplete(seg)
 	msg.SetSubmissionComplete(tsc)
 	tsc.SetTxnId(txnId[:])
+	tsc.SetSubscriberId(subscriberId[:])
 	return common.SegToBytes(seg)
 }
 

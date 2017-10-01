@@ -70,13 +70,6 @@ func (rts *RemoteTransactionSubmitter) TopologyChanged(topology *configuration.T
 
 type RemoteTxnCompletionContinuation func(*cmsgs.ClientTxnOutcome, error) error
 
-func (rts *RemoteTransactionSubmitter) Terminated(tr *TransactionRecord) error {
-	cont := rts.cont
-	rts.cont = nil
-
-	return cont(nil, errors.New("Submitter terminating."))
-}
-
 func (rts *RemoteTransactionSubmitter) Committed(txn *txnreader.TxnReader, tr *TransactionRecord) error {
 	cont := rts.cont
 	rts.cont = nil
