@@ -12,24 +12,24 @@ import (
 
 type Txn C.Struct
 
-func NewTxn(s *C.Segment) Txn                  { return Txn(s.NewStruct(8, 3)) }
-func NewRootTxn(s *C.Segment) Txn              { return Txn(s.NewRootStruct(8, 3)) }
-func AutoNewTxn(s *C.Segment) Txn              { return Txn(s.NewStructAR(8, 3)) }
-func ReadRootTxn(s *C.Segment) Txn             { return Txn(s.Root(0).ToStruct()) }
-func (s Txn) Id() []byte                       { return C.Struct(s).GetObject(0).ToData() }
-func (s Txn) SetId(v []byte)                   { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
-func (s Txn) IsTopology() bool                 { return C.Struct(s).Get1(0) }
-func (s Txn) SetIsTopology(v bool)             { C.Struct(s).Set1(0, v) }
-func (s Txn) Subscribe() bool                  { return C.Struct(s).Get1(1) }
-func (s Txn) SetSubscribe(v bool)              { C.Struct(s).Set1(1, v) }
-func (s Txn) Actions() []byte                  { return C.Struct(s).GetObject(1).ToData() }
-func (s Txn) SetActions(v []byte)              { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
-func (s Txn) Allocations() Allocation_List     { return Allocation_List(C.Struct(s).GetObject(2)) }
-func (s Txn) SetAllocations(v Allocation_List) { C.Struct(s).SetObject(2, C.Object(v)) }
-func (s Txn) TwoFInc() uint16                  { return C.Struct(s).Get16(2) }
-func (s Txn) SetTwoFInc(v uint16)              { C.Struct(s).Set16(2, v) }
-func (s Txn) TopologyVersion() uint32          { return C.Struct(s).Get32(4) }
-func (s Txn) SetTopologyVersion(v uint32)      { C.Struct(s).Set32(4, v) }
+func NewTxn(s *C.Segment) Txn                      { return Txn(s.NewStruct(16, 3)) }
+func NewRootTxn(s *C.Segment) Txn                  { return Txn(s.NewRootStruct(16, 3)) }
+func AutoNewTxn(s *C.Segment) Txn                  { return Txn(s.NewStructAR(16, 3)) }
+func ReadRootTxn(s *C.Segment) Txn                 { return Txn(s.Root(0).ToStruct()) }
+func (s Txn) Id() []byte                           { return C.Struct(s).GetObject(0).ToData() }
+func (s Txn) SetId(v []byte)                       { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Txn) IsTopology() bool                     { return C.Struct(s).Get1(0) }
+func (s Txn) SetIsTopology(v bool)                 { C.Struct(s).Set1(0, v) }
+func (s Txn) Subscription() SubscriptionChange     { return SubscriptionChange(C.Struct(s).Get16(2)) }
+func (s Txn) SetSubscription(v SubscriptionChange) { C.Struct(s).Set16(2, uint16(v)) }
+func (s Txn) Actions() []byte                      { return C.Struct(s).GetObject(1).ToData() }
+func (s Txn) SetActions(v []byte)                  { C.Struct(s).SetObject(1, s.Segment.NewData(v)) }
+func (s Txn) Allocations() Allocation_List         { return Allocation_List(C.Struct(s).GetObject(2)) }
+func (s Txn) SetAllocations(v Allocation_List)     { C.Struct(s).SetObject(2, C.Object(v)) }
+func (s Txn) TwoFInc() uint16                      { return C.Struct(s).Get16(4) }
+func (s Txn) SetTwoFInc(v uint16)                  { C.Struct(s).Set16(4, v) }
+func (s Txn) TopologyVersion() uint32              { return C.Struct(s).Get32(8) }
+func (s Txn) SetTopologyVersion(v uint32)          { C.Struct(s).Set32(8, v) }
 func (s Txn) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -77,17 +77,13 @@ func (s Txn) WriteJSON(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("\"subscribe\":")
+	_, err = b.WriteString("\"subscription\":")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Subscribe()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
+		s := s.Subscription()
+		err = s.WriteJSON(b)
 		if err != nil {
 			return err
 		}
@@ -241,17 +237,13 @@ func (s Txn) WriteCapLit(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = b.WriteString("subscribe = ")
+	_, err = b.WriteString("subscription = ")
 	if err != nil {
 		return err
 	}
 	{
-		s := s.Subscribe()
-		buf, err = json.Marshal(s)
-		if err != nil {
-			return err
-		}
-		_, err = b.Write(buf)
+		s := s.Subscription()
+		err = s.WriteCapLit(b)
 		if err != nil {
 			return err
 		}
@@ -361,7 +353,7 @@ func (s Txn) MarshalCapLit() ([]byte, error) {
 
 type Txn_List C.PointerList
 
-func NewTxnList(s *C.Segment, sz int) Txn_List { return Txn_List(s.NewCompositeList(8, 3, sz)) }
+func NewTxnList(s *C.Segment, sz int) Txn_List { return Txn_List(s.NewCompositeList(16, 3, sz)) }
 func (s Txn_List) Len() int                    { return C.PointerList(s).Len() }
 func (s Txn_List) At(i int) Txn                { return Txn(C.PointerList(s).At(i).ToStruct()) }
 func (s Txn_List) ToArray() []Txn {
@@ -373,6 +365,99 @@ func (s Txn_List) ToArray() []Txn {
 	return a
 }
 func (s Txn_List) Set(i int, item Txn) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type SubscriptionChange uint16
+
+const (
+	SUBSCRIPTIONCHANGE_NOCHANGE SubscriptionChange = 0
+	SUBSCRIPTIONCHANGE_ADD      SubscriptionChange = 1
+	SUBSCRIPTIONCHANGE_REMOVE   SubscriptionChange = 2
+)
+
+func (c SubscriptionChange) String() string {
+	switch c {
+	case SUBSCRIPTIONCHANGE_NOCHANGE:
+		return "noChange"
+	case SUBSCRIPTIONCHANGE_ADD:
+		return "add"
+	case SUBSCRIPTIONCHANGE_REMOVE:
+		return "remove"
+	default:
+		return ""
+	}
+}
+
+func SubscriptionChangeFromString(c string) SubscriptionChange {
+	switch c {
+	case "noChange":
+		return SUBSCRIPTIONCHANGE_NOCHANGE
+	case "add":
+		return SUBSCRIPTIONCHANGE_ADD
+	case "remove":
+		return SUBSCRIPTIONCHANGE_REMOVE
+	default:
+		return 0
+	}
+}
+
+type SubscriptionChange_List C.PointerList
+
+func NewSubscriptionChangeList(s *C.Segment, sz int) SubscriptionChange_List {
+	return SubscriptionChange_List(s.NewUInt16List(sz))
+}
+func (s SubscriptionChange_List) Len() int { return C.UInt16List(s).Len() }
+func (s SubscriptionChange_List) At(i int) SubscriptionChange {
+	return SubscriptionChange(C.UInt16List(s).At(i))
+}
+func (s SubscriptionChange_List) ToArray() []SubscriptionChange {
+	n := s.Len()
+	a := make([]SubscriptionChange, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s SubscriptionChange_List) Set(i int, item SubscriptionChange) {
+	C.UInt16List(s).Set(i, uint16(item))
+}
+func (s SubscriptionChange) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	buf, err = json.Marshal(s.String())
+	if err != nil {
+		return err
+	}
+	_, err = b.Write(buf)
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s SubscriptionChange) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s SubscriptionChange) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	_, err = b.WriteString(s.String())
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s SubscriptionChange) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
 
 type ActionListWrapper C.Struct
 

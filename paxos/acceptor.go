@@ -259,7 +259,7 @@ func (awtd *acceptorWriteToDisk) start() {
 	stateSeg := capn.NewBuffer(nil)
 	state := msgs.NewRootAcceptorState(stateSeg)
 	state.SetOutcome(*outcomeCap)
-	state.SetSendToAll(awtd.sendToAll)
+	state.SetSendToAll(sendToAll)
 	state.SetInstances(awtd.ballotAccumulator.AddInstancesToSeg(stateSeg))
 	subscribers := awtd.subscribers
 	dataList := stateSeg.NewDataList(len(subscribers))

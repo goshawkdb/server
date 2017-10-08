@@ -160,10 +160,6 @@ func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 	utils.DebugLog(v.vm.logger, "debug", "ReceiveTxn.", "VarUUId", v.UUId, "action", action)
 	v.poisson.AddThen(enqueuedAt)
 
-	if action.Txn.TxnReader.Txn.Subscribe() {
-		v.addSubscriber(*action.Id)
-	}
-
 	isRead, isWrite := action.IsRead(), action.IsWrite()
 
 	switch {
@@ -181,6 +177,42 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	v.poisson.AddThen(enqueuedAt)
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()
+
+	// So, subscribers. This is turning out to be a nightmare
+	// really. If the txn is committed then we know that we would
+	// process subscribe first when we create a new child. That could
+	// work. Remaining problem:
+	//
+	// how would we avoid the race between a subscribe and an
+	// unsubscribe? This is tricky because at no point do we attempt to
+	// linearize reads. Pushing subscribes into a weird sort of write
+	// seems highly odd - I would prefer not to do that. So we could
+	// either try to work off the txn id coming from the client, but
+	// that is not fool-proof. So really we want the unsub to id the
+	// sub most likely through the txn id of the sub txn. So then if we
+	// see an unsub without a corresponding sub we can keep it around
+	// until we see the matching sub appear - or a conn down. The issue
+	// then becomes we see an unsub followed by a conndown followed by
+	// a sub. We can assume the conndown is symmetric... but of course
+	// the course at this stage the otucome/2bs are comming from
+	// acceptors, not the actual subscriber, so we probably have a lot
+	// of races here. It probably doesn't make sense to monitor the
+	// subscriber at all... so how do we avoid leaking garbage?
+	//
+	// So how about we use the txnids of the sub/unsub to linearize and
+	// always just apply the final version? Well because that would
+	// imply that we remove such subscription state when the most
+	// recent action is an unsub, and then of course we risk
+	// interpreting an older sub. So we need to apply the most recent
+	// but we also need to keep track of unmatched, and we need to also
+	// watch for for connUp with newer boot counts and topology RM
+	// removed. Point is that a normal connection drop does not cause
+	// any change.
+	//
+	// So this approach requires both sub and unsub txns to commit, so
+	// if the unsub fails deadlock then not a problem. If it fails
+	// badread then we're just going to have to buffer up (LVC) values
+	// to go back down to the client
 
 	switch {
 	case action.frame == nil:
