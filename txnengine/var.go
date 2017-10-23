@@ -8,6 +8,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
+	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/poisson"
 	"goshawkdb.io/server/utils/status"
@@ -33,7 +34,6 @@ type Var struct {
 	exe             *dispatcher.Executor
 	db              *db.Databases
 	vm              *VarManager
-	varCap          *msgs.Var
 	rng             *rand.Rand
 }
 
@@ -51,17 +51,22 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	}
 
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
+	valueTxnId := common.MakeTxnId(varCap.ValueTxnId())
 	writeTxnClock := vc.VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
 	writesClock := vc.VectorClockFromData(varCap.WritesClock(), true).AsMutable()
 	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
 
-	if result, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		return db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
-	}).ResultError(); err == nil && result != nil {
-		txn := txnreader.TxnReaderFromData(result.([]byte))
-		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
+	var valueTxnBytes []byte
+	if complete, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+		valueTxnBytes = db.ReadTxnBytesFromDisk(rtxn, valueTxnId)
+		return true
+	}).ResultError(); err == nil && complete != nil {
+		var valueActions *txnreader.TxnActions
+		if len(valueTxnBytes) != 0 {
+			valueActions = txnreader.TxnReaderFromData(valueTxnBytes).Actions(false)
+		}
+		v.curFrame = NewFrame(nil, v, writeTxnId, valueTxnId, valueActions, writeTxnClock, writesClock)
 		v.curFrameOnDisk = v.curFrame
-		v.varCap = &varCap
 		return v, nil
 	} else {
 		return nil, err
@@ -73,12 +78,7 @@ func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 
 	clock := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	written := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
-	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
-
-	seg := capn.NewBuffer(nil)
-	varCap := msgs.NewRootVar(seg)
-	varCap.SetId(v.UUId[:])
-	v.varCap = &varCap
+	v.curFrame = NewFrame(nil, v, nil, nil, nil, clock, written)
 
 	return v
 }
@@ -138,8 +138,10 @@ func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 		v.curFrame.AddReadWrite(action)
 	case isRead:
 		v.curFrame.AddRead(action)
-	default:
+	case isWrite:
 		v.curFrame.AddWrite(action)
+	default:
+		panic(fmt.Sprintf("Received txn action I don't understand: %v", action))
 	}
 }
 
@@ -169,8 +171,10 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 			action.frame.ReadWriteAborted(action, true)
 		case isRead:
 			action.frame.ReadAborted(action)
-		default:
+		case isWrite:
 			action.frame.WriteAborted(action, true)
+		default:
+			panic(fmt.Sprintf("Received txn abort outcome I don't understand: %v", action))
 		}
 
 	default:
@@ -179,8 +183,10 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 			action.frame.ReadWriteCommitted(action)
 		case isRead:
 			action.frame.ReadCommitted(action)
-		default:
+		case isWrite:
 			action.frame.WriteCommitted(action)
+		default:
+			panic(fmt.Sprintf("Received txn commit outcome I don't understand: %v", action))
 		}
 	}
 }
@@ -193,27 +199,29 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 		v.positions = positions
 	}
 
-	if len(v.subscribers) != 0 {
-		actionCap := action.writeAction
-		modifiedCap := actionCap.Modified()
-		value := modifiedCap.Value()
-		references := modifiedCap.References()
-		for _, sub := range v.subscribers {
-			sub.Observe(v, value, &references, action.Txn)
+	if !action.IsRoll() {
+		if len(v.subscribers) != 0 {
+			actionCap := action.writeAction
+			modifiedCap := actionCap.Modified()
+			value := modifiedCap.Value()
+			references := modifiedCap.References()
+			for _, sub := range v.subscribers {
+				sub.Observe(v, value, &references, action.Txn)
+			}
 		}
 	}
 
 	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
 	// fmt.Printf("d%v ", diffLen)
 
-	v.maybeWriteFrame(f, action, positions)
+	v.maybeWriteFrame(f, action.TxnReader)
 }
 
-func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.Positions) {
+func (v *Var) maybeWriteFrame(f *frame, txn *txnreader.TxnReader) {
 	if v.writeInProgress != nil {
 		v.writeInProgress = func() {
 			v.writeInProgress = nil
-			v.maybeWriteFrame(f, action, positions)
+			v.maybeWriteFrame(f, txn)
 		}
 		return
 	}
@@ -222,37 +230,33 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 		v.maybeMakeInactive()
 	}
 
-	oldVarCap := *v.varCap
-
 	varSeg := capn.NewBuffer(nil)
 	varCap := msgs.NewRootVar(varSeg)
-	v.varCap = &varCap
-	varCap.SetId(oldVarCap.Id())
 
-	if positions != nil {
-		varCap.SetPositions(capn.UInt8List(*positions))
-	} else {
-		varCap.SetPositions(oldVarCap.Positions())
-	}
-
+	varCap.SetId(v.UUId[:])
+	varCap.SetPositions(capn.UInt8List(*v.positions))
 	varCap.SetWriteTxnId(f.frameTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
-	varData := common.SegToBytes(varSeg)
+	varCap.SetValueTxnId(txn.Id[:])
 
-	txnBytes := action.TxnReader.Data
+	varData := common.SegToBytes(varSeg)
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	future := v.db.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
-		if err := v.db.WriteTxnToDisk(rwtxn, f.frameTxnId, txnBytes); err == nil {
-			if err = rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err == nil {
-				if v.curFrameOnDisk != nil {
-					v.db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameTxnId)
-				}
+		if txn != nil {
+			if err := v.db.WriteTxnToDisk(rwtxn, txn.Id, txn.Data); err != nil {
+				return types.EmptyStructVal
 			}
 		}
-		return true
+		if err := rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err != nil {
+			return types.EmptyStructVal
+		}
+		if v.curFrameOnDisk != nil {
+			v.db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameValueTxnId)
+		}
+		return types.EmptyStructVal
 	})
 	go func() {
 		// ... but process the result in a new go-routine to avoid blocking the executor.

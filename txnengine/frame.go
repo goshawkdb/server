@@ -1,7 +1,6 @@
 package txnengine
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
@@ -25,32 +24,34 @@ var AbortRollNotFirst = errors.New("AbortRollNotFirst")
 var AbortRollNotInPermutation = errors.New("AbortRollNotInPermutation")
 
 type frame struct {
-	parent           *frame
-	child            *frame
-	v                *Var
-	frameTxnId       *common.TxnId
-	frameTxnActions  *txnreader.TxnActions
-	frameTxnClock    *vc.VectorClockMutable // the clock (including merge missing) of the frame txn
-	frameWritesClock *vc.VectorClockMutable // max elems from all writes of all txns in parent frame
-	readVoteClock    *vc.VectorClockMutable
-	positionsFound   bool
-	mask             *vc.VectorClockMutable
-	scheduleBackoff  *binarybackoff.BinaryBackoffEngine
+	parent            *frame
+	child             *frame
+	v                 *Var
+	frameTxnId        *common.TxnId
+	frameValueTxnId   *common.TxnId
+	frameValueActions *txnreader.TxnActions
+	frameTxnClock     *vc.VectorClockMutable // the clock (including merge missing) of the frame txn
+	frameWritesClock  *vc.VectorClockMutable // max elems from all writes of all txns in parent frame
+	readVoteClock     *vc.VectorClockMutable
+	positionsFound    bool
+	mask              *vc.VectorClockMutable
+	scheduleBackoff   *binarybackoff.BinaryBackoffEngine
 	frameOpen
 	frameClosed
 	frameErase
 	currentState frameStateMachineComponent
 }
 
-func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
+func NewFrame(parent *frame, v *Var, txnId, valueTxnId *common.TxnId, valueActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
 	f := &frame{
-		parent:           parent,
-		v:                v,
-		frameTxnId:       txnId,
-		frameTxnActions:  txnActions,
-		frameTxnClock:    txnClock,
-		frameWritesClock: writesClock,
-		positionsFound:   false,
+		parent:            parent,
+		v:                 v,
+		frameTxnId:        txnId,
+		frameValueTxnId:   valueTxnId,
+		frameValueActions: valueActions,
+		frameTxnClock:     txnClock,
+		frameWritesClock:  writesClock,
+		positionsFound:    false,
 	}
 	if parent == nil {
 		f.mask = vc.NewVectorClock().AsMutable()
@@ -172,10 +173,10 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v ReadRetry called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.frameTxnActions == nil || fo.frameTxnId.Compare(action.readVsn) == common.EQ:
+	case fo.frameTxnId == nil || fo.frameTxnId.Compare(action.readVsn) == common.EQ:
 		return false
 	default:
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
+		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameValueActions)
 		fo.v.maybeMakeInactive()
 		return true
 	}
@@ -187,11 +188,11 @@ func (fo *frameOpen) AddRead(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writes.Len() != 0 || fo.frameTxnActions == nil:
+	case fo.writes.Len() != 0 || fo.frameTxnId == nil:
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
+		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameValueActions)
 		fo.v.maybeMakeInactive()
 	case fo.reads.Get(action) == nil:
 		fo.uncommittedReads++
@@ -304,7 +305,7 @@ func (fo *frameOpen) WriteCommitted(action *localAction) {
 	if node := fo.writes.Get(action); node != nil && node.Value == uncommitted {
 		node.Value = committed
 		fo.uncommittedWrites--
-		fo.positionsFound = fo.positionsFound || (fo.frameTxnActions == nil && action.createPositions != nil)
+		fo.positionsFound = fo.positionsFound || (fo.frameTxnId == nil && action.createPositions != nil)
 		fo.maybeCreateChild()
 	} else {
 		panic(fmt.Sprintf("%v WriteCommitted called for unknown txn %v", fo.frame, txn))
@@ -317,10 +318,10 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddReadWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnActions == nil || len(fo.learntFutureReads) != 0:
+	case fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnId == nil || len(fo.learntFutureReads) != 0:
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
+		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameValueActions)
 		fo.v.maybeMakeInactive()
 	case fo.writes.Get(action) == nil:
 		fo.rwPresent = true
@@ -448,9 +449,18 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
 	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
-		utils.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Ignored. Too Old.", "frame", fo.frame, "TxnId", txn.Id)
-		fo.maybeStartRoll()
-		return false
+		if fo.frameValueActions == nil && action.Id.Compare(fo.frameValueTxnId) == common.EQ {
+			// OK, so we are a roll and we've just learnt about the
+			// original write. We need to push it to disk. But once we
+			// have, by dfn, it's in the immediate previous frame so we
+			// can declare it LocallyComplete. TODO
+			fo.frameValueActions = action.writeTxnActions
+			return true
+		} else {
+			utils.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Ignored. Too Old.", "frame", fo.frame, "TxnId", txn.Id)
+			fo.maybeStartRoll()
+			return false
+		}
 	}
 	if action.Id.Compare(fo.frameTxnId) == common.EQ {
 		utils.DebugLog(fo.v.vm.logger, "debug", "WriteLearnt. Duplicate of current frame.", "frame", fo.frame, "TxnId", txn.Id)
@@ -468,7 +478,7 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	if fo.writes.Get(action) == nil {
 		fo.writes.Insert(action, committed)
 		action.frame = fo.frame
-		fo.positionsFound = fo.positionsFound || (fo.frameTxnActions == nil && action.createPositions != nil)
+		fo.positionsFound = fo.positionsFound || (fo.frameTxnId == nil && action.createPositions != nil)
 		// See corresponding comment in ReadLearnt. We only force the
 		// readvoteclock here because we cannot calculate the
 		// writevoteclock because we may have uncommitted reads.
@@ -628,7 +638,7 @@ func (fo *frameOpen) calculateWriteVoteClock() {
 
 func (fo *frameOpen) maybeCreateChild() {
 	// still working on reads   || still working on writes   || never done any writes || first frame on var creation and we've not yet seen the actual create yet
-	if fo.uncommittedReads != 0 || fo.uncommittedWrites != 0 || fo.writes.Len() == 0 || (fo.frameTxnActions == nil && !fo.positionsFound) {
+	if fo.uncommittedReads != 0 || fo.uncommittedWrites != 0 || fo.writes.Len() == 0 || (fo.frameTxnId == nil && !fo.positionsFound) {
 		return
 	}
 
@@ -715,8 +725,15 @@ func (fo *frameOpen) maybeCreateChild() {
 		}
 	}
 
-	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.writeTxnActions, winner.outcomeClock.AsMutable(), written)
-	fo.v.SetCurFrame(fo.child, winner, positions)
+	valueTxnId := winner.Id
+	valueActions := winner.writeTxnActions
+	if winner.IsRoll() {
+		valueTxnId = winner.roll
+		valueActions = nil
+	}
+
+	fo.child = NewFrame(fo.frame, fo.v, winner.Id, valueTxnId, valueActions, winner.outcomeClock.AsMutable(), written)
+	fo.v.SetCurFrame(fo.child, winner, positions) // todo, change me!
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
 		utils.DebugLog(fo.v.vm.logger, "debug", "New frame learns future reads.", "frame", fo.frame)
@@ -734,7 +751,7 @@ func (fo *frameOpen) maybeCreateChild() {
 
 func (fo *frameOpen) basicRollCondition(rescheduling bool) bool {
 	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
+		(fo.reads.Len() > fo.uncommittedReads || (fo.frameValueActions != nil && fo.frameTxnClock.Len() > fo.frameValueActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
@@ -847,18 +864,6 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	if fo.rollTxn != nil {
 		return fo.rollTxn, fo.rollTxnPos
 	}
-	var origAction *msgs.Action
-	vUUIdBytes := fo.v.UUId[:]
-	txnActions := fo.frameTxnActions.Actions()
-	for idx, l := 0, txnActions.Len(); idx < l; idx++ {
-		action := txnActions.At(idx)
-		if bytes.Equal(action.VarId(), vUUIdBytes) {
-			origAction = &action
-			break
-		}
-	}
-
-	posMap := make(map[common.VarUUId]*types.PosCapVer)
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
@@ -870,32 +875,15 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	action.SetActionType(cmsgs.CLIENTACTIONTYPE_ROLL)
 	action.SetModified()
 	modified := action.Modified()
-	origModified := origAction.Modified()
-	modified.SetValue(origModified.Value())
-	origRefs := origModified.References()
+	modified.SetValue(fo.frameValueTxnId[:])
 
-	refVarList := cmsgs.NewClientVarIdPosList(seg, origRefs.Len())
-	modified.SetReferences(refVarList)
-	for idx, l := 0, origRefs.Len(); idx < l; idx++ {
-		origRef := origRefs.At(idx)
-		vUUId := common.MakeVarUUId(origRef.Id())
-		// these are needed because the translation verifies the refs are valid
-		pos := common.Positions(origRef.Positions())
-		posMap[*vUUId] = &types.PosCapVer{
-			Positions:  &pos,
-			Capability: common.NewCapability(origRef.Capability()),
-		}
-		varIdPos := refVarList.At(idx)
-		varIdPos.SetVarId(vUUId[:])
-		varIdPos.SetCapability(origRef.Capability())
-	}
 	fo.rollTxn = &ctxn
-	// we do this one last in case our own refs point at ourself and so
-	// we need to overwrite it to include the correct version
-	posMap[*fo.v.UUId] = &types.PosCapVer{
-		Positions:  fo.v.positions,
-		Capability: common.ReadWriteCapability,
-		Version:    fo.frameTxnId,
+	posMap := map[common.VarUUId]*types.PosCapVer{
+		*fo.v.UUId: &types.PosCapVer{
+			Positions:  fo.v.positions,
+			Capability: common.ReadWriteCapability,
+			Version:    fo.frameTxnId,
+		},
 	}
 	fo.rollTxnPos = posMap
 	return &ctxn, posMap
