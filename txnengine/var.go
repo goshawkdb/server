@@ -8,8 +8,6 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/db"
 	"goshawkdb.io/server/dispatcher"
-	"goshawkdb.io/server/types"
-	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/poisson"
 	"goshawkdb.io/server/utils/status"
@@ -26,8 +24,7 @@ type Var struct {
 	curFrame        *frame
 	curFrameOnDisk  *frame
 	writeInProgress func()
-	subscribers     map[common.TxnId]types.EmptyStruct
-	subscriberIds   common.TxnIds
+	subscriptions   *Subscriptions
 	exe             *dispatcher.Executor
 	db              *db.Databases
 	vm              *VarManager
@@ -90,69 +87,11 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
-		subscribers:     make(map[common.TxnId]types.EmptyStruct),
-		subscriberIds:   nil,
+		subscriptions:   NewSubscriptions(vm),
 		exe:             exe,
 		db:              db,
 		vm:              vm,
 		rng:             rng,
-	}
-}
-
-func (v *Var) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) {
-	// We iterate through subscribers and not subscriberIds because
-	// it's safe to delete from a map whilst iterating.
-	for subId := range v.subscribers {
-		subRM := subId.RMId(v.vm.RMId)
-		if conn, found := conns[subRM]; !found || (conn.BootCount != subId.BootCount() && subId.BootCount() > 0) {
-			v.removeSubscriber(subId)
-		}
-	}
-}
-
-func (v *Var) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
-	for subId := range v.subscribers {
-		subRM := subId.RMId(v.vm.RMId)
-		if subRM == rmId {
-			v.removeSubscriber(subId)
-		}
-	}
-}
-
-func (v *Var) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
-	for subId := range v.subscribers {
-		subRM := subId.RMId(v.vm.RMId)
-		if subRM == conn.RMId && conn.BootCount != subId.BootCount() && subId.BootCount() > 0 {
-			v.removeSubscriber(subId)
-		}
-	}
-	done()
-}
-
-func (v *Var) addSubscriber(subId common.TxnId) {
-	if _, found := v.subscribers[subId]; !found {
-		v.subscribers[subId] = types.EmptyStructVal
-		v.subscriberIds = append(v.subscriberIds, subId)
-		if len(v.subscribers) == 1 {
-			v.vm.AddServerConnectionSubscriber(v)
-		}
-	}
-}
-
-func (v *Var) removeSubscriber(subId common.TxnId) {
-	if _, found := v.subscribers[subId]; found {
-		delete(v.subscribers, subId)
-		for idx, id := range v.subscriberIds {
-			if id.Compare(&subId) == common.EQ {
-				v.subscriberIds[idx] = v.subscriberIds[0]
-				v.subscriberIds = v.subscriberIds[1:]
-				break
-			}
-		}
-		if len(v.subscribers) == 0 {
-			v.vm.RemoveServerConnectionSubscriber(v)
-			v.maybeMakeInactive()
-		}
 	}
 }
 
@@ -167,8 +106,10 @@ func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 		v.curFrame.AddReadWrite(action)
 	case isRead:
 		v.curFrame.AddRead(action)
-	default:
+	case isWrite: // includes roll
 		v.curFrame.AddWrite(action)
+	default:
+		panic(fmt.Sprintf("%v received txn localaction fails invariants %v.", v.UUId, action))
 	}
 }
 
@@ -177,42 +118,6 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	v.poisson.AddThen(enqueuedAt)
 
 	isRead, isWrite := action.IsRead(), action.IsWrite()
-
-	// So, subscribers. This is turning out to be a nightmare
-	// really. If the txn is committed then we know that we would
-	// process subscribe first when we create a new child. That could
-	// work. Remaining problem:
-	//
-	// how would we avoid the race between a subscribe and an
-	// unsubscribe? This is tricky because at no point do we attempt to
-	// linearize reads. Pushing subscribes into a weird sort of write
-	// seems highly odd - I would prefer not to do that. So we could
-	// either try to work off the txn id coming from the client, but
-	// that is not fool-proof. So really we want the unsub to id the
-	// sub most likely through the txn id of the sub txn. So then if we
-	// see an unsub without a corresponding sub we can keep it around
-	// until we see the matching sub appear - or a conn down. The issue
-	// then becomes we see an unsub followed by a conndown followed by
-	// a sub. We can assume the conndown is symmetric... but of course
-	// the course at this stage the otucome/2bs are comming from
-	// acceptors, not the actual subscriber, so we probably have a lot
-	// of races here. It probably doesn't make sense to monitor the
-	// subscriber at all... so how do we avoid leaking garbage?
-	//
-	// So how about we use the txnids of the sub/unsub to linearize and
-	// always just apply the final version? Well because that would
-	// imply that we remove such subscription state when the most
-	// recent action is an unsub, and then of course we risk
-	// interpreting an older sub. So we need to apply the most recent
-	// but we also need to keep track of unmatched, and we need to also
-	// watch for for connUp with newer boot counts and topology RM
-	// removed. Point is that a normal connection drop does not cause
-	// any change.
-	//
-	// So this approach requires both sub and unsub txns to commit, so
-	// if the unsub fails deadlock then not a problem. If it fails
-	// badread then we're just going to have to buffer up (LVC) values
-	// to go back down to the client
 
 	switch {
 	case action.frame == nil:
@@ -258,14 +163,14 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
 	// fmt.Printf("d%v ", diffLen)
 
-	v.maybeWriteFrame(f, action, positions)
+	v.maybeWriteFrame(f, action.TxnReader.Data, positions)
 }
 
-func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.Positions) {
+func (v *Var) maybeWriteFrame(f *frame, txnBytes []byte, positions *common.Positions) {
 	if v.writeInProgress != nil {
 		v.writeInProgress = func() {
 			v.writeInProgress = nil
-			v.maybeWriteFrame(f, action, positions)
+			v.maybeWriteFrame(f, txnBytes, positions)
 		}
 		return
 	}
@@ -291,8 +196,6 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction, positions *common.P
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
 	varData := common.SegToBytes(varSeg)
-
-	txnBytes := action.TxnReader.Data
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
@@ -343,7 +246,7 @@ func (v *Var) maybeMakeInactive() {
 }
 
 func (v *Var) isIdle() bool {
-	return len(v.subscribers) == 0 && v.writeInProgress == nil && v.curFrame.isIdle()
+	return v.writeInProgress == nil && v.curFrame.isIdle()
 }
 
 func (v *Var) isOnDisk() bool {
@@ -374,9 +277,9 @@ func (v *Var) Status(sc *status.StatusConsumer) {
 	} else {
 		sc.Emit(fmt.Sprintf("- Positions: %v", v.positions))
 	}
+	v.subscriptions.Status(sc.Fork())
 	sc.Emit("- CurFrame:")
 	v.curFrame.Status(sc.Fork())
-	sc.Emit(fmt.Sprintf("- SubscriberIds: %v", v.subscriberIds))
 	sc.Emit(fmt.Sprintf("- Idle? %v", v.isIdle()))
 	sc.Emit(fmt.Sprintf("- IsOnDisk? %v", v.isOnDisk()))
 	sc.Join()

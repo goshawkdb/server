@@ -84,8 +84,8 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 	for idx, l := 0, clientActions.Len(); idx < l; idx++ {
 		clientAction := clientActions.At(idx)
 		action := actions.At(idx)
-		action.SetVarId(clientAction.VarId())
 		vUUId := common.MakeVarUUId(clientAction.VarId())
+		action.SetVarId(vUUId[:])
 
 		clientActionType := clientAction.ActionType()
 		create := clientActionType == cmsgs.CLIENTACTIONTYPE_CREATE

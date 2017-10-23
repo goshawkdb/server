@@ -207,7 +207,7 @@ func (p *Proposer) IsTopologyTxn() bool {
 	if actions.Len() != 1 {
 		return false
 	}
-	vUUId := common.MakeVarUUId(actions.At(1).VarId())
+	vUUId := common.MakeVarUUId(actions.At(0).VarId())
 	return vUUId.Compare(configuration.TopologyVarUUId) == common.EQ
 }
 

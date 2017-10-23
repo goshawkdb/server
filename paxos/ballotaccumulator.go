@@ -120,7 +120,7 @@ func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId
 
 	subscribers := make(common.TxnIds, len(subsCap))
 	for idx, bites := range subsCap {
-		subscribers[idx] = *(common.MakeTxnId(bites))
+		subscribers[idx] = common.MakeTxnId(bites)
 	}
 	ba.subscribers = subscribers
 
@@ -190,7 +190,7 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.TxnIds)
 		} else if !vBallot.result.Aborted() {
 			combinedClock.MergeInMax(vBallot.result.Clock)
 			for _, subId := range vBallot.result.Subscribers {
-				commitSubscribers[subId] = types.EmptyStructVal
+				commitSubscribers[*subId] = types.EmptyStructVal
 			}
 		}
 		aborted = aborted || vBallot.result.Aborted()
@@ -235,7 +235,8 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.TxnIds)
 		}
 		subscribers := make(common.TxnIds, 0, len(commitSubscribers))
 		for subId := range commitSubscribers {
-			subscribers = append(subscribers, subId)
+			subIdCopy := subId
+			subscribers = append(subscribers, &subIdCopy)
 		}
 		ba.subscribers = subscribers
 	}
@@ -289,7 +290,7 @@ func (vb *varBallot) CalculateResult(br badReads, clock *vectorclock.VectorClock
 	if !reducer.Aborted() {
 		clock.MergeInMax(reducer.Clock)
 		for _, subId := range reducer.Subscribers {
-			commitSubscribers[subId] = types.EmptyStructVal
+			commitSubscribers[*subId] = types.EmptyStructVal
 		}
 	}
 	vb.result = reducer.ToBallot()

@@ -16,18 +16,17 @@ import (
 	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
-	"goshawkdb.io/server/utils/proxy"
 	"goshawkdb.io/server/utils/status"
 	"time"
 )
 
 type VarManager struct {
-	sconn.ServerConnectionPublisher
 	localconnection.LocalConnection
 	logger           log.Logger
 	Topology         *configuration.Topology
 	RMId             common.RMId
 	db               *db.Databases
+	Servers          map[common.RMId]*sconn.ServerConnection
 	active           map[common.VarUUId]*Var
 	RollAllowed      bool
 	onDisk           func(bool)
@@ -42,29 +41,29 @@ func init() {
 
 func NewVarManager(exe *dispatcher.Executor, rmId common.RMId, cm connectionmanager.ConnectionManager, db *db.Databases, lc localconnection.LocalConnection, logger log.Logger) *VarManager {
 	vm := &VarManager{
-		ServerConnectionPublisher: proxy.NewServerConnectionPublisherProxy(exe, cm, logger),
-		LocalConnection:           lc,
-		logger:                    logger, // varDispatcher creates the context for us
-		RMId:                      rmId,
-		db:                        db,
-		active:                    make(map[common.VarUUId]*Var),
-		RollAllowed:               false,
-		tw:                        tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
-		exe:                       exe,
+		LocalConnection: lc,
+		logger:          logger, // varDispatcher creates the context for us
+		RMId:            rmId,
+		db:              db,
+		active:          make(map[common.VarUUId]*Var),
+		RollAllowed:     false,
+		tw:              tw.NewTimerWheel(time.Now(), 25*time.Millisecond),
+		exe:             exe,
 	}
 	vm.Topology = cm.AddTopologySubscriber(topology.VarSubscriber, vm)
 	vm.RollAllowed = vm.Topology != nil && vm.Topology.NextConfiguration == nil
+	cm.AddServerConnectionSubscriber(vm)
 	return vm
 }
 
-type vmTopologyChanged struct {
+type varManageMsgTopologyChanged struct {
 	actor.MsgSyncQuery
 	vm       *VarManager
 	topology *configuration.Topology
 	outcome  bool
 }
 
-func (tc *vmTopologyChanged) Exec() (bool, error) {
+func (tc *varManageMsgTopologyChanged) Exec() (bool, error) {
 	if od := tc.vm.onDisk; od != nil {
 		tc.vm.onDisk = nil
 		od(false)
@@ -83,13 +82,13 @@ func (tc *vmTopologyChanged) Exec() (bool, error) {
 	return false, nil
 }
 
-func (tc *vmTopologyChanged) done(result bool) {
+func (tc *varManageMsgTopologyChanged) done(result bool) {
 	tc.outcome = result
 	tc.MustClose()
 }
 
 func (vm *VarManager) TopologyChanged(topology *configuration.Topology, done func(bool)) {
-	tc := &vmTopologyChanged{
+	tc := &varManageMsgTopologyChanged{
 		vm:       vm,
 		topology: topology,
 	}
@@ -108,7 +107,7 @@ func (vm *VarManager) ApplyToVar(fun func(*Var), createIfMissing bool, uuid *com
 	}
 	if v == nil && createIfMissing {
 		v = NewVar(uuid, vm.exe, vm.db, vm)
-		vm.active[*v.UUId] = v
+		vm.active[*uuid] = v
 		utils.DebugLog(vm.logger, "debug", "New var.", "VarUUId", uuid)
 	}
 	fun(v)
@@ -160,32 +159,64 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 	// and bounce back into this go-routine when necessary. Only
 	// complication is you need to track in-flight loads. But I can't
 	// measure any advantage yet for doing that.
-	result, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+	var valBytes []byte
+	_, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		// rtxn.Get returns a copy of the data, so we don't need to
 		// worry about pointers into the db
-		if bites, err := rtxn.Get(vm.db.Vars, uuid[:]); err == nil {
-			return bites
-		} else {
-			return true
-		}
+		valBytes, _ = rtxn.Get(vm.db.Vars, uuid[:])
+		return nil
 	}).ResultError()
 
 	if err != nil {
 		panic(fmt.Sprintf("Error when loading %v from disk: %v", uuid, err))
-	} else if result == nil { // shutdown
+	} else if valBytes == nil { // shutdown
 		return nil, true
-	} else if bites, ok := result.([]byte); ok {
-		v, err := VarFromData(bites, vm.exe, vm.db, vm)
-		if err != nil {
-			panic(fmt.Sprintf("Error when recreating %v: %v", uuid, err))
-		} else if v == nil { // shutdown
-			return v, true
-		} else {
-			vm.active[*v.UUId] = v
-			return v, false
-		}
-	} else { // not found
+	} else if len(valBytes) == 0 { // not found
 		return nil, false
+	} else if v, err := VarFromData(valBytes, vm.exe, vm.db, vm); err != nil {
+		panic(fmt.Sprintf("Error when recreating %v: %v", uuid, err))
+	} else if v == nil { // shutdown
+		return nil, true
+	} else {
+		vm.active[*uuid] = v
+		return v, false
+	}
+}
+
+type varManagerMsgServerConnectionsChanged struct {
+	actor.MsgSyncQuery
+	*VarManager
+	servers map[common.RMId]*sconn.ServerConnection
+}
+
+func (msg varManagerMsgServerConnectionsChanged) Exec() (bool, error) {
+	defer msg.MustClose()
+	msg.Servers = msg.servers
+	return false, nil
+}
+
+func (vm *VarManager) ConnectedRMs(servers map[common.RMId]*sconn.ServerConnection) {
+	msg := &varManagerMsgServerConnectionsChanged{VarManager: vm, servers: servers}
+	msg.InitMsg(vm.exe.Mailbox)
+	vm.exe.Mailbox.EnqueueMsg(msg)
+}
+
+func (vm *VarManager) ConnectionLost(rmId common.RMId, servers map[common.RMId]*sconn.ServerConnection) {
+	msg := &varManagerMsgServerConnectionsChanged{VarManager: vm, servers: servers}
+	msg.InitMsg(vm.exe.Mailbox)
+	vm.exe.Mailbox.EnqueueMsg(msg)
+}
+
+func (vm *VarManager) ConnectionEstablished(conn *sconn.ServerConnection, servers map[common.RMId]*sconn.ServerConnection, done func()) {
+	msg := &varManagerMsgServerConnectionsChanged{VarManager: vm, servers: servers}
+	msg.InitMsg(vm.exe.Mailbox)
+	if vm.exe.Mailbox.EnqueueMsg(msg) {
+		go func() {
+			msg.Wait()
+			done()
+		}()
+	} else {
+		done()
 	}
 }
 

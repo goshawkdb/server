@@ -357,7 +357,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 	}
 
 	subscribers := make(common.TxnIds, 1+len(aalc.subscribersOnDisk))
-	subscribers[0] = *aalc.txnId
+	subscribers[0] = aalc.txnId
 	copy(subscribers[1:], aalc.subscribersOnDisk)
 
 	aalc.pendingTSC = make(map[common.TxnId]types.EmptyStruct, len(subscribers))
@@ -367,7 +367,7 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 		if _, found := rmsRemoved[subIdRM]; found {
 			continue
 		}
-		aalc.pendingTSC[subId] = types.EmptyStructVal
+		aalc.pendingTSC[*subId] = types.EmptyStructVal
 		subscribersRMs[subIdRM] = types.EmptyStructVal
 	}
 

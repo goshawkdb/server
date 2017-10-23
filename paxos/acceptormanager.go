@@ -390,7 +390,7 @@ func (ai *acceptorInstances) addInstance(instId *instanceId) {
 	}
 }
 
-const ( //            txnId  rmId  vUUId
+const ( //                txnId  rmId  vUUId
 	instanceIdLen = common.KeyLen + 4 + common.KeyLen
 )
 

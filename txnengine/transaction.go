@@ -97,9 +97,9 @@ func (action *localAction) VoteBadRead(clock *vc.VectorClockMutable, txnId *comm
 	}
 }
 
-func (action *localAction) VoteCommit(clock *vc.VectorClockMutable, subscribers common.TxnIds) bool {
+func (action *localAction) VoteCommit(clock *vc.VectorClockMutable, subscriptions *Subscriptions) bool {
 	if action.ballot == nil {
-		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock, subscribers).ToBallot()
+		action.ballot = NewBallotBuilder(action.vUUId, Commit, clock, subscriptions).ToBallot()
 		return !action.voteCast(action.ballot, false)
 	}
 	return false

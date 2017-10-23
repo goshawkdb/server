@@ -30,7 +30,7 @@ func init() {
 	db.DB.Proposers = &mdbs.DBISettings{Flags: mdb.CREATE}
 }
 
-const ( //                  txnId  rmId
+const ( //                      txnId  rmId
 	instanceIdPrefixLen = common.KeyLen + 4
 )
 

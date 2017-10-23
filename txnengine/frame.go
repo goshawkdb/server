@@ -166,21 +166,6 @@ func (fo *frameOpen) init(f *frame) {
 func (fo *frameOpen) start()         {}
 func (fo *frameOpen) String() string { return "frameOpen" }
 
-func (fo *frameOpen) ReadRetry(action *localAction) bool {
-	txn := action.Txn
-	utils.DebugLog(fo.v.vm.logger, "debug", "ReadRetry", "frame", fo.frame, "TxnId", txn.Id)
-	switch {
-	case fo.currentState != fo:
-		panic(fmt.Sprintf("%v ReadRetry called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.frameTxnActions == nil || fo.frameTxnId.Compare(action.readVsn) == common.EQ:
-		return false
-	default:
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
-		fo.v.maybeMakeInactive()
-		return true
-	}
-}
-
 func (fo *frameOpen) AddRead(action *localAction) {
 	txn := action.Txn
 	utils.DebugLog(fo.v.vm.logger, "debug", "AddRead", "frame", fo.frame, "TxnId", txn.Id, "vsn", action.readVsn)
@@ -259,7 +244,7 @@ func (fo *frameOpen) AddWrite(action *localAction) {
 		if fo.uncommittedReads == 0 {
 			fo.writes.Insert(action, uncommitted)
 			fo.calculateWriteVoteClock()
-			if !action.VoteCommit(fo.writeVoteClock, fo.v.subscriberIds) {
+			if !action.VoteCommit(fo.writeVoteClock, fo.v.subscriptions) {
 				fo.WriteAborted(action, true)
 			}
 		} else {
@@ -329,7 +314,7 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 		if fo.uncommittedReads == 0 {
 			fo.writes.Insert(action, uncommitted)
 			fo.calculateWriteVoteClock()
-			if !action.VoteCommit(fo.writeVoteClock, fo.v.subscriberIds) {
+			if !action.VoteCommit(fo.writeVoteClock, fo.v.subscriptions) {
 				fo.ReadWriteAborted(action, true)
 			}
 		} else {
@@ -522,7 +507,7 @@ func (fo *frameOpen) maybeStartWrites() {
 			next := node.Next()
 			if node.Value == postponed {
 				node.Value = uncommitted
-				if action := node.Key.(*localAction); !action.VoteCommit(fo.writeVoteClock, fo.v.subscriberIds) {
+				if action := node.Key.(*localAction); !action.VoteCommit(fo.writeVoteClock, fo.v.subscriptions) {
 					if action.IsRead() {
 						fo.ReadWriteAborted(action, false)
 					} else {

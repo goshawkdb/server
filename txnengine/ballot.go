@@ -63,8 +63,7 @@ func BallotFromData(data []byte) *Ballot {
 	subsCap := ballotCap.Subscribers()
 	subs := make(common.TxnIds, subsCap.Len())
 	for idx, l := 0, subsCap.Len(); idx < l; idx++ {
-		subId := common.MakeTxnId(subsCap.At(idx))
-		subs[idx] = *subId
+		subs[idx] = common.MakeTxnId(subsCap.At(idx))
 	}
 	return &Ballot{
 		VarUUId: vUUId,
@@ -84,11 +83,11 @@ type BallotBuilder struct {
 	Clock *vc.VectorClockMutable
 }
 
-func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *vc.VectorClockMutable, subscriberIds common.TxnIds) *BallotBuilder {
+func NewBallotBuilder(vUUId *common.VarUUId, vote Vote, clock *vc.VectorClockMutable, subscriptions *Subscriptions) *BallotBuilder {
 	ballot := &Ballot{
 		VarUUId:     vUUId,
 		Vote:        vote,
-		Subscribers: subscriberIds,
+		Subscribers: subscriptions.Subscribers(),
 	}
 	return &BallotBuilder{
 		Ballot: ballot,
