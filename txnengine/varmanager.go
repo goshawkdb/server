@@ -158,32 +158,27 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 	// and bounce back into this go-routine when necessary. Only
 	// complication is you need to track in-flight loads. But I can't
 	// measure any advantage yet for doing that.
-	result, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+	var valBytes []byte
+	completed, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		// rtxn.Get returns a copy of the data, so we don't need to
 		// worry about pointers into the db
-		if bites, err := rtxn.Get(vm.db.Vars, uuid[:]); err == nil {
-			return bites
-		} else {
-			return true
-		}
+		valBytes, _ = rtxn.Get(vm.db.Vars, uuid[:])
+		return true
 	}).ResultError()
 
 	if err != nil {
 		panic(fmt.Sprintf("Error when loading %v from disk: %v", uuid, err))
-	} else if result == nil { // shutdown
+	} else if completed == nil { // shutdown
 		return nil, true
-	} else if bites, ok := result.([]byte); ok {
-		v, err := VarFromData(bites, vm.exe, vm.db, vm)
-		if err != nil {
-			panic(fmt.Sprintf("Error when recreating %v: %v", uuid, err))
-		} else if v == nil { // shutdown
-			return v, true
-		} else {
-			vm.active[*v.UUId] = v
-			return v, false
-		}
-	} else { // not found
+	} else if len(valBytes) == 0 { // not found
 		return nil, false
+	} else if v, err := VarFromData(valBytes, vm.exe, vm.db, vm); err != nil {
+		panic(fmt.Sprintf("Error when recreating %v: %v", uuid, err))
+	} else if v == nil { // shutdown
+		return nil, true
+	} else {
+		vm.active[*uuid] = v
+		return v, false
 	}
 }
 
