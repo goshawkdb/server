@@ -61,11 +61,11 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 		valueTxnBytes = db.ReadTxnBytesFromDisk(rtxn, valueTxnId)
 		return true
 	}).ResultError(); err == nil && complete != nil {
-		var valueActions *txnreader.TxnActions
+		var valueTxn *txnreader.TxnReader
 		if len(valueTxnBytes) != 0 {
-			valueActions = txnreader.TxnReaderFromData(valueTxnBytes).Actions(false)
+			valueTxn = txnreader.TxnReaderFromData(valueTxnBytes)
 		}
-		v.curFrame = NewFrame(nil, v, writeTxnId, valueTxnId, valueActions, writeTxnClock, writesClock)
+		v.curFrame = NewFrame(nil, v, writeTxnId, valueTxnId, valueTxn, writeTxnClock, writesClock)
 		v.curFrameOnDisk = v.curFrame
 		return v, nil
 	} else {
@@ -191,7 +191,7 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	}
 }
 
-func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Positions) {
+func (v *Var) SetCurFrame(f *frame, action *localAction, valueTxn *txnreader.TxnReader, positions *common.Positions) {
 	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "action", action)
 	v.curFrame = f
 
@@ -214,14 +214,14 @@ func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Posit
 	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
 	// fmt.Printf("d%v ", diffLen)
 
-	v.maybeWriteFrame(f, action.TxnReader)
+	v.maybeWriteFrame(f, valueTxn)
 }
 
-func (v *Var) maybeWriteFrame(f *frame, txn *txnreader.TxnReader) {
+func (v *Var) maybeWriteFrame(f *frame, valueTxn *txnreader.TxnReader) {
 	if v.writeInProgress != nil {
 		v.writeInProgress = func() {
 			v.writeInProgress = nil
-			v.maybeWriteFrame(f, txn)
+			v.maybeWriteFrame(f, valueTxn)
 		}
 		return
 	}
@@ -238,15 +238,15 @@ func (v *Var) maybeWriteFrame(f *frame, txn *txnreader.TxnReader) {
 	varCap.SetWriteTxnId(f.frameTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
-	varCap.SetValueTxnId(txn.Id[:])
+	varCap.SetValueTxnId(valueTxn.Id[:])
 
 	varData := common.SegToBytes(varSeg)
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	future := v.db.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
-		if txn != nil {
-			if err := v.db.WriteTxnToDisk(rwtxn, txn.Id, txn.Data); err != nil {
+		if valueTxn != nil {
+			if err := v.db.WriteTxnToDisk(rwtxn, valueTxn.Id, valueTxn.Data); err != nil {
 				return types.EmptyStructVal
 			}
 		}
