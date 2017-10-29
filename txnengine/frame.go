@@ -454,6 +454,7 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 			// original write. We need to push it to disk. But once we
 			// have, by dfn, it's in the immediate previous frame so we
 			// can declare it LocallyComplete. TODO
+			fmt.Println("learnt value late", action.Id)
 			fo.frameValueTxn = action.TxnReader
 			return true
 		} else {
@@ -732,14 +733,17 @@ func (fo *frameOpen) maybeCreateChild() {
 		valueTxnId = winner.roll
 		if valueTxnId.Compare(fo.frameValueTxnId) == common.EQ {
 			valueTxn = fo.frameValueTxn // this can still be nil, and it's still ok!
+			fmt.Println("roll matches frame", valueTxn != nil)
 		} else {
 			for node := fo.writes.First(); node != nil; node = node.Next() {
 				action := node.Key.(*localAction)
 				if valueTxnId.Compare(action.Id) == common.EQ {
 					valueTxn = action.TxnReader
+					fmt.Println("found roll in frame")
 					break
 				}
 			}
+			fmt.Println("FAILED TO FIND ROLL IN FRAME")
 		}
 	}
 

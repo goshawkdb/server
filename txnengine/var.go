@@ -238,7 +238,7 @@ func (v *Var) maybeWriteFrame(f *frame, valueTxn *txnreader.TxnReader) {
 	varCap.SetWriteTxnId(f.frameTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
-	varCap.SetValueTxnId(valueTxn.Id[:])
+	varCap.SetValueTxnId(f.frameValueTxnId[:])
 
 	varData := common.SegToBytes(varSeg)
 

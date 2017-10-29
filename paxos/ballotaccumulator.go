@@ -355,7 +355,11 @@ func (br badReads) combine(rmBal *rmBallot) {
 	badRead := rmBal.ballot.VoteCap.AbortBadRead()
 	clock := rmBal.ballot.Clock
 	txnId := common.MakeTxnId(badRead.TxnId())
-	actions := txnreader.TxnActionsFromData(badRead.TxnActions(), true).Actions()
+	badReadData := badRead.TxnActions()
+	if len(badReadData) == 0 {
+		return
+	}
+	actions := txnreader.TxnActionsFromData(badReadData, true).Actions()
 
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
