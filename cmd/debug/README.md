@@ -71,8 +71,8 @@ see.
 * To close the dialogue, press `c` again.
 * At this point the numbers `0` to `9` will directly toggle on and off
   the first 10 columns.
-* Otherwise, use cursors up and down to move to the column you want,
-  and then `space` to toggle it off and on.
+* Otherwise, use cursors `up` and `down` to move to the column you
+  want, and then `space` to toggle it off and on.
 * Pressing `a` will turn on all columns.
 * Pressing `h` will turn off all columns which have no values for the
   currently limited rows.
