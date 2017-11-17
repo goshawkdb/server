@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	ui "github.com/jroimartin/gocui"
+	"goshawkdb.io/server/debug"
 	"os"
 )
 
@@ -19,13 +20,11 @@ func main() {
 		maybeExitError(errors.New("Usage: debug path/to/file.log"))
 	}
 	path := os.Args[1]
-	rows, err := RowsFromFile(path)
+	gui, err := debug.NewDebugGui(path)
 	maybeExitError(err)
-	g, err := NewDebugGui(rows)
-	maybeExitError(err)
-	defer g.Close()
+	defer gui.Close()
 
-	if err := g.MainLoop(); err != nil && err != ui.ErrQuit {
+	if err := gui.MainLoop(); err != ui.ErrQuit {
 		maybeExitError(err)
 	}
 }

@@ -1,4 +1,4 @@
-package main
+package debug
 
 import (
 	"fmt"
@@ -130,14 +130,24 @@ func (rs *Rows) SetMatch(key, value string) {
 	rs.MatchingValue = value
 }
 
-func (rs *Rows) NextMatch(from int) (int, Row) {
+func (rs *Rows) NextMatch(from int, forwards bool) int {
 	if len(rs.MatchingKey) == 0 {
-		return from, nil
+		return from
 	}
-	for idx, r := range rs.Selected[from+1:] {
-		if e := r[rs.MatchingKey]; e == rs.MatchingValue {
-			return from + 1 + idx, r
+	if forwards {
+		for idx := from + 1; idx < len(rs.Selected); idx++ {
+			r := rs.Selected[idx]
+			if e := r[rs.MatchingKey]; e == rs.MatchingValue {
+				return idx
+			}
+		}
+	} else {
+		for idx := from - 1; idx > 0; idx-- {
+			r := rs.Selected[idx]
+			if e := r[rs.MatchingKey]; e == rs.MatchingValue {
+				return idx
+			}
 		}
 	}
-	return from, nil
+	return from
 }

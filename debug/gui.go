@@ -1,4 +1,4 @@
-package main
+package debug
 
 import (
 	"fmt"
@@ -17,13 +17,19 @@ const (
 
 type DebugGui struct {
 	*ui.Gui
+	Path           string
 	RowsGui        *RowsGui
 	Columns        Columns
 	ColumnSelector *ColumnSelector
 	Events         *Events
 }
 
-func NewDebugGui(rows *Rows) (*DebugGui, error) {
+func NewDebugGui(path string) (*DebugGui, error) {
+	rows, err := RowsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+
 	g, err := ui.NewGui(ui.OutputNormal)
 	if err != nil {
 		return nil, err
@@ -33,6 +39,7 @@ func NewDebugGui(rows *Rows) (*DebugGui, error) {
 
 	dg := &DebugGui{
 		Gui:     g,
+		Path:    path,
 		Columns: columns,
 		Events:  &Events{},
 	}
@@ -48,7 +55,7 @@ func NewDebugGui(rows *Rows) (*DebugGui, error) {
 	}
 
 	dg.Events.Layout(g) // just to create it so the append will work.
-	AppendEvent(g, fmt.Sprintf("Loaded %d rows.", len(rows.All)))
+	AppendEvent(g, fmt.Sprintf("Loaded %d rows from %s.", len(rows.All), path))
 
 	return dg, nil
 }
@@ -68,6 +75,12 @@ func (dg *DebugGui) setKeybindings() error {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'l', ui.ModNone, dg.RowsGui.Limit); err != nil {
 		return err
+	} else if err := dg.SetKeybinding(HEADERS, 's', ui.ModNone, dg.RowsGui.Search); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(HEADERS, 'r', ui.ModNone, dg.RowsGui.SearchPrev); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(HEADERS, ui.KeyEnter, ui.ModNone, dg.RowsGui.StopSearch); err != nil {
+		return err
 	} else if err := dg.SetKeybinding(HEADERS, ui.KeyArrowRight, ui.ModNone, dg.Columns.Right); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, ui.KeyArrowLeft, ui.ModNone, dg.Columns.Left); err != nil {
@@ -75,6 +88,10 @@ func (dg *DebugGui) setKeybindings() error {
 	} else if err := dg.SetKeybinding(HEADERS, 'c', ui.ModNone, dg.ColumnSelector.Display); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(SELECTOR, 'c', ui.ModNone, dg.ColumnSelector.Hide); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(SELECTOR, 'h', ui.ModNone, dg.ColumnSelector.HideEmpty); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(SELECTOR, 'a', ui.ModNone, dg.ColumnSelector.ShowAll); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(SELECTOR, ui.KeyArrowDown, ui.ModNone, dg.ColumnSelector.CursorDown); err != nil {
 		return err
@@ -304,6 +321,52 @@ func (cs *ColumnSelector) Hide(g *ui.Gui, v *ui.View) error {
 	return nil
 }
 
+func (cs *ColumnSelector) ShowAll(g *ui.Gui, v *ui.View) error {
+	for _, col := range cs.Columns {
+		col.Displayed = true
+	}
+	return AppendEvent(g, "Showing all columns.")
+}
+
+// this does not enable non-empty columns - only hides empty ones
+func (cs *ColumnSelector) HideEmpty(g *ui.Gui, v *ui.View) error {
+	zeros := make([]int, len(cs.Columns))
+	keys := make(map[string]*int, len(cs.Columns))
+	for idx, col := range cs.Columns {
+		keys[col.Name] = &zeros[idx]
+	}
+	for _, row := range cs.RowsGui.Selected {
+		for k := range row {
+			cPtr := keys[k]
+			*cPtr++
+		}
+	}
+	var oldSelectedIdx int
+	selectedNeeded := false
+	for idx, col := range cs.Columns {
+		if cPtr := keys[col.Name]; *cPtr == 0 {
+			col.Displayed = false
+			if col.Selected {
+				col.Selected = false
+				oldSelectedIdx = idx
+			}
+		} else if col.Displayed && selectedNeeded {
+			col.Selected = true
+			selectedNeeded = false
+		}
+	}
+	if selectedNeeded {
+		for idx := oldSelectedIdx - 1; idx >= 0; idx-- {
+			col := cs.Columns[idx]
+			if col.Displayed {
+				col.Selected = true
+				break
+			}
+		}
+	}
+	return AppendEvent(g, "Hidden empty columns.")
+}
+
 func (cs *ColumnSelector) CursorDown(g *ui.Gui, v *ui.View) error {
 	cx, cy := v.Cursor()
 	ox, oy := v.Origin()
@@ -412,7 +475,7 @@ func (rg *RowsGui) Layout(g *ui.Gui) error {
 		if err != ui.ErrUnknownView {
 			return err
 		}
-		v.Title = "Rows"
+		v.Frame = false
 	}
 	v.Clear()
 	height := screenHeight - 10 - 3
@@ -465,7 +528,12 @@ func (rg *RowsGui) PageDown(g *ui.Gui, v *ui.View) error {
 		return err
 	}
 	_, height := v.Size()
-	for height /= 2; height > 0; height-- {
+	height--
+	height /= 2
+	if height == 0 {
+		height = 1
+	}
+	for ; height > 0; height-- {
 		if err := rg.Down(g, v); err != nil {
 			return err
 		}
@@ -479,7 +547,12 @@ func (rg *RowsGui) PageUp(g *ui.Gui, v *ui.View) error {
 		return err
 	}
 	_, height := v.Size()
-	for height /= 2; height > 0; height-- {
+	height--
+	height /= 2
+	if height == 0 {
+		height = 1
+	}
+	for ; height > 0; height-- {
 		if err := rg.Up(g, v); err != nil {
 			return err
 		}
@@ -512,6 +585,7 @@ func (rg *RowsGui) Limit(g *ui.Gui, v *ui.View) error {
 				break
 			}
 		}
+		return AppendEvent(g, fmt.Sprintf("Added constraint %s=%s. %d matching rows", key, val, len(rg.Selected)))
 	}
 	return nil
 }
@@ -522,7 +596,7 @@ func (rg *RowsGui) All(g *ui.Gui, v *ui.View) error {
 		return err
 	}
 	_, height := v.Size()
-	// again, we really want to keep the same row in the same place on the screen
+	// again, we try to keep the same row in the same place on the screen
 	row := rg.Selected[rg.highlight]
 	screenRow := rg.highlight - rg.from
 	screenRowBotUp := height - screenRow
@@ -537,5 +611,86 @@ func (rg *RowsGui) All(g *ui.Gui, v *ui.View) error {
 			break
 		}
 	}
-	return nil
+	return AppendEvent(g, fmt.Sprintf("Removed all constraints. %d rows.", len(rg.Selected)))
+}
+
+func (rg *RowsGui) Search(g *ui.Gui, v *ui.View) error {
+	if len(rg.MatchingKey) == 0 {
+		key := ""
+		for _, c := range rg.Columns {
+			if c.Selected {
+				key = c.Name
+				break
+			}
+		}
+		row := rg.Selected[rg.highlight]
+		val, found := row[key]
+		if found && len(val) > 0 {
+			rg.SetMatch(key, val)
+			return AppendEvent(g, fmt.Sprintf("Highlighting %s=%s.", key, val))
+		}
+		return nil
+	} else {
+		v, err := g.View(ROWS)
+		if err != nil {
+			return err
+		}
+		_, height := v.Size()
+		old := rg.highlight
+		rg.highlight = rg.NextMatch(rg.highlight, true)
+		if rg.highlight >= rg.from+height {
+			// we should re-center the screen
+			rg.from = rg.highlight - (height / 2)
+			if rg.from+height > len(rg.Selected) {
+				rg.from = len(rg.Selected) - height
+			}
+		}
+		if old == rg.highlight {
+			return AppendEvent(g, fmt.Sprintf("No further matches found."))
+		}
+		return nil
+	}
+}
+
+func (rg *RowsGui) SearchPrev(g *ui.Gui, v *ui.View) error {
+	if len(rg.MatchingKey) == 0 {
+		key := ""
+		for _, c := range rg.Columns {
+			if c.Selected {
+				key = c.Name
+				break
+			}
+		}
+		row := rg.Selected[rg.highlight]
+		val, found := row[key]
+		if found && len(val) > 0 {
+			rg.SetMatch(key, val)
+			return AppendEvent(g, fmt.Sprintf("Highlighting %s=%s.", key, val))
+		}
+		return nil
+	} else {
+		v, err := g.View(ROWS)
+		if err != nil {
+			return err
+		}
+		_, height := v.Size()
+		old := rg.highlight
+		rg.highlight = rg.NextMatch(rg.highlight, false)
+		if rg.highlight < rg.from {
+			// we should re-center the screen
+			rg.from = rg.highlight - (height / 2)
+			if rg.from < 0 {
+				rg.from = 0
+			}
+		}
+		if old == rg.highlight {
+			return AppendEvent(g, fmt.Sprintf("No further matches found."))
+		}
+		return nil
+	}
+}
+
+func (rg *RowsGui) StopSearch(g *ui.Gui, v *ui.View) error {
+	rg.SetMatch("", "")
+	return AppendEvent(g, fmt.Sprintf("Cleared Highlighting."))
 }
