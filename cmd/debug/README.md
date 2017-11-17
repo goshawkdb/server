@@ -17,6 +17,8 @@ then, open the logs with this debug tool:
 
     ./debug /path/to/file.log
 
+You probably want to maximise your terminal window.
+
 ## Key bindings
 
 * Press 'q' to quit.
@@ -58,7 +60,7 @@ C-w).
 
 The default ordering of the columns is based on frequency analysis of
 how many rows have entries for that column. So columns which are used
-by more rows will be on the left of columns which are used by few
+by more rows will be on the left of columns which are used by fewer
 rows. Columns which are used by equally many rows are sorted
 alphabetically by name. Thus the initial layout of colums should be
 both deterministic and broadly useful.
