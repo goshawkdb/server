@@ -57,9 +57,10 @@ C-w).
   all rows, don't forget to press `a` first.
 
 You may want to see all the unique values for a particular column. To
-do this, press 'v' which brings up a dialague.
+do this, select the column as usual, and press 'v' which brings up a
+dialogue.
 
-* Press `v` again to close the dialogue and change nothing
+* Press `v` again to close the dialogue and change nothing.
 * Use cursor `up` and `down` (or `PageUp` and `PageDown` to move
   quickly) to select the value you want.
 * Press `return` to limit to only the chosen value.
