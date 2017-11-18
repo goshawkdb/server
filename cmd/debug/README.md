@@ -66,6 +66,8 @@ dialogue.
 * Press `return` to limit to only the chosen value.
 * As usual, this works only on the limited rows, so you may want to
   press `a` first.
+* The values appear in this dialogue in the order in which they first
+  appear in the log file.
 
 ## Hiding and showing columns
 
