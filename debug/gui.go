@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	HEADERS  = "headers"
-	EVENTS   = "events"
-	ROWS     = "rows"
-	SELECTOR = "selector"
+	HEADERS   = "headers"
+	EVENTS    = "events"
+	ROWS      = "rows"
+	CSELECTOR = "cselector"
+	VSELECTOR = "vselector"
 )
 
 type DebugGui struct {
@@ -21,6 +22,7 @@ type DebugGui struct {
 	RowsGui        *RowsGui
 	Columns        Columns
 	ColumnSelector *ColumnSelector
+	ValueSelector  *ValueSelector
 	Events         *Events
 }
 
@@ -44,11 +46,12 @@ func NewDebugGui(path string) (*DebugGui, error) {
 		Events:  &Events{},
 	}
 	dg.ColumnSelector = &ColumnSelector{DebugGui: dg}
+	dg.ValueSelector = &ValueSelector{DebugGui: dg}
 	dg.RowsGui = &RowsGui{DebugGui: dg, Rows: rows}
 
 	rows.SelectAll()
 
-	dg.SetManager(dg.Events, dg.Columns, dg.RowsGui, dg.ColumnSelector)
+	dg.SetManager(dg.Events, dg.Columns, dg.RowsGui, dg.ColumnSelector, dg.ValueSelector)
 
 	if err := dg.setKeybindings(); err != nil {
 		return nil, err
@@ -87,19 +90,33 @@ func (dg *DebugGui) setKeybindings() error {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'c', ui.ModNone, dg.ColumnSelector.Display); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, 'c', ui.ModNone, dg.ColumnSelector.Hide); err != nil {
+	} else if err := dg.SetKeybinding(HEADERS, 'v', ui.ModNone, dg.ValueSelector.Display); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, 'h', ui.ModNone, dg.ColumnSelector.HideEmpty); err != nil {
+	} else if err := dg.SetKeybinding(VSELECTOR, 'v', ui.ModNone, dg.ValueSelector.Hide); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, 'a', ui.ModNone, dg.ColumnSelector.ShowAll); err != nil {
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyEnter, ui.ModNone, dg.ValueSelector.Limit); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, ui.KeyArrowDown, ui.ModNone, dg.ColumnSelector.CursorDown); err != nil {
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyArrowDown, ui.ModNone, dg.ValueSelector.Down); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, ui.KeyArrowUp, ui.ModNone, dg.ColumnSelector.CursorUp); err != nil {
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyArrowUp, ui.ModNone, dg.ValueSelector.Up); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, ui.KeyPgdn, ui.ModNone, dg.ColumnSelector.MoveDown); err != nil {
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyPgdn, ui.ModNone, dg.ValueSelector.PageDown); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(SELECTOR, ui.KeyPgup, ui.ModNone, dg.ColumnSelector.MoveUp); err != nil {
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyPgup, ui.ModNone, dg.ValueSelector.PageUp); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, 'c', ui.ModNone, dg.ColumnSelector.Hide); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, 'h', ui.ModNone, dg.ColumnSelector.HideEmpty); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, 'a', ui.ModNone, dg.ColumnSelector.ShowAll); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, ui.KeyArrowDown, ui.ModNone, dg.ColumnSelector.CursorDown); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, ui.KeyArrowUp, ui.ModNone, dg.ColumnSelector.CursorUp); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, ui.KeyPgdn, ui.ModNone, dg.ColumnSelector.MoveDown); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(CSELECTOR, ui.KeyPgup, ui.ModNone, dg.ColumnSelector.MoveUp); err != nil {
 		return err
 	}
 
@@ -276,7 +293,7 @@ func (cs *ColumnSelector) Layout(g *ui.Gui) error {
 	midX, midY := screenWidth/2, screenHeight/2
 	midH, midW := desiredHeight/2, desiredWidth/2
 
-	v, err := g.SetView(SELECTOR, midX-(desiredWidth-midW), midY-(desiredHeight-midH), midX+midW, midY+midH)
+	v, err := g.SetView(CSELECTOR, midX-(desiredWidth-midW), midY-(desiredHeight-midH), midX+midW, midY+midH)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
@@ -297,7 +314,7 @@ func (cs *ColumnSelector) Layout(g *ui.Gui) error {
 		}
 		fmt.Fprintf(v, " %*d. [%s] %s\n", columnCountWidth, idx, d, c.Name)
 	}
-	if _, err := g.SetCurrentView(SELECTOR); err != nil {
+	if _, err := g.SetCurrentView(CSELECTOR); err != nil {
 		return err
 	}
 	return nil
@@ -312,7 +329,7 @@ func (cs *ColumnSelector) Display(g *ui.Gui, v *ui.View) error {
 func (cs *ColumnSelector) Hide(g *ui.Gui, v *ui.View) error {
 	g.Cursor = false
 	cs.Displayed = false
-	if err := g.DeleteView(SELECTOR); err != nil {
+	if err := g.DeleteView(CSELECTOR); err != nil {
 		return err
 	}
 	if _, err := g.SetCurrentView(HEADERS); err != nil {
@@ -433,6 +450,169 @@ func (cs *ColumnSelector) Edit(v *ui.View, key ui.Key, ch rune, mod ui.Modifier)
 			cs.Columns.ToggleDisplayed(lineNum)
 		}
 	}
+}
+
+type ValueSelector struct {
+	*DebugGui
+	Displayed bool
+	Key       string
+	Values    []string
+	From      int
+	Highlight int
+}
+
+func (vs *ValueSelector) Layout(g *ui.Gui) error {
+	if !vs.Displayed {
+		return nil
+	}
+	screenWidth, screenHeight := g.Size()
+
+	desiredHeight := len(vs.Values) + 1
+	desiredWidth := 0
+	for _, val := range vs.Values {
+		if len(val) > desiredWidth {
+			desiredWidth = len(val)
+		}
+	}
+	if desiredWidth >= screenWidth {
+		desiredWidth = screenWidth - 1
+	}
+	if desiredHeight >= screenHeight {
+		desiredHeight = screenHeight - 1
+	}
+	midX, midY := screenWidth/2, screenHeight/2
+	midH, midW := desiredHeight/2, desiredWidth/2
+
+	v, err := g.SetView(VSELECTOR, midX-(desiredWidth-midW), midY-(desiredHeight-midH), midX+midW, midY+midH)
+	if err != nil {
+		if err != ui.ErrUnknownView {
+			return err
+		}
+		v.Frame = true
+		v.Title = "Select Value"
+	}
+	v.Clear()
+	end := vs.From + screenHeight
+	if end > len(vs.Values) {
+		end = len(vs.Values)
+	}
+	for idx, val := range vs.Values[vs.From:end] {
+		if idx+vs.From == vs.Highlight {
+			fmt.Fprintf(v, "\033[7m%s\033[0m\n", val)
+		} else {
+			fmt.Fprintf(v, "%s\n", val)
+		}
+	}
+	if _, err := g.SetCurrentView(VSELECTOR); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (vs *ValueSelector) Display(g *ui.Gui, v *ui.View) error {
+	vs.Displayed = true
+	vs.Highlight = 0
+	vs.From = 0
+	key := ""
+	for _, col := range vs.Columns {
+		if col.Selected {
+			key = col.Name
+			break
+		}
+	}
+	vs.Key = key
+	vs.Values = vs.RowsGui.Values(key)
+
+	return nil
+}
+
+func (vs *ValueSelector) Hide(g *ui.Gui, v *ui.View) error {
+	vs.Displayed = false
+	vs.Key = ""
+	vs.Values = nil
+	if err := g.DeleteView(VSELECTOR); err != nil {
+		return err
+	}
+	if _, err := g.SetCurrentView(HEADERS); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (vs *ValueSelector) Down(g *ui.Gui, v *ui.View) error {
+	vs.Highlight++
+	if vs.Highlight >= len(vs.Values) {
+		vs.Highlight = len(vs.Values) - 1
+	}
+	_, height := v.Size()
+	height--
+	if vs.Highlight >= vs.From+height {
+		vs.From = vs.Highlight - height
+	}
+	return nil
+}
+
+func (vs *ValueSelector) Up(g *ui.Gui, v *ui.View) error {
+	vs.Highlight--
+	if vs.Highlight < 0 {
+		vs.Highlight = 0
+	}
+	if vs.Highlight < vs.From {
+		vs.From = vs.Highlight
+	}
+	return nil
+}
+
+func (vs *ValueSelector) PageDown(g *ui.Gui, v *ui.View) error {
+	_, height := v.Size()
+	height--
+	height /= 2
+	if height == 0 {
+		height = 1
+	}
+	for ; height > 0; height-- {
+		if err := vs.Down(g, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (vs *ValueSelector) PageUp(g *ui.Gui, v *ui.View) error {
+	_, height := v.Size()
+	height--
+	height /= 2
+	if height == 0 {
+		height = 1
+	}
+	for ; height > 0; height-- {
+		if err := vs.Up(g, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (vs *ValueSelector) Limit(g *ui.Gui, v *ui.View) error {
+	v, err := g.View(VSELECTOR)
+	if err != nil {
+		return err
+	}
+	val, err := v.Line(vs.Highlight - vs.From)
+	if err != nil {
+		return err
+	}
+	for idx, row := range vs.RowsGui.Selected {
+		if row[vs.Key] == val {
+			vs.RowsGui.from = idx
+			vs.RowsGui.highlight = idx
+			if err := vs.RowsGui.Limit(g, v); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	return vs.Hide(g, v)
 }
 
 type Events struct{}

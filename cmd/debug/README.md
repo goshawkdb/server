@@ -52,9 +52,19 @@ C-w).
 
 * `s` will jump to the next matching row.
 * `r` will jump to the previous matching row.
-* Press return to clear the search.
+* Press `return` to clear the search.
 * The search works within the limited rows, so if you want to search
   all rows, don't forget to press `a` first.
+
+You may want to see all the unique values for a particular column. To
+do this, press 'v' which brings up a dialague.
+
+* Press `v` again to close the dialogue and change nothing
+* Use cursor `up` and `down` (or `PageUp` and `PageDown` to move
+  quickly) to select the value you want.
+* Press `return` to limit to only the chosen value.
+* As usual, this works only on the limited rows, so you may want to
+  press `a` first.
 
 ## Hiding and showing columns
 

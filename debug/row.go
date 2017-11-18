@@ -151,3 +151,19 @@ func (rs *Rows) NextMatch(from int, forwards bool) int {
 	}
 	return from
 }
+
+func (rs *Rows) Values(key string) []string {
+	values := make(map[string]int)
+	for _, row := range rs.Selected {
+		if v, found := row[key]; found {
+			if _, found := values[v]; !found {
+				values[v] = len(values)
+			}
+		}
+	}
+	result := make([]string, len(values))
+	for v, idx := range values {
+		result[idx] = v
+	}
+	return result
+}
