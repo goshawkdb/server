@@ -74,11 +74,15 @@ func (dg *DebugGui) setKeybindings() error {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, ui.KeyPgup, ui.ModNone, dg.RowsGui.PageUp); err != nil {
 		return err
+	} else if err := dg.SetKeybinding(HEADERS, ui.KeyEnd, ui.ModNone, dg.RowsGui.Bottom); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(HEADERS, ui.KeyHome, ui.ModNone, dg.RowsGui.Top); err != nil {
+		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'a', ui.ModNone, dg.RowsGui.All); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'l', ui.ModNone, dg.RowsGui.Limit); err != nil {
 		return err
-	} else if err := dg.SetKeybinding(HEADERS, 's', ui.ModNone, dg.RowsGui.Search); err != nil {
+	} else if err := dg.SetKeybinding(HEADERS, 's', ui.ModNone, dg.RowsGui.SearchNext); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'r', ui.ModNone, dg.RowsGui.SearchPrev); err != nil {
 		return err
@@ -103,6 +107,10 @@ func (dg *DebugGui) setKeybindings() error {
 	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyPgdn, ui.ModNone, dg.ValueSelector.PageDown); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyPgup, ui.ModNone, dg.ValueSelector.PageUp); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyEnd, ui.ModNone, dg.ValueSelector.Bottom); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(VSELECTOR, ui.KeyHome, ui.ModNone, dg.ValueSelector.Top); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(CSELECTOR, 'c', ui.ModNone, dg.ColumnSelector.Hide); err != nil {
 		return err
@@ -539,28 +547,37 @@ func (vs *ValueSelector) Hide(g *ui.Gui, v *ui.View) error {
 	return nil
 }
 
-func (vs *ValueSelector) Down(g *ui.Gui, v *ui.View) error {
-	vs.Highlight++
-	if vs.Highlight >= len(vs.Values) {
-		vs.Highlight = len(vs.Values) - 1
+func (vs *ValueSelector) SetHighlight(h int, v *ui.View) error {
+	if h < 0 {
+		h = 0
+	} else if h >= len(vs.Values) {
+		h = len(vs.Values) - 1
 	}
+	vs.Highlight = h
 	_, height := v.Size()
-	height--
-	if vs.Highlight >= vs.From+height {
-		vs.From = vs.Highlight - height
+	to := vs.From + height
+	if vs.Highlight >= to {
+		vs.From = vs.Highlight - height + 1
+	} else if vs.Highlight < vs.From {
+		vs.From = vs.Highlight
 	}
 	return nil
 }
 
+func (vs *ValueSelector) Down(g *ui.Gui, v *ui.View) error {
+	return vs.SetHighlight(vs.Highlight+1, v)
+}
+
 func (vs *ValueSelector) Up(g *ui.Gui, v *ui.View) error {
-	vs.Highlight--
-	if vs.Highlight < 0 {
-		vs.Highlight = 0
-	}
-	if vs.Highlight < vs.From {
-		vs.From = vs.Highlight
-	}
-	return nil
+	return vs.SetHighlight(vs.Highlight-1, v)
+}
+
+func (vs *ValueSelector) Top(g *ui.Gui, v *ui.View) error {
+	return vs.SetHighlight(0, v)
+}
+
+func (vs *ValueSelector) Bottom(g *ui.Gui, v *ui.View) error {
+	return vs.SetHighlight(len(vs.Values)-1, v)
 }
 
 func (vs *ValueSelector) PageDown(g *ui.Gui, v *ui.View) error {
@@ -570,12 +587,7 @@ func (vs *ValueSelector) PageDown(g *ui.Gui, v *ui.View) error {
 	if height == 0 {
 		height = 1
 	}
-	for ; height > 0; height-- {
-		if err := vs.Down(g, v); err != nil {
-			return err
-		}
-	}
-	return nil
+	return vs.SetHighlight(vs.Highlight+height, v)
 }
 
 func (vs *ValueSelector) PageUp(g *ui.Gui, v *ui.View) error {
@@ -585,12 +597,7 @@ func (vs *ValueSelector) PageUp(g *ui.Gui, v *ui.View) error {
 	if height == 0 {
 		height = 1
 	}
-	for ; height > 0; height-- {
-		if err := vs.Up(g, v); err != nil {
-			return err
-		}
-	}
-	return nil
+	return vs.SetHighlight(vs.Highlight-height, v)
 }
 
 func (vs *ValueSelector) Limit(g *ui.Gui, v *ui.View) error {
@@ -602,15 +609,9 @@ func (vs *ValueSelector) Limit(g *ui.Gui, v *ui.View) error {
 	if err != nil {
 		return err
 	}
-	for idx, row := range vs.RowsGui.Selected {
-		if row[vs.Key] == val {
-			vs.RowsGui.from = idx
-			vs.RowsGui.highlight = idx
-			if err := vs.RowsGui.Limit(g, v); err != nil {
-				return err
-			}
-			break
-		}
+	vs.RowsGui.LimitSelected(vs.Key, val)
+	if err := vs.RowsGui.SetHighlight(0, g); err != nil {
+		return err
 	}
 	return vs.Hide(g, v)
 }
@@ -669,37 +670,41 @@ func (rg *RowsGui) Layout(g *ui.Gui) error {
 	return v.SetOrigin(ox, 0)
 }
 
-func (rg *RowsGui) Down(g *ui.Gui, v *ui.View) error {
+func (rg *RowsGui) SetHighlight(h int, g *ui.Gui) error {
+	if h < 0 {
+		h = 0
+	} else if h >= len(rg.Selected) {
+		h = len(rg.Selected) - 1
+	}
 	v, err := g.View(ROWS)
 	if err != nil {
 		return err
 	}
-	rg.highlight++
 	_, height := v.Size()
+	rg.highlight = h
 	to := height + rg.from
-	if to > len(rg.Selected) {
-		to = len(rg.Selected)
-	}
 	if rg.highlight >= to {
-		if to < len(rg.Selected) {
-			rg.from++
-		} else {
-			rg.highlight--
-		}
+		rg.from = rg.highlight - height + 1
+	} else if rg.highlight < rg.from {
+		rg.from = rg.highlight
 	}
 	return nil
 }
 
+func (rg *RowsGui) Down(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(rg.highlight+1, g)
+}
+
 func (rg *RowsGui) Up(g *ui.Gui, v *ui.View) error {
-	rg.highlight--
-	if rg.highlight < rg.from {
-		if rg.highlight >= 0 {
-			rg.from--
-		} else {
-			rg.highlight++
-		}
-	}
-	return nil
+	return rg.SetHighlight(rg.highlight-1, g)
+}
+
+func (rg *RowsGui) Top(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(0, g)
+}
+
+func (rg *RowsGui) Bottom(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(len(rg.Selected)-1, g)
 }
 
 func (rg *RowsGui) PageDown(g *ui.Gui, v *ui.View) error {
@@ -713,12 +718,7 @@ func (rg *RowsGui) PageDown(g *ui.Gui, v *ui.View) error {
 	if height == 0 {
 		height = 1
 	}
-	for ; height > 0; height-- {
-		if err := rg.Down(g, v); err != nil {
-			return err
-		}
-	}
-	return nil
+	return rg.SetHighlight(rg.highlight+height, g)
 }
 
 func (rg *RowsGui) PageUp(g *ui.Gui, v *ui.View) error {
@@ -732,12 +732,7 @@ func (rg *RowsGui) PageUp(g *ui.Gui, v *ui.View) error {
 	if height == 0 {
 		height = 1
 	}
-	for ; height > 0; height-- {
-		if err := rg.Up(g, v); err != nil {
-			return err
-		}
-	}
-	return nil
+	return rg.SetHighlight(rg.highlight-height, g)
 }
 
 func (rg *RowsGui) Limit(g *ui.Gui, v *ui.View) error {
@@ -794,7 +789,7 @@ func (rg *RowsGui) All(g *ui.Gui, v *ui.View) error {
 	return AppendEvent(g, fmt.Sprintf("Removed all constraints. %d rows.", len(rg.Selected)))
 }
 
-func (rg *RowsGui) Search(g *ui.Gui, v *ui.View) error {
+func (rg *RowsGui) SearchNext(g *ui.Gui, v *ui.View) error {
 	if len(rg.MatchingKey) == 0 {
 		key := ""
 		for _, c := range rg.Columns {
