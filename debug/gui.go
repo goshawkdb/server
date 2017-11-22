@@ -610,6 +610,9 @@ func (vs *ValueSelector) Limit(g *ui.Gui, v *ui.View) error {
 		return err
 	}
 	vs.RowsGui.LimitSelected(vs.Key, val)
+	if err := AppendEvent(g, fmt.Sprintf("Added constraint %s=%s. %d matching rows", vs.Key, val, len(vs.RowsGui.Selected))); err != nil {
+		return err
+	}
 	if err := vs.RowsGui.SetHighlight(0, g); err != nil {
 		return err
 	}

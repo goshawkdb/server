@@ -142,7 +142,7 @@ func (rs *Rows) NextMatch(from int, forwards bool) int {
 			}
 		}
 	} else {
-		for idx := from - 1; idx > 0; idx-- {
+		for idx := from - 1; idx >= 0; idx-- {
 			r := rs.Selected[idx]
 			if e := r[rs.MatchingKey]; e == rs.MatchingValue {
 				return idx
