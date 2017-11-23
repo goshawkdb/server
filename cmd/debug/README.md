@@ -92,3 +92,12 @@ see.
 * Pressing `PageUp` and `PageDown` will move the current column up or
   down in the column list.
 * You cannot turn off all columns. That would be silly.
+
+## Showing all of a row
+
+The current row may have values for many columns and they may not all
+fit on a single line. If you press `i` then a new Info Panel will be
+displayed that contains all of the key-value pairs of the current
+row. The display of the rows will be automatically resized as
+necessary to fit this in. This Info Panel automatically updates as you
+navigate around the log file. Press `i` again to hide it.

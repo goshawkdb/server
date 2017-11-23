@@ -14,6 +14,7 @@ const (
 	ROWS      = "rows"
 	CSELECTOR = "cselector"
 	VSELECTOR = "vselector"
+	INFO      = "info"
 )
 
 type DebugGui struct {
@@ -23,6 +24,7 @@ type DebugGui struct {
 	Columns        Columns
 	ColumnSelector *ColumnSelector
 	ValueSelector  *ValueSelector
+	InfoPanel      *InfoPanel
 	Events         *Events
 }
 
@@ -48,10 +50,11 @@ func NewDebugGui(path string) (*DebugGui, error) {
 	dg.ColumnSelector = &ColumnSelector{DebugGui: dg}
 	dg.ValueSelector = &ValueSelector{DebugGui: dg}
 	dg.RowsGui = &RowsGui{DebugGui: dg, Rows: rows}
+	dg.InfoPanel = &InfoPanel{DebugGui: dg}
 
 	rows.SelectAll()
 
-	dg.SetManager(dg.Events, dg.Columns, dg.RowsGui, dg.ColumnSelector, dg.ValueSelector)
+	dg.SetManager(dg.Events, dg.InfoPanel, dg.Columns, dg.RowsGui, dg.ColumnSelector, dg.ValueSelector)
 
 	if err := dg.setKeybindings(); err != nil {
 		return nil, err
@@ -95,6 +98,8 @@ func (dg *DebugGui) setKeybindings() error {
 	} else if err := dg.SetKeybinding(HEADERS, 'c', ui.ModNone, dg.ColumnSelector.Display); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'v', ui.ModNone, dg.ValueSelector.Display); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(HEADERS, 'i', ui.ModNone, dg.InfoPanel.Toggle); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(VSELECTOR, 'v', ui.ModNone, dg.ValueSelector.Hide); err != nil {
 		return err
@@ -654,7 +659,18 @@ type RowsGui struct {
 
 func (rg *RowsGui) Layout(g *ui.Gui) error {
 	screenWidth, screenHeight := g.Size()
-	v, err := g.SetView(ROWS, 0, 2, screenWidth-1, screenHeight-10)
+	extraHeight := 0
+	if rg.InfoPanel.Displayed {
+		ip, err := g.View(INFO)
+		if err != nil && err != ui.ErrUnknownView {
+			return err
+		}
+		if err == nil {
+			_, extraHeight = ip.Size()
+			extraHeight += 2
+		}
+	}
+	v, err := g.SetView(ROWS, 0, 2, screenWidth-1, screenHeight-10-extraHeight)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
@@ -662,7 +678,7 @@ func (rg *RowsGui) Layout(g *ui.Gui) error {
 		v.Frame = false
 	}
 	v.Clear()
-	height := screenHeight - 10 - 3
+	height := screenHeight - 10 - extraHeight - 3
 	rg.Format(v, rg.Columns, rg.from, height, rg.highlight)
 
 	headers, err := g.View(HEADERS)
@@ -683,8 +699,15 @@ func (rg *RowsGui) SetHighlight(h int, g *ui.Gui) error {
 	if err != nil {
 		return err
 	}
-	_, height := v.Size()
 	rg.highlight = h
+	// we've changed the highlighted row, so if the info panel is on,
+	// we should get it to relayout itself, which will cause us to
+	// relayout ourself, which will mean the next call to v.Size() will
+	// give us the right height.
+	if err = rg.InfoPanel.Layout(g); err != nil {
+		return err
+	}
+	_, height := v.Size()
 	to := height + rg.from
 	if rg.highlight >= to {
 		rg.from = rg.highlight - height + 1
