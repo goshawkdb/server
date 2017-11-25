@@ -2,6 +2,7 @@ package debug
 
 import (
 	"fmt"
+	ui "github.com/jroimartin/gocui"
 	"io"
 	"sort"
 	"strings"
@@ -175,4 +176,255 @@ func (rs *Rows) Values(key string) []string {
 		result[idx] = v
 	}
 	return result
+}
+
+type RowsGui struct {
+	*Rows
+	*DebugGui
+	from      int
+	highlight int
+}
+
+func (rg *RowsGui) Layout(g *ui.Gui) error {
+	screenWidth, screenHeight := g.Size()
+	infoHeight := 0
+	if rg.InfoPanel.Displayed {
+		ip, err := g.View(INFO)
+		if err != nil && err != ui.ErrUnknownView {
+			return err
+		}
+		if err == nil {
+			_, infoHeight = ip.Size()
+			infoHeight += 1
+		}
+	}
+	top := HEADERS_HEIGHT - 1
+	bottom := screenHeight - EVENTS_HEIGHT - infoHeight
+	if bottom <= top {
+		return nil
+	}
+	v, err := g.SetView(ROWS, 0, top, screenWidth-1, bottom)
+	if err != nil {
+		if err != ui.ErrUnknownView {
+			return err
+		}
+		v.Frame = false
+	}
+	v.Clear()
+	height := bottom - top
+	rg.Format(v, rg.Columns, rg.from, height, rg.highlight)
+
+	headers, err := g.View(HEADERS)
+	if err != nil {
+		return err
+	}
+	ox, _ := headers.Origin()
+	return v.SetOrigin(ox, 0)
+}
+
+func (rg *RowsGui) SetHighlight(h int, g *ui.Gui) error {
+	if h < 0 {
+		h = 0
+	} else if h >= len(rg.Selected) {
+		h = len(rg.Selected) - 1
+	}
+	v, err := g.View(ROWS)
+	if err != nil {
+		return err
+	}
+	rg.highlight = h
+	// we've changed the highlighted row, so if the info panel is on,
+	// we should get it to relayout itself, which will cause us to
+	// relayout ourself, which will mean the next call to v.Size() will
+	// give us the right height.
+	if err = rg.InfoPanel.Layout(g); err != nil {
+		return err
+	}
+	_, height := v.Size()
+	to := height + rg.from
+	if rg.highlight >= to {
+		rg.from = rg.highlight - height + 1
+	} else if rg.highlight < rg.from {
+		rg.from = rg.highlight
+	}
+	return nil
+}
+
+func (rg *RowsGui) Down(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(rg.highlight+1, g)
+}
+
+func (rg *RowsGui) Up(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(rg.highlight-1, g)
+}
+
+func (rg *RowsGui) Top(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(0, g)
+}
+
+func (rg *RowsGui) Bottom(g *ui.Gui, v *ui.View) error {
+	return rg.SetHighlight(len(rg.Selected)-1, g)
+}
+
+func (rg *RowsGui) PageDown(g *ui.Gui, v *ui.View) error {
+	v, err := g.View(ROWS)
+	if err != nil {
+		return err
+	}
+	_, height := v.Size()
+	height--
+	height /= 2
+	if height == 0 {
+		height = 1
+	}
+	return rg.SetHighlight(rg.highlight+height, g)
+}
+
+func (rg *RowsGui) PageUp(g *ui.Gui, v *ui.View) error {
+	v, err := g.View(ROWS)
+	if err != nil {
+		return err
+	}
+	_, height := v.Size()
+	height--
+	height /= 2
+	if height == 0 {
+		height = 1
+	}
+	return rg.SetHighlight(rg.highlight-height, g)
+}
+
+func (rg *RowsGui) Limit(g *ui.Gui, v *ui.View) error {
+	key := ""
+	for _, c := range rg.Columns {
+		if c.Selected {
+			key = c.Name
+			break
+		}
+	}
+	row := rg.Selected[rg.highlight]
+	val, found := row[key]
+	if found && len(val) > 0 {
+		screenRow := rg.highlight - rg.from
+		rg.LimitSelected(key, val)
+		// we want to try to keep the current row in the same place on
+		// the screen.
+		for idx, r := range rg.Selected {
+			if r[INDEX] == row[INDEX] {
+				if screenRow > idx {
+					screenRow = idx
+				}
+				rg.from = idx - screenRow
+				rg.highlight = idx
+				break
+			}
+		}
+		return AppendEvent(g, fmt.Sprintf("Added constraint %s=%s. %d matching rows", key, val, len(rg.Selected)))
+	}
+	return nil
+}
+
+func (rg *RowsGui) All(g *ui.Gui, v *ui.View) error {
+	v, err := g.View(ROWS)
+	if err != nil {
+		return err
+	}
+	_, height := v.Size()
+	// again, we try to keep the same row in the same place on the screen
+	row := rg.Selected[rg.highlight]
+	screenRow := rg.highlight - rg.from
+	screenRowBotUp := height - screenRow
+	rg.SelectAll()
+	for idx, r := range rg.Selected {
+		if r[INDEX] == row[INDEX] {
+			if screenRowBotUp >= len(rg.Selected)-idx {
+				screenRow = height - (len(rg.Selected) - idx)
+			}
+			rg.highlight = idx
+			rg.from = idx - screenRow
+			break
+		}
+	}
+	return AppendEvent(g, fmt.Sprintf("Removed all constraints. %d rows.", len(rg.Selected)))
+}
+
+func (rg *RowsGui) SearchNext(g *ui.Gui, v *ui.View) error {
+	if len(rg.MatchingKey) == 0 {
+		key := ""
+		for _, c := range rg.Columns {
+			if c.Selected {
+				key = c.Name
+				break
+			}
+		}
+		row := rg.Selected[rg.highlight]
+		val, found := row[key]
+		if found && len(val) > 0 {
+			rg.SetMatch(key, val)
+			return AppendEvent(g, fmt.Sprintf("Highlighting %s=%s.", key, val))
+		}
+		return nil
+	} else {
+		v, err := g.View(ROWS)
+		if err != nil {
+			return err
+		}
+		_, height := v.Size()
+		old := rg.highlight
+		rg.highlight = rg.NextMatch(rg.highlight, true)
+		if rg.highlight >= rg.from+height {
+			// we should re-center the screen
+			rg.from = rg.highlight - (height / 2)
+			if rg.from+height > len(rg.Selected) {
+				rg.from = len(rg.Selected) - height
+			}
+		}
+		if old == rg.highlight {
+			return AppendEvent(g, fmt.Sprintf("No further matches found."))
+		}
+		return nil
+	}
+}
+
+func (rg *RowsGui) SearchPrev(g *ui.Gui, v *ui.View) error {
+	if len(rg.MatchingKey) == 0 {
+		key := ""
+		for _, c := range rg.Columns {
+			if c.Selected {
+				key = c.Name
+				break
+			}
+		}
+		row := rg.Selected[rg.highlight]
+		val, found := row[key]
+		if found && len(val) > 0 {
+			rg.SetMatch(key, val)
+			return AppendEvent(g, fmt.Sprintf("Highlighting %s=%s.", key, val))
+		}
+		return nil
+	} else {
+		v, err := g.View(ROWS)
+		if err != nil {
+			return err
+		}
+		_, height := v.Size()
+		old := rg.highlight
+		rg.highlight = rg.NextMatch(rg.highlight, false)
+		if rg.highlight < rg.from {
+			// we should re-center the screen
+			rg.from = rg.highlight - (height / 2)
+			if rg.from < 0 {
+				rg.from = 0
+			}
+		}
+		if old == rg.highlight {
+			return AppendEvent(g, fmt.Sprintf("No further matches found."))
+		}
+		return nil
+	}
+}
+
+func (rg *RowsGui) StopSearch(g *ui.Gui, v *ui.View) error {
+	rg.SetMatch("", "")
+	return AppendEvent(g, fmt.Sprintf("Cleared Highlighting."))
 }
