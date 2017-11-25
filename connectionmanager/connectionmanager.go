@@ -89,14 +89,6 @@ func NewConnectionManager(rmId common.RMId, bootCount uint32, certificate []byte
 		panic(err) // "impossible"
 	}
 
-	// register ourself
-	cm.ServerEstablished(&sconn.ServerConnection{
-		RMId:         rmId,
-		BootCount:    bootCount,
-		Sender:       router,
-		ShutdownSync: func() {},
-	})
-
 	return cm
 }
 
