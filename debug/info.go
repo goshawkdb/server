@@ -15,18 +15,22 @@ func (ip *InfoPanel) Layout(g *ui.Gui) error {
 		return nil
 	}
 	screenWidth, screenHeight := g.Size()
-	v, err := g.SetView(INFO, 0, 2, screenWidth-1, screenHeight-EVENTS_HEIGHT)
+	top := HEADERS_HEIGHT - 1
+	bottom := screenHeight - EVENTS_HEIGHT
+	v, err := g.SetView(INFO, 0, top, screenWidth-1, bottom)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
 		}
 		v.Wrap = true
 		v.Frame = true
-		v.Title = "Info"
+		v.Title = "Info (i to hide)"
 		if _, err := g.SetCurrentView(HEADERS); err != nil {
 			return err
 		}
-		_, err = g.SetViewOnBottom(INFO)
+		if _, err = g.SetViewOnTop(EVENTS); err != nil {
+			return err
+		}
 	}
 	row := ip.RowsGui.Selected[ip.RowsGui.highlight]
 	maxColName := 0
@@ -36,22 +40,33 @@ func (ip *InfoPanel) Layout(g *ui.Gui) error {
 		}
 	}
 	v.Clear()
-	neededHeight := 0
 	for _, col := range ip.Columns {
 		if val, found := row[col.Name]; found {
-			line := ""
 			if col.Selected {
-				line = fmt.Sprintf("\033[1m%*.*s\033[0m : %s", maxColName, maxColName, col.Name, val)
+				fmt.Fprintf(v, "\033[1m%*.*s\033[0m : %s\n", maxColName, maxColName, col.Name, val)
 			} else {
-				line = fmt.Sprintf("%*.*s : %s", maxColName, maxColName, col.Name, val)
+				fmt.Fprintf(v, "%*.*s : %s\n", maxColName, maxColName, col.Name, val)
 			}
-			fmt.Fprintf(v, "%s\n", line)
-			neededHeight++
-			// cope with wrapped lines
-			neededHeight += len(line) / (screenWidth - 2)
 		}
 	}
-	_, err = g.SetView(INFO, 0, screenHeight-EVENTS_HEIGHT-neededHeight-1, screenWidth-1, screenHeight-EVENTS_HEIGHT)
+	// we determine neededHeight this way because it will cope with multiline rows better
+	neededHeight := 0
+	for idx := 0; true; idx++ {
+		line, err := v.Line(idx)
+		if err != nil {
+			break
+		}
+		neededHeight++
+		// cope with wrapped lines
+		neededHeight += (len(line) - 1) / (screenWidth - 2)
+	}
+	maxHeight := bottom - top
+	if neededHeight > maxHeight {
+		neededHeight = maxHeight
+	}
+	top = bottom - neededHeight
+
+	_, err = g.SetView(INFO, 0, top, screenWidth-1, bottom)
 	if err != nil {
 		return err
 	}

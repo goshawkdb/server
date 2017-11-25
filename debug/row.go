@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+const (
+	INDEX = "53c6cfb4-d284-457e-8f6b-fe6b0cfb8203"
+)
+
 type Row map[string]string
 
 func (r Row) Format(w io.Writer, rs *Rows, cs Columns, highlight bool) {
@@ -15,6 +19,7 @@ func (r Row) Format(w io.Writer, rs *Rows, cs Columns, highlight bool) {
 			continue
 		}
 		orig := r[c.Name]
+		orig = strings.Replace(string(orig), "\n", "↵ ", -1)
 		val := orig
 		diff := (c.Width - 1) - len(val)
 		if diff < 0 { // val too long
@@ -47,6 +52,9 @@ func (rs *Rows) AllColumns() Columns {
 	freqs := make(map[string]*Column)
 	for _, row := range rs.All {
 		for key, val := range row {
+			if key == INDEX {
+				continue
+			}
 			col, found := freqs[key]
 			if !found {
 				col = &Column{
@@ -156,6 +164,7 @@ func (rs *Rows) Values(key string) []string {
 	values := make(map[string]int)
 	for _, row := range rs.Selected {
 		if v, found := row[key]; found {
+			v = strings.Replace(string(v), "\n", "↵ ", -1)
 			if _, found := values[v]; !found {
 				values[v] = len(values)
 			}

@@ -16,7 +16,8 @@ const (
 	VSELECTOR = "vselector"
 	INFO      = "info"
 
-	EVENTS_HEIGHT = 6
+	EVENTS_HEIGHT  = 6
+	HEADERS_HEIGHT = 3
 )
 
 type DebugGui struct {
@@ -223,7 +224,7 @@ func (cs Columns) Layout(g *ui.Gui) error {
 		}
 		v.Wrap = false
 		v.Frame = true
-		v.Title = "(c to select columns)"
+		v.Title = "Columns (c to select)"
 	}
 
 	viewWidth := screenWidth - 2
@@ -238,7 +239,7 @@ func (cs Columns) Layout(g *ui.Gui) error {
 		c.XStart = x
 		x += c.Width
 		label := c.Name
-		labelWidth := c.Width - 1
+		labelWidth := c.Width
 		if l := len(label); l > labelWidth {
 			label = label[:labelWidth]
 		} else if l < labelWidth {
@@ -246,7 +247,7 @@ func (cs Columns) Layout(g *ui.Gui) error {
 			label += suffix
 		}
 		if c.Selected {
-			fmt.Fprintf(v, "\033[1m%s\033[0m<", label)
+			fmt.Fprintf(v, "\033[1m%s\033[0m", label)
 
 			// We must ensure the selected column is on the screen.  It's
 			// more important to get the lhs of the column on the screen
@@ -263,7 +264,7 @@ func (cs Columns) Layout(g *ui.Gui) error {
 				ox = x - viewWidth
 			}
 		} else {
-			fmt.Fprintf(v, "%s ", label)
+			fmt.Fprintf(v, "%s", label)
 		}
 	}
 
@@ -306,15 +307,16 @@ func (cs *ColumnSelector) Layout(g *ui.Gui) error {
 		desiredHeight = screenHeight - 1
 	}
 	midX, midY := screenWidth/2, screenHeight/2
-	midH, midW := desiredHeight/2, desiredWidth/2
+	midWR, midWL := desiredWidth/2, desiredWidth-desiredWidth/2
+	midHB, midHT := desiredHeight/2, desiredHeight-desiredHeight/2
 
-	v, err := g.SetView(CSELECTOR, midX-(desiredWidth-midW), midY-(desiredHeight-midH), midX+midW, midY+midH)
+	v, err := g.SetView(CSELECTOR, midX-midWL, midY-midHT, midX+midWR, midY+midHB)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
 		}
 		v.Frame = true
-		v.Title = "Select Columns"
+		v.Title = "Select Columns (c to hide)"
 		v.Editor = cs
 		v.Editable = true
 		if columnCount > 0 {
@@ -369,8 +371,10 @@ func (cs *ColumnSelector) HideEmpty(g *ui.Gui, v *ui.View) error {
 	}
 	for _, row := range cs.RowsGui.Selected {
 		for k := range row {
-			cPtr := keys[k]
-			*cPtr++
+			cPtr, found := keys[k]
+			if found {
+				*cPtr++
+			}
 		}
 	}
 	var oldSelectedIdx int
@@ -482,29 +486,31 @@ func (vs *ValueSelector) Layout(g *ui.Gui) error {
 	}
 	screenWidth, screenHeight := g.Size()
 
-	desiredHeight := len(vs.Values) + 1
 	desiredWidth := 0
 	for _, val := range vs.Values {
 		if len(val) > desiredWidth {
 			desiredWidth = len(val)
 		}
 	}
+	desiredWidth += 3
 	if desiredWidth >= screenWidth {
 		desiredWidth = screenWidth - 1
 	}
+	desiredHeight := len(vs.Values) + 1
 	if desiredHeight >= screenHeight {
 		desiredHeight = screenHeight - 1
 	}
 	midX, midY := screenWidth/2, screenHeight/2
-	midH, midW := desiredHeight/2, desiredWidth/2
+	midWR, midWL := desiredWidth/2, desiredWidth-desiredWidth/2
+	midHB, midHT := desiredHeight/2, desiredHeight-desiredHeight/2
 
-	v, err := g.SetView(VSELECTOR, midX-(desiredWidth-midW), midY-(desiredHeight-midH), midX+midW, midY+midH)
+	v, err := g.SetView(VSELECTOR, midX-midWL, midY-midHT, midX+midWR, midY+midHB)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
 		}
 		v.Frame = true
-		v.Title = "Select Value"
+		v.Title = "Select Value to Limit (v to hide)"
 	}
 	v.Clear()
 	end := vs.From + screenHeight
@@ -513,9 +519,9 @@ func (vs *ValueSelector) Layout(g *ui.Gui) error {
 	}
 	for idx, val := range vs.Values[vs.From:end] {
 		if idx+vs.From == vs.Highlight {
-			fmt.Fprintf(v, "\033[7m%s\033[0m\n", val)
+			fmt.Fprintf(v, " \033[7m%s\033[0m\n", val)
 		} else {
-			fmt.Fprintf(v, "%s\n", val)
+			fmt.Fprintf(v, " %s\n", val)
 		}
 	}
 	if _, err := g.SetCurrentView(VSELECTOR); err != nil {
@@ -612,10 +618,7 @@ func (vs *ValueSelector) Limit(g *ui.Gui, v *ui.View) error {
 	if err != nil {
 		return err
 	}
-	val, err := v.Line(vs.Highlight - vs.From)
-	if err != nil {
-		return err
-	}
+	val := vs.Values[vs.Highlight]
 	vs.RowsGui.LimitSelected(vs.Key, val)
 	if err := AppendEvent(g, fmt.Sprintf("Added constraint %s=%s. %d matching rows", vs.Key, val, len(vs.RowsGui.Selected))); err != nil {
 		return err
@@ -648,7 +651,11 @@ func AppendEvent(g *ui.Gui, msg string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(ev, "%30.30v: %s\n", time.Now().Format(time.RFC3339Nano), msg)
+	start := ""
+	if l, _ := ev.Line(0); len(l) > 0 {
+		start = "\n"
+	}
+	fmt.Fprintf(ev, "%s%30.30v: %s", start, time.Now().Format(time.RFC3339Nano), msg)
 	return nil
 }
 
@@ -661,18 +668,23 @@ type RowsGui struct {
 
 func (rg *RowsGui) Layout(g *ui.Gui) error {
 	screenWidth, screenHeight := g.Size()
-	extraHeight := 0
+	infoHeight := 0
 	if rg.InfoPanel.Displayed {
 		ip, err := g.View(INFO)
 		if err != nil && err != ui.ErrUnknownView {
 			return err
 		}
 		if err == nil {
-			_, extraHeight = ip.Size()
-			extraHeight += 1
+			_, infoHeight = ip.Size()
+			infoHeight += 1
 		}
 	}
-	v, err := g.SetView(ROWS, 0, 2, screenWidth-1, screenHeight-EVENTS_HEIGHT-extraHeight)
+	top := HEADERS_HEIGHT - 1
+	bottom := screenHeight - EVENTS_HEIGHT - infoHeight
+	if bottom <= top {
+		return nil
+	}
+	v, err := g.SetView(ROWS, 0, top, screenWidth-1, bottom)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
@@ -680,7 +692,7 @@ func (rg *RowsGui) Layout(g *ui.Gui) error {
 		v.Frame = false
 	}
 	v.Clear()
-	height := screenHeight - EVENTS_HEIGHT - extraHeight - 3
+	height := bottom - top
 	rg.Format(v, rg.Columns, rg.from, height, rg.highlight)
 
 	headers, err := g.View(HEADERS)
@@ -779,7 +791,7 @@ func (rg *RowsGui) Limit(g *ui.Gui, v *ui.View) error {
 		// we want to try to keep the current row in the same place on
 		// the screen.
 		for idx, r := range rg.Selected {
-			if r[TS] == row[TS] {
+			if r[INDEX] == row[INDEX] {
 				if screenRow > idx {
 					screenRow = idx
 				}
@@ -805,7 +817,7 @@ func (rg *RowsGui) All(g *ui.Gui, v *ui.View) error {
 	screenRowBotUp := height - screenRow
 	rg.SelectAll()
 	for idx, r := range rg.Selected {
-		if r[TS] == row[TS] {
+		if r[INDEX] == row[INDEX] {
 			if screenRowBotUp >= len(rg.Selected)-idx {
 				screenRow = height - (len(rg.Selected) - idx)
 			}

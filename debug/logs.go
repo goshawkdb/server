@@ -2,10 +2,10 @@ package debug
 
 import (
 	"bufio"
+	"fmt"
 	"github.com/kr/logfmt"
 	"io"
 	"os"
-	"strings"
 )
 
 const (
@@ -14,14 +14,14 @@ const (
 )
 
 func (r Row) HandleLogfmt(key, val []byte) error {
-	strVal := strings.Replace(string(val), "\n", "↵ ", -1)
-	r[string(key)] = strVal
+	r[string(key)] = string(val)
 	return nil
 }
 
 func LoadRows(r io.Reader) (*Rows, error) {
 	scanner := bufio.NewScanner(r)
 	rows := make([]Row, 0, 64)
+	count := 0
 	var prev Row
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -29,15 +29,18 @@ func LoadRows(r io.Reader) (*Rows, error) {
 		if err := logfmt.Unmarshal(line, row); err != nil {
 			return nil, err
 		} else if _, found := row[TS]; found {
+			row[INDEX] = fmt.Sprintf("%d", count)
+			count++
 			rows = append(rows, row)
 			prev = nil
 		} else if prev == nil {
-			row = make(Row)
-			row[ML] = string(line)
-			rows = append(rows, row)
-			prev = row
+			prev = make(Row)
+			prev[ML] = string(line)
+			prev[INDEX] = fmt.Sprintf("%d", count)
+			count++
+			rows = append(rows, prev)
 		} else {
-			prev[ML] = prev[ML] + "↵ " + string(line)
+			prev[ML] = prev[ML] + "\n" + string(line)
 		}
 	}
 	if err := scanner.Err(); err != nil {
