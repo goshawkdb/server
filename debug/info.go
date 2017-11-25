@@ -15,7 +15,7 @@ func (ip *InfoPanel) Layout(g *ui.Gui) error {
 		return nil
 	}
 	screenWidth, screenHeight := g.Size()
-	v, err := g.SetView(INFO, 0, 2, screenWidth-1, screenHeight-10)
+	v, err := g.SetView(INFO, 0, 2, screenWidth-1, screenHeight-EVENTS_HEIGHT)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
@@ -26,7 +26,7 @@ func (ip *InfoPanel) Layout(g *ui.Gui) error {
 		if _, err := g.SetCurrentView(HEADERS); err != nil {
 			return err
 		}
-		_, err = g.SetViewOnTop(INFO)
+		_, err = g.SetViewOnBottom(INFO)
 	}
 	row := ip.RowsGui.Selected[ip.RowsGui.highlight]
 	maxColName := 0
@@ -36,26 +36,22 @@ func (ip *InfoPanel) Layout(g *ui.Gui) error {
 		}
 	}
 	v.Clear()
+	neededHeight := 0
 	for _, col := range ip.Columns {
 		if val, found := row[col.Name]; found {
+			line := ""
 			if col.Selected {
-				fmt.Fprintf(v, "\033[1m%*.*s\033[0m : %s\n", maxColName, maxColName, col.Name, val)
+				line = fmt.Sprintf("\033[1m%*.*s\033[0m : %s", maxColName, maxColName, col.Name, val)
 			} else {
-				fmt.Fprintf(v, "%*.*s : %s\n", maxColName, maxColName, col.Name, val)
+				line = fmt.Sprintf("%*.*s : %s", maxColName, maxColName, col.Name, val)
 			}
-		}
-	}
-	neededHeight := 0
-	for {
-		if line, _ := v.Line(neededHeight); len(line) == 0 {
-			break
-		} else {
+			fmt.Fprintf(v, "%s\n", line)
 			neededHeight++
 			// cope with wrapped lines
 			neededHeight += len(line) / (screenWidth - 2)
 		}
 	}
-	_, err = g.SetView(INFO, 0, screenHeight-10-neededHeight-2, screenWidth-1, screenHeight-11)
+	_, err = g.SetView(INFO, 0, screenHeight-EVENTS_HEIGHT-neededHeight-1, screenWidth-1, screenHeight-EVENTS_HEIGHT)
 	if err != nil {
 		return err
 	}

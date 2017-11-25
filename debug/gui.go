@@ -15,6 +15,8 @@ const (
 	CSELECTOR = "cselector"
 	VSELECTOR = "vselector"
 	INFO      = "info"
+
+	EVENTS_HEIGHT = 6
 )
 
 type DebugGui struct {
@@ -628,7 +630,7 @@ type Events struct{}
 
 func (e Events) Layout(g *ui.Gui) error {
 	screenWidth, screenHeight := g.Size()
-	v, err := g.SetView(EVENTS, 0, screenHeight-10, screenWidth-1, screenHeight-1)
+	v, err := g.SetView(EVENTS, 0, screenHeight-EVENTS_HEIGHT, screenWidth-1, screenHeight-1)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
@@ -667,10 +669,10 @@ func (rg *RowsGui) Layout(g *ui.Gui) error {
 		}
 		if err == nil {
 			_, extraHeight = ip.Size()
-			extraHeight += 2
+			extraHeight += 1
 		}
 	}
-	v, err := g.SetView(ROWS, 0, 2, screenWidth-1, screenHeight-10-extraHeight)
+	v, err := g.SetView(ROWS, 0, 2, screenWidth-1, screenHeight-EVENTS_HEIGHT-extraHeight)
 	if err != nil {
 		if err != ui.ErrUnknownView {
 			return err
@@ -678,7 +680,7 @@ func (rg *RowsGui) Layout(g *ui.Gui) error {
 		v.Frame = false
 	}
 	v.Clear()
-	height := screenHeight - 10 - extraHeight - 3
+	height := screenHeight - EVENTS_HEIGHT - extraHeight - 3
 	rg.Format(v, rg.Columns, rg.from, height, rg.highlight)
 
 	headers, err := g.View(HEADERS)
