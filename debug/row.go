@@ -9,7 +9,9 @@ import (
 )
 
 const (
-	INDEX = "53c6cfb4-d284-457e-8f6b-fe6b0cfb8203"
+	INDEX        = "53c6cfb4-d284-457e-8f6b-fe6b0cfb8203"
+	TAGGED       = "t"
+	TAGGED_VALUE = "*"
 )
 
 type Row map[string]string
@@ -44,6 +46,7 @@ type Rows struct {
 	Selected      []Row
 	MatchingKey   string
 	MatchingValue string
+	TaggedCount   int
 }
 
 // this gets all keys, sorts them by decreasing frequency, and then by
@@ -86,7 +89,13 @@ func (rs *Rows) AllColumns() Columns {
 		uniqFreqs = append(uniqFreqs, freq)
 	}
 	sort.Slice(uniqFreqs, func(i, j int) bool { return uniqFreqs[i] > uniqFreqs[j] })
-	cols := make(Columns, 0, len(freqs))
+	cols := make(Columns, 1, len(freqs)+1)
+	cols[0] = &Column{
+		Name:      TAGGED,
+		Displayed: true,
+		Width:     2,
+		Selected:  true,
+	}
 	for _, freq := range uniqFreqs {
 		keys := *(invertedFreqs[freq])
 		sort.Strings(keys)
@@ -95,9 +104,6 @@ func (rs *Rows) AllColumns() Columns {
 			col.XStart = 0 // just reset that
 			cols = append(cols, col)
 		}
-	}
-	if len(cols) > 0 {
-		cols[0].Selected = true
 	}
 	return cols
 }
@@ -176,6 +182,32 @@ func (rs *Rows) Values(key string) []string {
 		result[idx] = v
 	}
 	return result
+}
+
+func (rs *Rows) TagToggle(row Row) {
+	if _, tagged := row[TAGGED]; tagged {
+		delete(row, TAGGED)
+		rs.TaggedCount--
+	} else {
+		row[TAGGED] = TAGGED_VALUE
+		rs.TaggedCount++
+	}
+}
+
+func (rs *Rows) TagLimit() {
+	if rs.TaggedCount > 0 {
+		rs.SelectAll()
+		rs.LimitSelected(TAGGED, TAGGED_VALUE)
+	}
+}
+
+func (rs *Rows) TagNone() {
+	if rs.TaggedCount > 0 {
+		rs.TaggedCount = 0
+		for _, row := range rs.All {
+			delete(row, TAGGED)
+		}
+	}
 }
 
 type RowsGui struct {
@@ -346,6 +378,27 @@ func (rg *RowsGui) All(g *ui.Gui, v *ui.View) error {
 		}
 	}
 	return AppendEvent(g, fmt.Sprintf("Removed all constraints. %d rows.", len(rg.Selected)))
+}
+
+func (rg *RowsGui) TagToggle(g *ui.Gui, v *ui.View) error {
+	rg.Rows.TagToggle(rg.Selected[rg.highlight])
+	return rg.Down(g, v)
+}
+
+func (rg *RowsGui) TagNone(g *ui.Gui, v *ui.View) error {
+	rg.Rows.TagNone()
+	return AppendEvent(g, "Cleared all tags.")
+}
+
+func (rg *RowsGui) TagLimit(g *ui.Gui, v *ui.View) error {
+	if rg.TaggedCount == 0 {
+		return nil
+	}
+	rg.Rows.TagLimit()
+	if err := rg.SetHighlight(0, g); err != nil {
+		return nil
+	}
+	return AppendEvent(g, fmt.Sprintf("Limiting to tagged rows. %d rows", len(rg.Selected)))
 }
 
 func (rg *RowsGui) SearchNext(g *ui.Gui, v *ui.View) error {

@@ -91,15 +91,21 @@ func (dg *DebugGui) setKeybindings() error {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, ui.KeyEnter, ui.ModNone, dg.RowsGui.StopSearch); err != nil {
 		return err
+	} else if err := dg.SetKeybinding(HEADERS, 't', ui.ModNone, dg.RowsGui.TagToggle); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(HEADERS, 'T', ui.ModNone, dg.RowsGui.TagNone); err != nil {
+		return err
+	} else if err := dg.SetKeybinding(HEADERS, 'L', ui.ModNone, dg.RowsGui.TagLimit); err != nil {
+		return err
 	} else if err := dg.SetKeybinding(HEADERS, ui.KeyArrowRight, ui.ModNone, dg.Columns.Right); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, ui.KeyArrowLeft, ui.ModNone, dg.Columns.Left); err != nil {
 		return err
+	} else if err := dg.SetKeybinding(HEADERS, 'i', ui.ModNone, dg.InfoPanel.Toggle); err != nil {
+		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'c', ui.ModNone, dg.ColumnSelector.Display); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(HEADERS, 'v', ui.ModNone, dg.ValueSelector.Display); err != nil {
-		return err
-	} else if err := dg.SetKeybinding(HEADERS, 'i', ui.ModNone, dg.InfoPanel.Toggle); err != nil {
 		return err
 	} else if err := dg.SetKeybinding(VSELECTOR, 'v', ui.ModNone, dg.ValueSelector.Hide); err != nil {
 		return err
