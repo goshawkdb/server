@@ -138,7 +138,7 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 
 	if !resubmit {
 		updates := abort.Rerun()
-		validUpdates := rts.filterUpdates(txnId, &updates, tr)
+		validUpdates := rts.filterUpdates(&updates, tr)
 		utils.DebugLog(rts.logger, "debug", "Txn Outcome.", "TxnId", txnId,
 			"updatesLen", updates.Len(), "validLen", len(validUpdates))
 
@@ -249,13 +249,14 @@ type valueCached struct {
 	c   *Cached
 }
 
-func (rts *RemoteTransactionSubmitter) filterUpdates(txnId *common.TxnId, updates *msgs.Update_List, tr *TransactionRecord) map[common.VarUUId]*valueCached {
+func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, tr *TransactionRecord) map[common.VarUUId]*valueCached {
 	results := make(map[common.VarUUId]*valueCached)
 	for idx, l := 0, updates.Len(); idx < l; idx++ {
 		update := updates.At(idx)
 		txnId := common.MakeTxnId(update.TxnId())
 		clock := vectorclock.VectorClockFromData(update.Clock(), true)
 		actions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
+		utils.DebugLog(rts.logger, "TxnId", txnId, "actionsLen", actions.Len())
 		for idy, m := 0, actions.Len(); idy < m; idy++ {
 			action := actions.At(idy)
 			vUUId := common.MakeVarUUId(action.VarId())
@@ -269,11 +270,13 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(txnId *common.TxnId, update
 				if !found || c.version.IsZero() {
 					// If the version is 0 then the client doesn't have the
 					// object checked out and isn't interested.
+					utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "found", found)
 					continue
 				}
 			}
 			// if we can't read the object then we must not send any update for it.
 			if !c.caps.CanRead() {
+				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "canRead", false)
 				continue
 			}
 			switch action.ActionType() {
@@ -286,6 +289,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(txnId *common.TxnId, update
 				if cmp == common.EQ && clockElem != c.clockElem {
 					panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
 				}
+				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "MISSING", "clockElem", clockElem, "clockElemCached", c.clockElem)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 					c.version = common.VersionZero
 					c.clockElem = 0
@@ -298,6 +302,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(txnId *common.TxnId, update
 				if cmp == common.EQ && clockElem != c.clockElem {
 					panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
 				}
+				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "WRITEONLY", "clockElem", clockElem, "clockElemCached", c.clockElem)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 					// If the above condition fails, then the update
 					// must pre-date our current knowledge of vUUId. So
@@ -328,7 +333,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(txnId *common.TxnId, update
 				}
 
 			default:
-				panic(fmt.Sprintf("Unexpected action for %v on %v: %v", txnId, vUUId, action.Which()))
+				panic(fmt.Sprintf("Unexpected action for %v in update from %v: %v", vUUId, txnId, action.Which()))
 			}
 		}
 	}
