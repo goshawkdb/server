@@ -184,7 +184,7 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 	}
 
 	utils.DebugLog(rts.logger, "debug", "Resubmitting Txn.", "TxnId", txn.Id,
-		"origResubmit", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT)
+		"origResubmit", abort.Which() == msgs.OUTCOMEABORT_RESUBMIT, "OrigTxnId", tr.origId)
 	rts.resubmitCount++
 	rts.bbe.Advance()
 
@@ -250,13 +250,14 @@ type valueCached struct {
 }
 
 func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, tr *TransactionRecord) map[common.VarUUId]*valueCached {
+	utils.DebugLog(rts.logger, "debug", "filterUpdates1", "updatesLen", updates.Len())
 	results := make(map[common.VarUUId]*valueCached)
 	for idx, l := 0, updates.Len(); idx < l; idx++ {
 		update := updates.At(idx)
 		txnId := common.MakeTxnId(update.TxnId())
 		clock := vectorclock.VectorClockFromData(update.Clock(), true)
 		actions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
-		utils.DebugLog(rts.logger, "TxnId", txnId, "actionsLen", actions.Len())
+		utils.DebugLog(rts.logger, "debug", "filterUpdates", "TxnId", txnId, "actionsLen", actions.Len())
 		for idy, m := 0, actions.Len(); idy < m; idy++ {
 			action := actions.At(idy)
 			vUUId := common.MakeVarUUId(action.VarId())
