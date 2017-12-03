@@ -14,4 +14,5 @@ func CheckWarn(e error, logger log.Logger) bool {
 
 type DebugLogFunc func(log.Logger, ...interface{})
 
+var Debugging = false
 var DebugLog = DebugLogFunc(func(log.Logger, ...interface{}) {})
