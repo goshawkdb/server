@@ -44,7 +44,7 @@ type frame struct {
 	currentState frameStateMachineComponent
 }
 
-func NewFrame(parent *frame, v *Var, positions *common.Positions, txnId *common.TxnId, txnActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
+func NewFrame(parent *frame, v *Var, txnId *common.TxnId, txnActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
 	f := &frame{
 		parent:           parent,
 		v:                v,
@@ -52,12 +52,13 @@ func NewFrame(parent *frame, v *Var, positions *common.Positions, txnId *common.
 		frameTxnActions:  txnActions,
 		frameTxnClock:    txnClock,
 		frameWritesClock: writesClock,
-		positions:        positions,
 	}
 	if parent == nil {
+		f.positions = v.positions
 		f.mask = vc.NewVectorClock().AsMutable()
 		f.scheduleBackoff = binarybackoff.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
 	} else {
+		f.positions = parent.positions
 		f.mask = parent.mask
 		f.scheduleBackoff = parent.scheduleBackoff
 		f.scheduleBackoff.Shrink(server.VarRollDelayMin)
@@ -735,7 +736,7 @@ func (fo *frameOpen) maybeCreateChild() {
 		}
 	}
 
-	fo.child = NewFrame(fo.frame, fo.v, fo.positions, winner.Id, winner.TxnReader.Actions(false), winner.outcomeClock.AsMutable(), written)
+	fo.child = NewFrame(fo.frame, fo.v, winner.Id, winner.TxnReader.Actions(false), winner.outcomeClock.AsMutable(), written)
 	fo.v.SetCurFrame(fo.child, winner, fo.positions)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil

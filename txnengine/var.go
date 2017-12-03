@@ -61,7 +61,7 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 		return types.EmptyStructVal
 	}).ResultError(); err == nil && complete != nil {
 		txn := txnreader.TxnReaderFromData(writeTxnBytes)
-		v.curFrame = NewFrame(nil, v, v.positions, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
+		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
 		v.curFrameOnDisk = v.curFrame
 		return v, nil
 	} else {
@@ -74,7 +74,7 @@ func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 
 	clock := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	written := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
-	v.curFrame = NewFrame(nil, v, nil, nil, nil, clock, written)
+	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
 
 	return v
 }
