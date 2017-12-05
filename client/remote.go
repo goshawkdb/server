@@ -250,7 +250,6 @@ type valueCached struct {
 }
 
 func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, tr *TransactionRecord) map[common.VarUUId]*valueCached {
-	utils.DebugLog(rts.logger, "debug", "filterUpdates1", "updatesLen", updates.Len())
 	results := make(map[common.VarUUId]*valueCached)
 	for idx, l := 0, updates.Len(); idx < l; idx++ {
 		update := updates.At(idx)

@@ -357,6 +357,8 @@ func (br badReads) combine(rmBal *rmBallot) {
 	txnId := common.MakeTxnId(badRead.TxnId())
 	badReadData := badRead.TxnActions()
 	if len(badReadData) == 0 {
+		// bad read came from a rolled var who hasn't learnt the
+		// original write yet!
 		return
 	}
 	actions := txnreader.TxnActionsFromData(badReadData, true).Actions()

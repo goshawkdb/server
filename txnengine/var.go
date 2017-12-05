@@ -54,23 +54,11 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	valueTxnId := common.MakeTxnId(varCap.ValueTxnId())
 	writeTxnClock := vc.VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
 	writesClock := vc.VectorClockFromData(varCap.WritesClock(), true).AsMutable()
-	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
+	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId, "ValueTxnId", valueTxnId)
 
-	var valueTxnBytes []byte
-	if complete, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		valueTxnBytes = db.ReadTxnBytesFromDisk(rtxn, valueTxnId)
-		return true
-	}).ResultError(); err == nil && complete != nil {
-		var valueTxn *txnreader.TxnReader
-		if len(valueTxnBytes) != 0 {
-			valueTxn = txnreader.TxnReaderFromData(valueTxnBytes)
-		}
-		v.curFrame = NewFrame(nil, v, writeTxnId, valueTxnId, valueTxn, writeTxnClock, writesClock)
-		v.curFrameOnDisk = v.curFrame
-		return v, nil
-	} else {
-		return nil, err
-	}
+	v.curFrame = NewFrame(nil, v, writeTxnId, valueTxnId, writeTxnClock, writesClock)
+	v.curFrameOnDisk = v.curFrame
+	return v, nil
 }
 
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
@@ -78,7 +66,7 @@ func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 
 	clock := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	written := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
-	v.curFrame = NewFrame(nil, v, nil, nil, nil, clock, written)
+	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
 
 	return v
 }
@@ -191,37 +179,34 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	}
 }
 
-func (v *Var) SetCurFrame(f *frame, action *localAction, valueTxn *txnreader.TxnReader, positions *common.Positions) {
-	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "action", action)
+func (v *Var) SetCurFrame(f *frame, positions *common.Positions, frameAction *localAction, valueTxn *txnreader.TxnReader) {
+	frameTxn := frameAction.TxnReader
+	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "frameTxn", frameTxn.Id, "valueTxnPresent", valueTxn != nil)
+
 	v.curFrame = f
+	v.positions = positions
 
-	if positions != nil {
-		v.positions = positions
-	}
-
-	if !action.IsRoll() {
-		if len(v.subscribers) != 0 {
-			actionCap := action.writeAction
-			modifiedCap := actionCap.Modified()
-			value := modifiedCap.Value()
-			references := modifiedCap.References()
-			for _, sub := range v.subscribers {
-				sub.Observe(v, value, &references, action.Txn)
-			}
+	if len(v.subscribers) != 0 {
+		actionCap := frameAction.writeAction
+		modifiedCap := actionCap.Modified()
+		value := modifiedCap.Value()
+		references := modifiedCap.References()
+		for _, sub := range v.subscribers {
+			sub.Observe(v, value, &references, frameAction.Txn)
 		}
 	}
 
 	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
 	// fmt.Printf("d%v ", diffLen)
 
-	v.maybeWriteFrame(f, valueTxn)
+	v.maybeWriteFrame(f, frameTxn, valueTxn)
 }
 
-func (v *Var) maybeWriteFrame(f *frame, valueTxn *txnreader.TxnReader) {
+func (v *Var) maybeWriteFrame(f *frame, frameTxn, valueTxn *txnreader.TxnReader) {
 	if v.writeInProgress != nil {
 		v.writeInProgress = func() {
 			v.writeInProgress = nil
-			v.maybeWriteFrame(f, valueTxn)
+			v.maybeWriteFrame(f, frameTxn, valueTxn)
 		}
 		return
 	}
@@ -236,15 +221,18 @@ func (v *Var) maybeWriteFrame(f *frame, valueTxn *txnreader.TxnReader) {
 	varCap.SetId(v.UUId[:])
 	varCap.SetPositions(capn.UInt8List(*v.positions))
 	varCap.SetWriteTxnId(f.frameTxnId[:])
+	varCap.SetValueTxnId(f.frameValueTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
-	varCap.SetValueTxnId(f.frameValueTxnId[:])
-
 	varData := common.SegToBytes(varSeg)
 
+	// curFrameOnDisk := v.curFrameOnDisk
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	future := v.db.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
+		if err := v.db.WriteTxnToDisk(rwtxn, frameTxn.Id, frameTxn.Data); err != nil {
+			return types.EmptyStructVal
+		}
 		if valueTxn != nil {
 			if err := v.db.WriteTxnToDisk(rwtxn, valueTxn.Id, valueTxn.Data); err != nil {
 				return types.EmptyStructVal
@@ -253,8 +241,23 @@ func (v *Var) maybeWriteFrame(f *frame, valueTxn *txnreader.TxnReader) {
 		if err := rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err != nil {
 			return types.EmptyStructVal
 		}
-		if v.curFrameOnDisk != nil {
-			v.db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameValueTxnId)
+
+		// The problem is that this doesn't work: this will *always*
+		// delete curFrameOnDisk.frameValueTxnId even if the curFrame
+		// never wrote the value txn to disk. That can then mean that
+		// the above write is immediately cancelled out. Really to make
+		// this work properly we would have to either maintain separate
+		// counters for usage of a txn by a frame, or by frame value; or
+		// we would have to track this data some other way. Or we would
+		// have to implement this completely differently.
+		if curFrameOnDisk != nil {
+			if err := v.db.DeleteTxnFromDisk(rwtxn, curFrameOnDisk.frameTxnId); err != nil {
+				return types.EmptyStructVal
+			}
+			// DeleteTxnFromDisk is idempotent and does not error if the txn is not on disk.
+			if err := v.db.DeleteTxnFromDisk(rwtxn, curFrameOnDisk.frameValueTxnId); err != nil {
+				return types.EmptyStructVal
+			}
 		}
 		return types.EmptyStructVal
 	})
