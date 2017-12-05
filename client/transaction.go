@@ -123,6 +123,9 @@ func (ts *TransactionSubmitter) calculateDisabledHashcodes() error {
 }
 
 func (ts *TransactionSubmitter) AddTransactionRecord(tr *TransactionRecord) {
+	if ts.txns == nil { // shutdown
+		return
+	}
 	if _, found := ts.txns[*tr.Id]; found {
 		panic("Transaction already exists! " + tr.Id.String())
 	}
