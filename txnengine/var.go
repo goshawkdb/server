@@ -12,7 +12,6 @@ import (
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/poisson"
 	"goshawkdb.io/server/utils/status"
-	"goshawkdb.io/server/utils/txnreader"
 	vc "goshawkdb.io/server/utils/vectorclock"
 	"math/rand"
 	"time"
@@ -55,18 +54,9 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	writesClock := vc.VectorClockFromData(varCap.WritesClock(), true).AsMutable()
 	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
 
-	var writeTxnBytes []byte
-	if complete, err := db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
-		writeTxnBytes = db.ReadTxnBytesFromDisk(rtxn, writeTxnId)
-		return types.EmptyStructVal
-	}).ResultError(); err == nil && complete != nil {
-		txn := txnreader.TxnReaderFromData(writeTxnBytes)
-		v.curFrame = NewFrame(nil, v, writeTxnId, txn.Actions(false), writeTxnClock, writesClock)
-		v.curFrameOnDisk = v.curFrame
-		return v, nil
-	} else {
-		return nil, err
-	}
+	v.curFrame = NewFrame(nil, v, writeTxnId, nil, writeTxnClock, writesClock)
+	v.curFrameOnDisk = v.curFrame
+	return v, nil
 }
 
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
