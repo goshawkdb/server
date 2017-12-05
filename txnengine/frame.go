@@ -6,6 +6,7 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"github.com/go-kit/kit/log"
+	mdbs "github.com/msackman/gomdb/server"
 	sl "github.com/msackman/skiplist"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
@@ -177,6 +178,24 @@ func (fo *frameOpen) init(f *frame) {
 func (fo *frameOpen) start()         {}
 func (fo *frameOpen) String() string { return "frameOpen" }
 
+func (fo *frameOpen) ensureFrameTxnActions() *txnreader.TxnActions {
+	if fo.frameTxnActions == nil {
+		var writeTxnBytes []byte
+		if complete, err := fo.v.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+			writeTxnBytes = fo.v.db.ReadTxnBytesFromDisk(rtxn, fo.frameTxnId)
+			return types.EmptyStructVal
+		}).ResultError(); err == nil && complete != nil && len(writeTxnBytes) > 0 {
+			txn := txnreader.TxnReaderFromData(writeTxnBytes)
+			fo.frameTxnActions = txn.Actions(false)
+		} else if err != nil {
+			panic(err)
+		} else {
+			panic(fmt.Sprintf("%v found empty frame txn!", fo.frame))
+		}
+	}
+	return fo.frameTxnActions
+}
+
 func (fo *frameOpen) ReadRetry(action *localAction) bool {
 	txn := action.Txn
 	utils.DebugLog(fo.ensureLogger(), "debug", "ReadRetry", "TxnId", txn.Id)
@@ -187,7 +206,7 @@ func (fo *frameOpen) ReadRetry(action *localAction) bool {
 		return false
 	default:
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteBadRead", "frameTxnClock", fo.frameTxnClock, "TxnId", txn.Id)
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
+		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.ensureFrameTxnActions())
 		fo.v.maybeMakeInactive()
 		return true
 	}
@@ -205,7 +224,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteBadRead", "frameTxnClock", fo.frameTxnClock, "TxnId", txn.Id)
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
+		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.ensureFrameTxnActions())
 		fo.v.maybeMakeInactive()
 	case fo.reads.Get(action) == nil:
 		fo.uncommittedReads++
@@ -341,7 +360,7 @@ func (fo *frameOpen) AddReadWrite(action *localAction) {
 		action.VoteDeadlock(fo.frameTxnClock)
 	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteBadRead", "frameTxnClock", fo.frameTxnClock, "TxnId", txn.Id)
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.frameTxnActions)
+		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.ensureFrameTxnActions())
 		fo.v.maybeMakeInactive()
 	case fo.writes.Get(action) == nil:
 		fo.rwPresent = true
@@ -755,7 +774,7 @@ func (fo *frameOpen) maybeCreateChild() {
 
 func (fo *frameOpen) basicRollCondition(rescheduling bool) bool {
 	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.frameTxnActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
+		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.ensureFrameTxnActions().Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
@@ -870,7 +889,7 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	}
 	var origAction *msgs.Action
 	vUUIdBytes := fo.v.UUId[:]
-	txnActions := fo.frameTxnActions.Actions()
+	txnActions := fo.ensureFrameTxnActions().Actions()
 	for idx, l := 0, txnActions.Len(); idx < l; idx++ {
 		action := txnActions.At(idx)
 		if bytes.Equal(action.VarId(), vUUIdBytes) {
