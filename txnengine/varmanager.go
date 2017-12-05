@@ -160,16 +160,16 @@ func (vm *VarManager) find(uuid *common.VarUUId) (*Var, bool) {
 	// complication is you need to track in-flight loads. But I can't
 	// measure any advantage yet for doing that.
 	var valBytes []byte
-	_, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
+	completed, err := vm.db.ReadonlyTransaction(func(rtxn *mdbs.RTxn) interface{} {
 		// rtxn.Get returns a copy of the data, so we don't need to
 		// worry about pointers into the db
 		valBytes, _ = rtxn.Get(vm.db.Vars, uuid[:])
-		return nil
+		return true
 	}).ResultError()
 
 	if err != nil {
 		panic(fmt.Sprintf("Error when loading %v from disk: %v", uuid, err))
-	} else if valBytes == nil { // shutdown
+	} else if completed == nil { // shutdown
 		return nil, true
 	} else if len(valBytes) == 0 { // not found
 		return nil, false

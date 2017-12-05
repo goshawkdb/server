@@ -31,7 +31,9 @@ func TxnReaderFromData(data []byte) *TxnReader {
 }
 
 func (tr *TxnReader) Actions(forceDecode bool) *TxnActions {
-	if tr.actions == nil {
+	if tr == nil {
+		return nil
+	} else if tr.actions == nil {
 		tr.actions = TxnActionsFromData(tr.Txn.Actions(), forceDecode)
 	} else if forceDecode {
 		tr.actions.decode()

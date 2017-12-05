@@ -59,7 +59,6 @@ type localAction struct {
 	ballot          *Ballot
 	frame           *frame
 	readVsn         *common.TxnId
-	writeTxnActions *txnreader.TxnActions
 	writeAction     *msgs.Action
 	createPositions *common.Positions
 	roll            bool
@@ -72,7 +71,7 @@ func (action *localAction) IsRead() bool {
 }
 
 func (action *localAction) IsWrite() bool {
-	return action.writeTxnActions != nil
+	return action.writeAction != nil
 }
 
 func (action *localAction) IsRoll() bool {
@@ -130,7 +129,7 @@ func (a *localAction) Compare(bC sl.Comparable) sl.Cmp {
 
 func (action localAction) String() string {
 	isCreate := action.createPositions != nil
-	isWrite := action.writeTxnActions != nil
+	isWrite := action.writeAction != nil
 	f := ""
 	if action.frame != nil {
 		f = "|f"
@@ -148,7 +147,6 @@ func (action localAction) String() string {
 
 func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
 	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
-	txnActions := reader.Actions(true)
 	txn.localActions = make([]localAction, varCaps.Len())
 	actionsMap := make(map[common.VarUUId]*localAction)
 	for idx, l := 0, varCaps.Len(); idx < l; idx++ {
@@ -156,7 +154,6 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		action := &txn.localActions[idx]
 		action.Txn = txn
 		action.vUUId = common.MakeVarUUId(varCap.Id())
-		action.writeTxnActions = txnActions
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
 		action.outcomeClock = vc.VectorClockFromData(varCap.WriteTxnClock(), false)
@@ -164,7 +161,7 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		actionsMap[*action.vUUId] = action
 	}
 
-	txnActionsList := txnActions.Actions()
+	txnActionsList := reader.Actions(true).Actions()
 
 	for idx, l := 0, txnActionsList.Len(); idx < l; idx++ {
 		actionCap := txnActionsList.At(idx)
@@ -242,7 +239,6 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 		case msgs.ACTIONTYPE_CREATE:
 			if idx == actionIndex {
 				positions := common.Positions(actionCap.Positions())
-				action.writeTxnActions = actions
 				action.writeAction = &actionCap
 				action.createPositions = &positions
 				txn.writes = append(txn.writes, action.vUUId)
@@ -257,7 +253,6 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 
 		case msgs.ACTIONTYPE_WRITEONLY:
 			if idx == actionIndex {
-				action.writeTxnActions = actions
 				action.writeAction = &actionCap
 				txn.writes = append(txn.writes, action.vUUId)
 			} else {
@@ -267,7 +262,6 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 		case msgs.ACTIONTYPE_READWRITE:
 			if idx == actionIndex {
 				action.readVsn = common.MakeTxnId(actionCap.Version())
-				action.writeTxnActions = actions
 				action.writeAction = &actionCap
 				txn.writes = append(txn.writes, action.vUUId)
 			} else {
@@ -277,7 +271,6 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 		case msgs.ACTIONTYPE_ROLL:
 			if idx == actionIndex {
 				action.readVsn = common.MakeTxnId(actionCap.Version())
-				action.writeTxnActions = actions
 				action.writeAction = &actionCap
 				action.roll = true
 				txn.writes = append(txn.writes, action.vUUId)

@@ -8,6 +8,7 @@ import (
 )
 
 func init() {
+	Debugging = true
 	DebugLog = DebugLogFunc(func(logger log.Logger, keyvals ...interface{}) {
 		// it's debug - just force all vals to a string
 		for idx := 1; idx < len(keyvals); idx += 2 {
