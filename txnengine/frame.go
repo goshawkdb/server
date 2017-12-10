@@ -116,6 +116,7 @@ func (f *frame) Status(sc *status.StatusConsumer) {
 	}
 	sc.Emit(fmt.Sprintf("- Read Count: %v %v", f.reads.Len(), readHistogram))
 	sc.Emit(fmt.Sprintf("- Uncommitted Read Count: %v", f.uncommittedReads))
+	sc.Emit(fmt.Sprintf("- Learnt historical meta: %v", f.learntHistoricalMeta.Len()))
 	sc.Emit(fmt.Sprintf("- Learnt future reads: %v", len(f.learntFutureReads)))
 	sc.Emit(fmt.Sprintf("- Write Count: %v %v", f.writes.Len(), writeHistogram))
 	sc.Emit(fmt.Sprintf("- Uncommitted Write Count: %v", f.uncommittedWrites))
@@ -152,25 +153,27 @@ type frameStateMachineComponent interface {
 
 type frameOpen struct {
 	*frame
-	reads              *sl.SkipList
-	learntFutureReads  []*localAction
-	maxUncommittedRead *localAction
-	uncommittedReads   uint
-	writeVoteClock     *vc.VectorClockMutable
-	writes             *sl.SkipList
-	clientWrites       map[common.ClientId]types.EmptyStruct
-	uncommittedWrites  uint
-	rwPresent          bool
-	rollScheduled      *time.Time
-	rollActive         bool
-	rollTxn            *cmsgs.ClientTxn
-	rollTxnPos         map[common.VarUUId]*types.PosCapVer
+	reads                *sl.SkipList
+	learntFutureReads    []*localAction
+	learntHistoricalMeta *sl.SkipList
+	maxUncommittedRead   *localAction
+	uncommittedReads     uint
+	writeVoteClock       *vc.VectorClockMutable
+	writes               *sl.SkipList
+	clientWrites         map[common.ClientId]types.EmptyStruct
+	uncommittedWrites    uint
+	rwPresent            bool
+	rollScheduled        *time.Time
+	rollActive           bool
+	rollTxn              *cmsgs.ClientTxn
+	rollTxnPos           map[common.VarUUId]*types.PosCapVer
 }
 
 func (fo *frameOpen) init(f *frame) {
 	fo.frame = f
 	fo.reads = sl.New(f.v.rng)
 	fo.learntFutureReads = []*localAction{}
+	fo.learntHistoricalMeta = sl.New(f.v.rng)
 	fo.writes = sl.New(f.v.rng)
 	fo.clientWrites = make(map[common.ClientId]types.EmptyStruct)
 }
@@ -489,9 +492,17 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
 	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
-		utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Ignored. Too Old.", "TxnId", txn.Id)
-		fo.maybeStartRoll()
-		return false
+		if action.IsMeta() {
+			utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt; historical meta", "TxnId", txn.Id)
+			fo.learntHistoricalMeta.Insert(action, committed)
+			action.frame = fo.frame
+			fo.maybeStartRoll()
+			return true
+		} else {
+			utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Ignored. Too Old.", "TxnId", txn.Id)
+			fo.maybeStartRoll()
+			return false
+		}
 	}
 	if action.Id.Compare(fo.frameTxnId) == common.EQ {
 		utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Duplicate of current frame.", "TxnId", txn.Id)
@@ -733,6 +744,11 @@ func (fo *frameOpen) maybeCreateChild() {
 		written = vc.NewVectorClock().AsMutable()
 	}
 
+	for node := fo.learntHistoricalMeta.First(); node != nil; node = node.Next() {
+		action := node.Key.(*localAction)
+		fo.v.subscriptions.Committed(action)
+	}
+
 	var winner *localAction
 
 	for _, localElemVal := range localElemVals {
@@ -751,6 +767,11 @@ func (fo *frameOpen) maybeCreateChild() {
 				}
 			} else {
 				written.MergeInMax(action.writesClock)
+			}
+
+			// only historical metas are treated specially, so we still need to process normal ones here.
+			if action.IsMeta() {
+				fo.v.subscriptions.Committed(action)
 			}
 		}
 	}
@@ -774,7 +795,10 @@ func (fo *frameOpen) maybeCreateChild() {
 
 func (fo *frameOpen) basicRollCondition(rescheduling bool) bool {
 	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameTxnClock.Len() > fo.ensureFrameTxnActions().Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
+		((fo.reads.Len() > fo.uncommittedReads) || // we have no writes and some committed reads
+			(fo.reads.Len() == 0 && fo.learntHistoricalMeta.Len() > 0) || // no reads and some historical meta
+			(fo.frameTxnClock.Len() > fo.ensureFrameTxnActions().Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0)) // no reads, tidy history, but VC is too wide
+
 }
 
 func (fo *frameOpen) maybeStartRoll() {
@@ -961,7 +985,7 @@ func (fo *frameOpen) isIdle() bool {
 }
 
 func (fo *frameOpen) isEmpty() bool {
-	return fo.currentState == fo && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0
+	return fo.currentState == fo && !fo.rollActive && fo.child == nil && fo.writes.Len() == 0 && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0 && fo.learntHistoricalMeta.Len() == 0
 }
 
 // closed
@@ -995,20 +1019,14 @@ func (fc *frameClosed) MaybeCompleteTxns() {
 	if fc.currentState == fc && fc.onDisk && fc.parent == nil {
 		utils.DebugLog(fc.ensureLogger(), "debug", "MaybeCompleteTxns")
 		fc.nextState()
-		for node := fc.reads.First(); node != nil; node = node.Next() {
-			if node.Value == committed {
-				node.Key.(*localAction).LocallyComplete()
-				node.Value = completing
-			} else {
-				panic(fmt.Sprintf("Not committed! %v %v %v", fc.frame, node.Key, node.Value))
-			}
-		}
-		for node := fc.writes.First(); node != nil; node = node.Next() {
-			if node.Value == committed {
-				node.Key.(*localAction).LocallyComplete()
-				node.Value = completing
-			} else {
-				panic(fmt.Sprintf("Not committed! %v %v %v", fc.frame, node.Key, node.Value))
+		for _, s := range []*sl.SkipList{fc.reads, fc.writes, fc.learntHistoricalMeta} {
+			for node := s.First(); node != nil; node = node.Next() {
+				if node.Value == committed {
+					node.Key.(*localAction).LocallyComplete()
+					node.Value = completing
+				} else {
+					panic(fmt.Sprintf("Not committed! %v %v %v", fc.frame, node.Key, node.Value))
+				}
 			}
 		}
 	}
@@ -1053,15 +1071,16 @@ func (fe *frameErase) WriteGloballyComplete(action *localAction) {
 	if node := fe.writes.Get(action); node != nil && node.Value == completing {
 		node.Remove()
 		fe.v.curFrame.subtractClock(action.outcomeClock)
+	} else if node := fe.learntHistoricalMeta.Get(action); node != nil && node.Value == completing {
+		node.Remove()
 		fe.maybeErase()
 	} else {
-		panic(fmt.Sprintf("ReadGloballyComplete for invalid action %v %v", fe.frame, node))
+		panic(fmt.Sprintf("WriteGloballyComplete for invalid action %v %v", fe.frame, node))
 	}
 }
 
 func (fe *frameErase) maybeErase() {
-	// (we won't receive TGCs for learnt writes)
-	if fe.reads.Len() == 0 && fe.writes.Len() == 0 {
+	if fe.reads.Len() == 0 && fe.writes.Len() == 0 && fe.learntHistoricalMeta.Len() == 0 {
 		utils.DebugLog(fe.ensureLogger(), "debug", "maybeErase")
 		child := fe.child
 		child.parent = nil

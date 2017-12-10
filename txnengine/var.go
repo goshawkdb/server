@@ -38,7 +38,11 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 	}
 	varCap := msgs.ReadRootVar(seg)
 
-	v := newVar(common.MakeVarUUId(varCap.Id()), exe, db, vm)
+	subs, err := NewSubscriptionsFromData(vm, varCap.Subscriptions())
+	if err != nil {
+		return nil, err
+	}
+	v := newVar(common.MakeVarUUId(varCap.Id()), exe, db, vm, subs)
 	positions := varCap.Positions()
 	if positions.Len() != 0 {
 		v.positions = (*common.Positions)(&positions)
@@ -55,7 +59,7 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 }
 
 func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
-	v := newVar(uuid, exe, db, vm)
+	v := newVar(uuid, exe, db, vm, NewSubscriptions(vm))
 
 	clock := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	written := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
@@ -64,7 +68,7 @@ func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	return v
 }
 
-func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager) *Var {
+func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm *VarManager, subscriptions *Subscriptions) *Var {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &Var{
 		UUId:            uuid,
@@ -73,7 +77,7 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 		curFrame:        nil,
 		curFrameOnDisk:  nil,
 		writeInProgress: nil,
-		subscriptions:   NewSubscriptions(vm),
+		subscriptions:   subscriptions,
 		exe:             exe,
 		db:              db,
 		vm:              vm,
@@ -164,6 +168,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction) {
 	}
 	v.writeInProgress = func() {
 		v.writeInProgress = nil
+		v.subscriptions.Verify()
 		v.maybeMakeInactive()
 	}
 
@@ -175,6 +180,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction) {
 	varCap.SetWriteTxnId(f.frameTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
+	varCap.SetSubscriptions(v.subscriptions.AsData())
 	varData := common.SegToBytes(varSeg)
 
 	curFrameOnDisk := v.curFrameOnDisk

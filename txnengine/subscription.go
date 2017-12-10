@@ -4,68 +4,123 @@ import (
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/utils/status"
 )
 
 type Subscriptions struct {
-	vm      *VarManager
-	current map[common.ClientId]*common.TxnId
+	vm     *VarManager
+	subs   map[common.TxnId]bool
+	active common.TxnIds
+	data   []byte
 }
 
 func NewSubscriptions(vm *VarManager) *Subscriptions {
 	return &Subscriptions{
-		vm:      vm,
-		current: make(map[common.ClientId]*common.TxnId),
+		vm:   vm,
+		subs: make(map[common.TxnId]bool),
 	}
 }
 
-func (s *Subscriptions) LoadFromCap(subsCaps capn.DataList) {
-	for idx, l := 0, subsCaps.Len(); idx < l; idx++ {
-		txnId := common.MakeTxnId(subsCaps.At(idx))
-		s.current[txnId.ClientId(s.vm.RMId)] = txnId
+func NewSubscriptionsFromData(vm *VarManager, data []byte) (*Subscriptions, error) {
+	s := NewSubscriptions(vm)
+	if len(data) > 0 {
+		s.data = data
+		seg, _, err := capn.ReadFromMemoryZeroCopy(data)
+		if err != nil {
+			return nil, err
+		}
+		subsList := msgs.ReadRootSubscriptionListWrapper(seg).Subscriptions()
+		for idx, l := 0, subsList.Len(); idx < l; idx++ {
+			sub := subsList.At(idx)
+			txnId := common.MakeTxnId(sub.TxnId())
+			s.subs[*txnId] = sub.Added()
+		}
 	}
+	return s, nil
 }
 
-func (s *Subscriptions) AddToSeg(seg *capn.Segment) capn.DataList {
-	subsCap := seg.NewDataList(len(s.current))
-	idx := 0
-	for _, txnId := range s.current {
-		subsCap.Set(idx, txnId[:])
-		idx++
+func (s *Subscriptions) AsData() []byte {
+	if s.data == nil {
+		seg := capn.NewBuffer(nil)
+		subsWrapperCap := msgs.NewRootSubscriptionListWrapper(seg)
+		subsListCap := msgs.NewSubscriptionList(seg, len(s.subs))
+		idx := 0
+		for txnId, added := range s.subs {
+			subsCap := subsListCap.At(idx)
+			subsCap.SetTxnId(txnId[:])
+			subsCap.SetAdded(added)
+			idx++
+		}
+		subsWrapperCap.SetSubscriptions(subsListCap)
+		s.data = common.SegToBytes(seg)
 	}
-	return subsCap
-}
-
-func (s *Subscriptions) hasSubscription(txnId *common.TxnId) bool {
-	_, found := s.current[txnId.ClientId(s.vm.RMId)]
-	return found
-}
-
-func (s *Subscriptions) canCancelWith(txnId *common.TxnId) bool {
-	t, found := s.current[txnId.ClientId(s.vm.RMId)]
-	return found && txnId.Compare(t) == common.EQ
-}
-
-func (s *Subscriptions) addSubscription(txnId *common.TxnId) {
-	s.current[txnId.ClientId(s.vm.RMId)] = txnId
-}
-
-func (s *Subscriptions) cancelSubscription(txnId *common.TxnId) {
-	delete(s.current, txnId.ClientId(s.vm.RMId))
-}
-
-func (s *Subscriptions) isEmpty() bool {
-	return len(s.current) == 0
+	return s.data
 }
 
 func (s *Subscriptions) Subscribers() common.TxnIds {
-	return nil
+	if s.active == nil {
+		s.active = make(common.TxnIds, 0, len(s.subs))
+		for txnId, added := range s.subs {
+			if added {
+				txnIdCopy := txnId.MakeRMIdConcrete(s.vm.RMId)
+				s.active = append(s.active, txnIdCopy)
+			}
+		}
+	}
+	return s.active
+}
+
+func (s *Subscriptions) Committed(action *localAction) {
+	if action.addSubscription {
+		added, found := s.subs[*action.Id]
+		if found && added {
+			// duplicate, do nothing
+			return
+		} else if found {
+			// we learnt the remove first! Now delete the whole thing
+			delete(s.subs, *action.Id)
+		} else if sconn, found := s.vm.Servers[action.Id.RMId(s.vm.RMId)]; found && sconn.BootCount <= action.Id.BootCount() {
+			// new and it's valid
+			s.subs[*action.Id] = true
+		}
+	} else if action.delSubscription != nil {
+		added, found := s.subs[*action.delSubscription]
+		if found && added {
+			// cancelling
+			delete(s.subs, *action.Id)
+		} else if found {
+			// duplicate
+			return
+		} else {
+			// we've got a cancel first, before the add! We choose not to validate this.
+			s.subs[*action.Id] = false
+		}
+	}
+	s.active = nil
+	s.data = nil
+}
+
+func (s *Subscriptions) Verify() {
+	for txnId, added := range s.subs {
+		if !added {
+			continue
+		}
+		sconn, found := s.vm.Servers[txnId.RMId(s.vm.RMId)]
+		if !found || sconn.BootCount > txnId.BootCount() {
+			s.cancelSub(txnId)
+		}
+	}
+}
+
+func (s *Subscriptions) cancelSub(txnId common.TxnId) {
+	// TODO
 }
 
 func (s *Subscriptions) Status(sc *status.StatusConsumer) {
 	sc.Emit("- Subscriptions:")
-	for cId, txnId := range s.current {
-		sc.Emit(fmt.Sprintf("  %v (%v)", cId, txnId))
+	for txnId, added := range s.subs {
+		sc.Emit(fmt.Sprintf("  %v (%v)", txnId, added))
 	}
 	sc.Join()
 }

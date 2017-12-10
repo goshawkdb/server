@@ -884,12 +884,14 @@ func (s Action_List) Set(i int, item Action) { C.PointerList(s).Set(i, C.Object(
 type ActionType uint16
 
 const (
-	ACTIONTYPE_CREATE    ActionType = 0
-	ACTIONTYPE_READONLY  ActionType = 1
-	ACTIONTYPE_WRITEONLY ActionType = 2
-	ACTIONTYPE_READWRITE ActionType = 3
-	ACTIONTYPE_MISSING   ActionType = 4
-	ACTIONTYPE_ROLL      ActionType = 5
+	ACTIONTYPE_CREATE          ActionType = 0
+	ACTIONTYPE_READONLY        ActionType = 1
+	ACTIONTYPE_WRITEONLY       ActionType = 2
+	ACTIONTYPE_READWRITE       ActionType = 3
+	ACTIONTYPE_MISSING         ActionType = 4
+	ACTIONTYPE_ROLL            ActionType = 5
+	ACTIONTYPE_ADDSUBSCRIPTION ActionType = 6
+	ACTIONTYPE_DELSUBSCRIPTION ActionType = 7
 )
 
 func (c ActionType) String() string {
@@ -906,6 +908,10 @@ func (c ActionType) String() string {
 		return "missing"
 	case ACTIONTYPE_ROLL:
 		return "roll"
+	case ACTIONTYPE_ADDSUBSCRIPTION:
+		return "addSubscription"
+	case ACTIONTYPE_DELSUBSCRIPTION:
+		return "delSubscription"
 	default:
 		return ""
 	}
@@ -925,6 +931,10 @@ func ActionTypeFromString(c string) ActionType {
 		return ACTIONTYPE_MISSING
 	case "roll":
 		return ACTIONTYPE_ROLL
+	case "addSubscription":
+		return ACTIONTYPE_ADDSUBSCRIPTION
+	case "delSubscription":
+		return ACTIONTYPE_DELSUBSCRIPTION
 	default:
 		return 0
 	}

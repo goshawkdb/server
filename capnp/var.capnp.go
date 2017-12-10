@@ -13,9 +13,9 @@ import (
 
 type Var C.Struct
 
-func NewVar(s *C.Segment) Var            { return Var(s.NewStruct(0, 5)) }
-func NewRootVar(s *C.Segment) Var        { return Var(s.NewRootStruct(0, 5)) }
-func AutoNewVar(s *C.Segment) Var        { return Var(s.NewStructAR(0, 5)) }
+func NewVar(s *C.Segment) Var            { return Var(s.NewStruct(0, 6)) }
+func NewRootVar(s *C.Segment) Var        { return Var(s.NewRootStruct(0, 6)) }
+func AutoNewVar(s *C.Segment) Var        { return Var(s.NewStructAR(0, 6)) }
 func ReadRootVar(s *C.Segment) Var       { return Var(s.Root(0).ToStruct()) }
 func (s Var) Id() []byte                 { return C.Struct(s).GetObject(0).ToData() }
 func (s Var) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
@@ -27,6 +27,8 @@ func (s Var) WriteTxnClock() []byte      { return C.Struct(s).GetObject(3).ToDat
 func (s Var) SetWriteTxnClock(v []byte)  { C.Struct(s).SetObject(3, s.Segment.NewData(v)) }
 func (s Var) WritesClock() []byte        { return C.Struct(s).GetObject(4).ToData() }
 func (s Var) SetWritesClock(v []byte)    { C.Struct(s).SetObject(4, s.Segment.NewData(v)) }
+func (s Var) Subscriptions() []byte      { return C.Struct(s).GetObject(5).ToData() }
+func (s Var) SetSubscriptions(v []byte)  { C.Struct(s).SetObject(5, s.Segment.NewData(v)) }
 func (s Var) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -136,6 +138,25 @@ func (s Var) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.WritesClock()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"subscriptions\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscriptions()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -275,6 +296,25 @@ func (s Var) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("subscriptions = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscriptions()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -290,7 +330,7 @@ func (s Var) MarshalCapLit() ([]byte, error) {
 
 type Var_List C.PointerList
 
-func NewVarList(s *C.Segment, sz int) Var_List { return Var_List(s.NewCompositeList(0, 5, sz)) }
+func NewVarList(s *C.Segment, sz int) Var_List { return Var_List(s.NewCompositeList(0, 6, sz)) }
 func (s Var_List) Len() int                    { return C.PointerList(s).Len() }
 func (s Var_List) At(i int) Var                { return Var(C.PointerList(s).At(i).ToStruct()) }
 func (s Var_List) ToArray() []Var {
@@ -510,3 +550,285 @@ func (s VarIdPos_List) ToArray() []VarIdPos {
 	return a
 }
 func (s VarIdPos_List) Set(i int, item VarIdPos) { C.PointerList(s).Set(i, C.Object(item)) }
+
+type SubscriptionListWrapper C.Struct
+
+func NewSubscriptionListWrapper(s *C.Segment) SubscriptionListWrapper {
+	return SubscriptionListWrapper(s.NewStruct(0, 1))
+}
+func NewRootSubscriptionListWrapper(s *C.Segment) SubscriptionListWrapper {
+	return SubscriptionListWrapper(s.NewRootStruct(0, 1))
+}
+func AutoNewSubscriptionListWrapper(s *C.Segment) SubscriptionListWrapper {
+	return SubscriptionListWrapper(s.NewStructAR(0, 1))
+}
+func ReadRootSubscriptionListWrapper(s *C.Segment) SubscriptionListWrapper {
+	return SubscriptionListWrapper(s.Root(0).ToStruct())
+}
+func (s SubscriptionListWrapper) Subscriptions() Subscription_List {
+	return Subscription_List(C.Struct(s).GetObject(0))
+}
+func (s SubscriptionListWrapper) SetSubscriptions(v Subscription_List) {
+	C.Struct(s).SetObject(0, C.Object(v))
+}
+func (s SubscriptionListWrapper) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"subscriptions\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscriptions()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteJSON(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s SubscriptionListWrapper) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s SubscriptionListWrapper) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("subscriptions = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Subscriptions()
+		{
+			err = b.WriteByte('[')
+			if err != nil {
+				return err
+			}
+			for i, s := range s.ToArray() {
+				if i != 0 {
+					_, err = b.WriteString(", ")
+				}
+				if err != nil {
+					return err
+				}
+				err = s.WriteCapLit(b)
+				if err != nil {
+					return err
+				}
+			}
+			err = b.WriteByte(']')
+		}
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s SubscriptionListWrapper) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type SubscriptionListWrapper_List C.PointerList
+
+func NewSubscriptionListWrapperList(s *C.Segment, sz int) SubscriptionListWrapper_List {
+	return SubscriptionListWrapper_List(s.NewCompositeList(0, 1, sz))
+}
+func (s SubscriptionListWrapper_List) Len() int { return C.PointerList(s).Len() }
+func (s SubscriptionListWrapper_List) At(i int) SubscriptionListWrapper {
+	return SubscriptionListWrapper(C.PointerList(s).At(i).ToStruct())
+}
+func (s SubscriptionListWrapper_List) ToArray() []SubscriptionListWrapper {
+	n := s.Len()
+	a := make([]SubscriptionListWrapper, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s SubscriptionListWrapper_List) Set(i int, item SubscriptionListWrapper) {
+	C.PointerList(s).Set(i, C.Object(item))
+}
+
+type Subscription C.Struct
+
+func NewSubscription(s *C.Segment) Subscription      { return Subscription(s.NewStruct(8, 1)) }
+func NewRootSubscription(s *C.Segment) Subscription  { return Subscription(s.NewRootStruct(8, 1)) }
+func AutoNewSubscription(s *C.Segment) Subscription  { return Subscription(s.NewStructAR(8, 1)) }
+func ReadRootSubscription(s *C.Segment) Subscription { return Subscription(s.Root(0).ToStruct()) }
+func (s Subscription) TxnId() []byte                 { return C.Struct(s).GetObject(0).ToData() }
+func (s Subscription) SetTxnId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
+func (s Subscription) Added() bool                   { return C.Struct(s).Get1(0) }
+func (s Subscription) SetAdded(v bool)               { C.Struct(s).Set1(0, v) }
+func (s Subscription) WriteJSON(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('{')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"txnId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.TxnId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"added\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Added()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte('}')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s Subscription) MarshalJSON() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteJSON(&b)
+	return b.Bytes(), err
+}
+func (s Subscription) WriteCapLit(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	var err error
+	var buf []byte
+	_ = buf
+	err = b.WriteByte('(')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("txnId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.TxnId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("added = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.Added()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(')')
+	if err != nil {
+		return err
+	}
+	err = b.Flush()
+	return err
+}
+func (s Subscription) MarshalCapLit() ([]byte, error) {
+	b := bytes.Buffer{}
+	err := s.WriteCapLit(&b)
+	return b.Bytes(), err
+}
+
+type Subscription_List C.PointerList
+
+func NewSubscriptionList(s *C.Segment, sz int) Subscription_List {
+	return Subscription_List(s.NewCompositeList(8, 1, sz))
+}
+func (s Subscription_List) Len() int { return C.PointerList(s).Len() }
+func (s Subscription_List) At(i int) Subscription {
+	return Subscription(C.PointerList(s).At(i).ToStruct())
+}
+func (s Subscription_List) ToArray() []Subscription {
+	n := s.Len()
+	a := make([]Subscription, n)
+	for i := 0; i < n; i++ {
+		a[i] = s.At(i)
+	}
+	return a
+}
+func (s Subscription_List) Set(i int, item Subscription) { C.PointerList(s).Set(i, C.Object(item)) }

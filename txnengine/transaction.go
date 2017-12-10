@@ -62,6 +62,8 @@ type localAction struct {
 	writeAction     *msgs.Action
 	createPositions *common.Positions
 	roll            bool
+	addSubscription bool
+	delSubscription *common.TxnId
 	outcomeClock    vc.VectorClock
 	writesClock     *vc.VectorClockImmutable
 }
@@ -76,6 +78,10 @@ func (action *localAction) IsWrite() bool {
 
 func (action *localAction) IsRoll() bool {
 	return action.roll
+}
+
+func (action *localAction) IsMeta() bool {
+	return action.addSubscription || action.delSubscription != nil
 }
 
 func (action *localAction) IsImmigrant() bool {
@@ -142,7 +148,13 @@ func (action localAction) String() string {
 	if action.writesClock != nil {
 		i = "|i"
 	}
-	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i)
+	s := ""
+	if action.addSubscription {
+		s = "|+"
+	} else if action.delSubscription != nil {
+		s = fmt.Sprintf("|-(%v)", action.delSubscription)
+	}
+	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i, s)
 }
 
 func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
@@ -273,6 +285,26 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 				action.readVsn = common.MakeTxnId(actionCap.Version())
 				action.writeAction = &actionCap
 				action.roll = true
+				txn.writes = append(txn.writes, action.vUUId)
+			} else {
+				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
+			}
+
+		case msgs.ACTIONTYPE_ADDSUBSCRIPTION:
+			if idx == actionIndex {
+				action.readVsn = common.MakeTxnId(actionCap.Version())
+				action.writeAction = &actionCap
+				action.addSubscription = true
+				txn.writes = append(txn.writes, action.vUUId)
+			} else {
+				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
+			}
+
+		case msgs.ACTIONTYPE_DELSUBSCRIPTION:
+			if idx == actionIndex {
+				action.readVsn = common.MakeTxnId(actionCap.Version())
+				action.writeAction = &actionCap
+				action.delSubscription = common.MakeTxnId(actionCap.Modified().Value())
 				txn.writes = append(txn.writes, action.vUUId)
 			} else {
 				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
