@@ -63,8 +63,8 @@ func (s *Subscriptions) Subscribers() common.TxnIds {
 		s.active = make(common.TxnIds, 0, len(s.subs))
 		for txnId, added := range s.subs {
 			if added {
-				txnIdCopy := txnId.MakeRMIdConcrete(s.vm.RMId)
-				s.active = append(s.active, txnIdCopy)
+				txnIdCopy := txnId
+				s.active = append(s.active, &txnIdCopy)
 			}
 		}
 	}

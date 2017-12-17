@@ -45,10 +45,9 @@ func (task *ensureLocalTopology) Tick() (bool, error) {
 		if err != nil {
 			return task.fatal(err)
 		}
-		// if err == nil, the create succeeded, so wait for observation
-		return false, nil
-	} else {
-		// It's already on disk, we're not going to see it through the subscriber.
-		return task.setActiveTopology(topology)
 	}
+	// We don't have a working subscriber added yet, so we need to set
+	// this one manually. Plus this also copes with when we already
+	// have a topology on disk.
+	return task.setActiveTopology(topology)
 }
