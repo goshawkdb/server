@@ -27,18 +27,22 @@ var AbortRollNotFirst = errors.New("AbortRollNotFirst")
 var AbortRollNotInPermutation = errors.New("AbortRollNotInPermutation")
 
 type frame struct {
-	logger            log.Logger
-	parent            *frame
-	child             *frame
-	v                 *Var
-	frameTxnId        *common.TxnId
-	frameValueTxnId   *common.TxnId
-	frameValueTxn     *txnreader.TxnReader
+	logger          log.Logger
+	v               *Var
+	parent          *frame
+	child           *frame
+	positions       *common.Positions
+	frameTxnId      *common.TxnId
+	frameValueTxnId *common.TxnId
+	frameValueTxn   *txnreader.TxnReader
+	// the purpose of frameValueTxn is to make sure the value txn isn't
+	// lost (and so fails to make it to disk) if there are lots of
+	// writes going on at the same time - the value txn is passed
+	// through from frame to frame as necessary.
 	frameValueActions *txnreader.TxnActions
 	frameTxnClock     *vc.VectorClockMutable // the clock (including merge missing) of the frame txn
 	frameWritesClock  *vc.VectorClockMutable // max elems from all writes of all txns in parent frame
 	readVoteClock     *vc.VectorClockMutable
-	positions         *common.Positions
 	mask              *vc.VectorClockMutable
 	scheduleBackoff   *binarybackoff.BinaryBackoffEngine
 	frameOpen
@@ -47,21 +51,22 @@ type frame struct {
 	currentState frameStateMachineComponent
 }
 
-func NewFrame(parent *frame, v *Var, txnId, valueTxnId *common.TxnId, txnClock, writesClock *vc.VectorClockMutable) *frame {
+func NewFrame(v *Var, parent *frame, positions *common.Positions, txnId, valueTxnId *common.TxnId, valueTxn *txnreader.TxnReader, valueActions *txnreader.TxnActions, txnClock, writesClock *vc.VectorClockMutable) *frame {
 	f := &frame{
-		parent:           parent,
-		v:                v,
-		frameTxnId:       txnId,
-		frameValueTxnId:  valueTxnId,
-		frameTxnClock:    txnClock,
-		frameWritesClock: writesClock,
+		v:                 v,
+		parent:            parent,
+		positions:         positions,
+		frameTxnId:        txnId,
+		frameValueTxnId:   valueTxnId,
+		frameValueTxn:     valueTxn,
+		frameValueActions: valueActions,
+		frameTxnClock:     txnClock,
+		frameWritesClock:  writesClock,
 	}
 	if parent == nil {
-		f.positions = v.positions
 		f.mask = vc.NewVectorClock().AsMutable()
 		f.scheduleBackoff = binarybackoff.NewBinaryBackoffEngine(v.rng, server.VarRollDelayMin, server.VarRollDelayMax)
 	} else {
-		f.positions = parent.positions
 		f.mask = parent.mask
 		f.scheduleBackoff = parent.scheduleBackoff
 		f.scheduleBackoff.Shrink(server.VarRollDelayMin)
@@ -108,6 +113,12 @@ func (f *frame) String() string {
 
 func (f *frame) Status(sc *status.StatusConsumer) {
 	sc.Emit(f.String())
+	if f.positions == nil {
+		sc.Emit("- Positions: unknown")
+	} else {
+		sc.Emit(fmt.Sprintf("- Positions: %v", f.positions))
+	}
+
 	readHistogram := make([]int, 4)
 	for node := f.reads.First(); node != nil; node = node.Next() {
 		readHistogram[int(node.Value.(txnStatus))]++
@@ -125,7 +136,7 @@ func (f *frame) Status(sc *status.StatusConsumer) {
 	sc.Emit(fmt.Sprintf("- Mask: %v", f.mask))
 	sc.Emit(fmt.Sprintf("- Current State: %v", f.currentState))
 	sc.Emit(fmt.Sprintf("- Roll scheduled/active? %v/%v", f.rollScheduled != nil, f.rollActive))
-	sc.Emit(fmt.Sprintf("- DescendentOnDisk? %v", f.onDisk))
+	sc.Emit(fmt.Sprintf("- FrameOnDisk? %v", f.IsFrameOnDisk()))
 	sc.Emit(fmt.Sprintf("- Child == nil? %v", f.child == nil))
 	sc.Emit(fmt.Sprintf("- Parent == nil? %v", f.parent == nil))
 	if f.parent != nil {
@@ -192,19 +203,21 @@ func (fo *frameOpen) ensureFrameValueActions() *txnreader.TxnActions {
 			} else if err != nil {
 				panic(err)
 			} else {
-				panic(fmt.Sprintf("Unable to find value txn! %v", fo.frameValueTxnId))
-				return nil
+				panic(fmt.Sprintf("%v found empty frame value txn!", fo.frame))
 			}
 		}
-		if fo.frameTxnId.Compare(fo.frameValueTxnId) == common.EQ {
-			// easy case - our frame was not a roll
-			fo.frameValueActions = fo.frameValueTxn.Actions(false)
-		} else {
-			// we were a roll, based on an older frameValueTxn, so we
-			// need to shrink down its actions.
+
+		fo.frameValueActions = fo.frameValueTxn.Actions(false)
+
+		if fo.frameTxnId.Compare(fo.frameValueTxnId) != common.EQ {
+			// If they are not equal, then it means the frame Txn itself
+			// was some form of rw - either a roll or a meta. In this
+			// case, we must strip down the original frame txn to just
+			// the write of this var.
+
 			var ourAction *msgs.Action
 			vUUIdBytes := fo.v.UUId[:]
-			actions := fo.frameValueTxn.Actions(true).Actions()
+			actions := fo.frameValueActions.Actions()
 			for idx, l := 0, actions.Len(); idx < l; idx++ {
 				action := actions.At(idx)
 				if bytes.Equal(action.VarId(), vUUIdBytes) {
@@ -223,17 +236,18 @@ func (fo *frameOpen) ensureFrameValueActions() *txnreader.TxnActions {
 			list := msgs.NewActionList(seg, 1)
 			newAction := list.At(0)
 			newAction.SetVarId(vUUIdBytes)
-			newAction.SetActionType(msgs.ACTIONTYPE_ROLL)
+			newAction.SetActionType(ourAction.ActionType())
 			newAction.SetVersion(fo.frameValueTxnId[:])
 			newAction.SetModified()
 			newMod := newAction.Modified()
-			mod := ourAction.Modified()
-			newMod.SetReferences(mod.References())
-			newMod.SetValue(mod.Value())
+			ourMod := ourAction.Modified()
+			newMod.SetReferences(ourMod.References())
+			newMod.SetValue(ourMod.Value())
 			root.SetActions(list)
 			fo.frameValueActions = txnreader.TxnActionsFromData(common.SegToBytes(seg), false)
 		}
 	}
+
 	return fo.frameValueActions
 }
 
@@ -530,18 +544,9 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
 	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
-		if fo.frameValueActions == nil && fo.frameValueTxnId.Compare(txn.Id) == common.EQ {
-			// OK, so we are a roll and we've just learnt about the
-			// original write. We need to push it to disk. But once we
-			// have, by dfn, it's in the immediate previous frame so we
-			// can declare it LocallyComplete. TODO
-			panic(fmt.Sprintf("learnt value late: %v", action.Id))
-			return true
-		} else {
-			utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Ignored. Too Old.", "TxnId", txn.Id)
-			fo.maybeStartRoll()
-			return false
-		}
+		utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Ignored. Too Old.", "TxnId", txn.Id)
+		fo.maybeStartRoll()
+		return false
 	}
 	if action.Id.Compare(fo.frameTxnId) == common.EQ {
 		utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Duplicate of current frame.", "TxnId", txn.Id)
@@ -765,10 +770,12 @@ func (fo *frameOpen) maybeCreateChild() {
 
 	case localElemVals[0] == elem:
 		// We learnt of some siblings to this frame txn, but we also did
-		// further work. Again, there can not have been any reads of
-		// this frame txn. We can also ignore our siblings because the
-		// further work will by definition include the consequences of
-		// the siblings to this frame.
+		// further work (which can potentially just be learnt writes,
+		// hence we need to call calculateWriteVoteClock). Again, there
+		// can not have been any reads of this frame txn. We can also
+		// ignore our siblings because the further work will by
+		// definition include the consequences of the siblings to this
+		// frame.
 		localElemVals = localElemVals[1:]
 		if fo.reads.Len() != 0 {
 			panic(fmt.Sprintf("%v has committed reads even though frame has younger siblings", fo.frame))
@@ -778,6 +785,8 @@ func (fo *frameOpen) maybeCreateChild() {
 		written = vc.NewVectorClock().AsMutable()
 
 	default:
+		// we can be 100% learnt writes of the future, so we need to
+		// find the writeVoteClock.
 		fo.calculateWriteVoteClock()
 		clock = fo.writeVoteClock
 		written = vc.NewVectorClock().AsMutable()
@@ -795,44 +804,78 @@ func (fo *frameOpen) maybeCreateChild() {
 			outcomeClock.MergeInMissing(clock)
 			winner = maxTxnByOutcomeClock(winner, action)
 
-			if action.writesClock == nil {
+			if action.IsImmigrant() {
+				written.MergeInMax(action.writesClock)
+			} else {
 				for _, k := range action.writes {
 					written.SetVarIdMax(k, outcomeClock.At(k))
 				}
-			} else {
-				written.MergeInMax(action.writesClock)
 			}
 		}
 	}
 
-	valueTxnId := winner.Id
-	valueTxn := winner.TxnReader
+	childFrameTxnId := winner.Id
+	childValueTxnId := winner.Id
+	childValueTxn := winner.TxnReader
+	childValueActions := winner.TxnReader.Actions(false)
+	winnerLocalAction := winner
 
-	if winner.IsRoll() {
-		valueTxnId = winner.roll
-		valueTxn = nil
-		if valueTxnId.Compare(fo.frameValueTxnId) == common.EQ {
-			valueTxn = fo.frameValueTxn // this can still be nil, and it's still ok!
-			fmt.Println("roll matches frame", valueTxn != nil)
-		} else {
-			// hunt for the corresponding write
-			for node := fo.writes.First(); node != nil; node = node.Next() {
+	if winner.IsRoll() { // TODO or isMeta
+		winnerLocalAction = nil
+		childValueTxnId = winner.roll
+		// The winning txn itself does not need to go to disk at all!
+		childValueTxn = nil
+		childValueActions = nil
+
+		if fo.frameValueTxnId.Compare(childValueTxnId) == common.EQ {
+			// Winner is a roll/meta of our frame value. We must be
+			// careful: we can only pass on our frameValueActions to the
+			// child if we are ourselves already a roll of some more
+			// ancient value (i.e. the actions have already been stripped
+			// down):
+			if fo.frameValueTxnId.Compare(fo.frameTxnId) != common.EQ {
+				// and frameValueActions can still be nil if they've not been loaded!
+				childValueActions = fo.frameValueActions
+			}
+			// And see that childValueActions is independent of
+			// childValueTxn: we need to make sure that that goes to disk
+			// - even if childValueActions is nil. And vice versa:
+			// childValueTxn can be nil and childValueActions non-nil.
+			childValueTxn = fo.frameValueTxn
+
+		} else { // hunt for the corresponding write
+			for node := fo.writes.First(); childValueTxn == nil && node != nil; node = node.Next() {
 				action := node.Key.(*localAction)
-				if valueTxnId.Compare(action.Id) == common.EQ {
-					valueTxn = action.TxnReader
-					// leave valueActions at nil because we will need to
-					// reduce the actions in it.
-					fmt.Println("found roll in frame")
-					break
+				if childValueTxnId.Compare(action.Id) == common.EQ {
+					// Even though we've found it, we cannot pass these
+					// actions through to the child frame because these txn
+					// actions have not been reduced.  But, we must write
+					// this to disk, so we do pass the txn itself through.
+					childValueTxn = action.TxnReader
 				}
 			}
-			fmt.Println("FAILED TO FIND ROLL IN FRAME")
+			if childValueTxn == nil {
+				// We know that the child value txn is not on disk and we
+				// know it has to be. So we must be waiting to learn
+				// it. So we refuse to progress at this point.
+				return
+			}
 		}
 	}
 
-	fo.child = NewFrame(fo.frame, fo.v, winner.Id, valueTxnId, winner.outcomeClock.AsMutable(), written)
-	fo.child.frameValueTxn = valueTxn
-	fo.v.SetCurFrame(fo.child, fo.positions, winner, valueTxn)
+	// So by this point:
+	// childFrameTxnId cannot be nil
+	// childValueTxnId cannot be nil
+	// childValueTxn can be nil if the value txn is already on
+	//  disk. Equally, it can be non nil even if it's already on disk -
+	//  it just happens to have been loaded.
+	// childValueActions can be nil if we are a roll/meta under some conditions
+
+	fo.child = NewFrame(fo.v, fo.frame, fo.positions,
+		childFrameTxnId, childValueTxnId, childValueTxn, childValueActions,
+		winner.outcomeClock.AsMutable(), written)
+
+	fo.v.SetCurFrame(fo.child, winnerLocalAction)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
 		utils.DebugLog(fo.ensureLogger(), "debug", "New frame learns future reads.")
@@ -849,8 +892,8 @@ func (fo *frameOpen) maybeCreateChild() {
 }
 
 func (fo *frameOpen) basicRollCondition(rescheduling bool) bool {
-	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.v.positions != nil && fo.v.curFrame == fo.frame &&
-		(fo.reads.Len() > fo.uncommittedReads || (fo.frameValueActions != nil && fo.frameTxnClock.Len() > fo.frameValueActions.Actions().Len() && fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0))
+	return (rescheduling || fo.rollScheduled == nil) && !fo.rollActive && fo.currentState == fo && fo.child == nil && fo.writes.Len() == 0 && fo.positions != nil && fo.v.curFrame == fo.frame &&
+		(fo.reads.Len() > fo.uncommittedReads || (fo.parent == nil && fo.reads.Len() == 0 && len(fo.learntFutureReads) == 0 && fo.frameTxnClock.Len() > fo.ensureFrameValueActions().Actions().Len()))
 }
 
 func (fo *frameOpen) maybeStartRoll() {
@@ -979,7 +1022,7 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 	fo.rollTxn = &ctxn
 	posMap := map[common.VarUUId]*types.PosCapVer{
 		*fo.v.UUId: &types.PosCapVer{
-			Positions:  fo.v.positions,
+			Positions:  fo.positions,
 			Capability: common.ReadWriteCapability,
 			Version:    fo.frameTxnId,
 		},
@@ -1028,18 +1071,27 @@ func (fc *frameClosed) start() {
 
 func (fc *frameClosed) String() string { return "frameClosed" }
 
-func (fc *frameClosed) DescendentOnDisk() bool {
+// This gets called once our own frame txn and frame value txn are on
+// disk. It does not reflect any of the txns that we receive and
+// commit within this frame!
+func (fc *frameClosed) FrameNowOnDisk() {
 	if !fc.onDisk {
-		utils.DebugLog(fc.ensureLogger(), "debug", "DescendentOnDisk")
+		utils.DebugLog(fc.ensureLogger(), "debug", "FrameOnDisk")
+		if fc.parent != nil {
+			fc.parent.FrameNowOnDisk()
+		}
 		fc.onDisk = true
+		fc.frameValueTxn = nil
 		fc.MaybeCompleteTxns()
-		return true
 	}
-	return false
+}
+
+func (fc *frameClosed) IsFrameOnDisk() bool {
+	return fc.onDisk
 }
 
 func (fc *frameClosed) MaybeCompleteTxns() {
-	if fc.currentState == fc && fc.onDisk && fc.parent == nil {
+	if fc.currentState == fc && fc.IsFrameOnDisk() && fc.parent == nil {
 		utils.DebugLog(fc.ensureLogger(), "debug", "MaybeCompleteTxns")
 		fc.nextState()
 		for node := fc.reads.First(); node != nil; node = node.Next() {
