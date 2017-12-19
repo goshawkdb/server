@@ -107,11 +107,7 @@ func (ballot *BallotBuilder) CreateBadReadBallot(txnId *common.TxnId, actions *t
 	voteCap.SetAbortBadRead()
 	badReadCap := voteCap.AbortBadRead()
 	badReadCap.SetTxnId(txnId[:])
-	if actions == nil {
-		badReadCap.SetTxnActions([]byte{})
-	} else {
-		badReadCap.SetTxnActions(actions.Data)
-	}
+	badReadCap.SetTxnActions(actions.Data)
 	ballotCap.SetVote(voteCap)
 	ballot.Data = common.SegToBytes(seg)
 	return ballot.Ballot

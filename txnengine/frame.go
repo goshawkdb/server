@@ -229,6 +229,7 @@ func (fo *frameOpen) ensureFrameValueActions() *txnreader.TxnActions {
 				panic(fmt.Sprintf("Unable to find ourself in frameValueTxnId actions. %v %v", fo.frameValueTxnId, fo.v.UUId))
 			}
 
+			utils.DebugLog(fo.ensureLogger(), "debug", "Reducing value txn.", "valueActionType", ourAction.ActionType())
 			// we now have to copy it to a new actions seg so that we
 			// drop all the other actions that were in the orig txn.
 			seg := capn.NewBuffer(nil)
@@ -237,12 +238,12 @@ func (fo *frameOpen) ensureFrameValueActions() *txnreader.TxnActions {
 			newAction := list.At(0)
 			newAction.SetVarId(vUUIdBytes)
 			newAction.SetActionType(ourAction.ActionType())
-			newAction.SetVersion(fo.frameValueTxnId[:])
+			newAction.SetVersion(ourAction.Version())
 			newAction.SetModified()
 			newMod := newAction.Modified()
 			ourMod := ourAction.Modified()
-			newMod.SetReferences(ourMod.References())
 			newMod.SetValue(ourMod.Value())
+			newMod.SetReferences(ourMod.References())
 			root.SetActions(list)
 			fo.frameValueActions = txnreader.TxnActionsFromData(common.SegToBytes(seg), false)
 		}
