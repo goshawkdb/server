@@ -308,7 +308,7 @@ func (tcs *TLSCapnpServer) Run(conn *network.Connection) error {
 	seg := capn.NewBuffer(nil)
 	message := msgs.NewRootMessage(seg)
 	message.SetHeartbeat()
-	tcs.CreateBeater(conn, common.SegToBytes(seg))
+	tcs.CreateBeater(conn, common.SegToBytes(seg), false)
 	tcs.createReader()
 
 	tcs.connectionManager.ServerEstablished(tcs.remote)
@@ -491,7 +491,7 @@ func (tcc *TLSCapnpClient) Run(conn *network.Connection) error {
 		seg := capn.NewBuffer(nil)
 		message := cmsgs.NewRootClientMessage(seg)
 		message.SetHeartbeat()
-		tcc.CreateBeater(conn, common.SegToBytes(seg))
+		tcc.CreateBeater(conn, common.SegToBytes(seg), false)
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
