@@ -13,6 +13,7 @@ struct Var {
   writeTxnId      @2: Data;
   writeTxnClock   @3: Data;
   writesClock     @4: Data;
+  valueTxnId      @5: Data;
 }
 
 struct VarIdPos {

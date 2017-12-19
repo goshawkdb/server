@@ -24,7 +24,6 @@ type VarWriteSubscriber struct {
 
 type Var struct {
 	UUId            *common.VarUUId
-	positions       *common.Positions
 	poisson         *poisson.Poisson
 	curFrame        *frame
 	curFrameOnDisk  *frame
@@ -45,17 +44,20 @@ func VarFromData(data []byte, exe *dispatcher.Executor, db *db.Databases, vm *Va
 
 	v := newVar(common.MakeVarUUId(varCap.Id()), exe, db, vm)
 	positions := varCap.Positions()
-	if positions.Len() != 0 {
-		v.positions = (*common.Positions)(&positions)
+	positionsPtr := (*common.Positions)(&positions)
+	if positions.Len() == 0 {
+		positionsPtr = nil
 	}
 
 	writeTxnId := common.MakeTxnId(varCap.WriteTxnId())
+	valueTxnId := common.MakeTxnId(varCap.ValueTxnId())
 	writeTxnClock := vc.VectorClockFromData(varCap.WriteTxnClock(), true).AsMutable()
 	writesClock := vc.VectorClockFromData(varCap.WritesClock(), true).AsMutable()
-	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId)
+	utils.DebugLog(vm.logger, "debug", "Restored.", "VarUUId", v.UUId, "TxnId", writeTxnId, "ValueTxnId", valueTxnId)
 
-	v.curFrame = NewFrame(nil, v, writeTxnId, nil, writeTxnClock, writesClock)
+	v.curFrame = NewFrame(v, nil, positionsPtr, writeTxnId, valueTxnId, nil, nil, writeTxnClock, writesClock)
 	v.curFrameOnDisk = v.curFrame
+	v.curFrame.onDisk = true // don't call NowOnDisk because this is not an edge.
 	return v, nil
 }
 
@@ -64,7 +66,7 @@ func NewVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 
 	clock := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
 	written := vc.NewVectorClock().AsMutable().Bump(v.UUId, 1)
-	v.curFrame = NewFrame(nil, v, nil, nil, clock, written)
+	v.curFrame = NewFrame(v, nil, nil, nil, nil, nil, nil, clock, written)
 
 	return v
 }
@@ -73,10 +75,8 @@ func newVar(uuid *common.VarUUId, exe *dispatcher.Executor, db *db.Databases, vm
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &Var{
 		UUId:            uuid,
-		positions:       nil,
 		poisson:         poisson.NewPoisson(),
 		curFrame:        nil,
-		curFrameOnDisk:  nil,
 		writeInProgress: nil,
 		subscribers:     make(map[common.TxnId]*VarWriteSubscriber),
 		exe:             exe,
@@ -177,33 +177,32 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	}
 }
 
-func (v *Var) SetCurFrame(f *frame, action *localAction, positions *common.Positions) {
-	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "action", action)
+func (v *Var) SetCurFrame(f *frame, frameAction *localAction) {
+	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "frameTxnId", f.frameTxnId, "frameValueTxnId", f.frameValueTxnId)
 
 	v.curFrame = f
-	v.positions = positions
 
-	if len(v.subscribers) != 0 {
-		actionCap := action.writeAction
+	if len(v.subscribers) != 0 && frameAction != nil {
+		actionCap := frameAction.writeAction
 		modifiedCap := actionCap.Modified()
 		value := modifiedCap.Value()
 		references := modifiedCap.References()
 		for _, sub := range v.subscribers {
-			sub.Observe(v, value, &references, action.Txn)
+			sub.Observe(v, value, &references, frameAction.Txn)
 		}
 	}
 
 	// diffLen := action.outcomeClock.Len() - action.TxnReader.Actions(true).Actions().Len()
 	// fmt.Printf("d%v ", diffLen)
 
-	v.maybeWriteFrame(f, action)
+	v.maybeWriteFrame(f)
 }
 
-func (v *Var) maybeWriteFrame(f *frame, action *localAction) {
+func (v *Var) maybeWriteFrame(f *frame) {
 	if v.writeInProgress != nil {
 		v.writeInProgress = func() {
 			v.writeInProgress = nil
-			v.maybeWriteFrame(f, action)
+			v.maybeWriteFrame(f)
 		}
 		return
 	}
@@ -216,22 +215,40 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction) {
 	varCap := msgs.NewRootVar(varSeg)
 
 	varCap.SetId(v.UUId[:])
-	varCap.SetPositions(capn.UInt8List(*v.positions))
+	varCap.SetPositions(capn.UInt8List(*f.positions))
 	varCap.SetWriteTxnId(f.frameTxnId[:])
+	varCap.SetValueTxnId(f.frameValueTxnId[:])
 	varCap.SetWriteTxnClock(f.frameTxnClock.AsData())
 	varCap.SetWritesClock(f.frameWritesClock.AsData())
 	varData := common.SegToBytes(varSeg)
 
-	curFrameOnDisk := v.curFrameOnDisk
+	// NB v.curFrameOnDisk cannot change whilst we're in here, so it's
+	// safe to access it directly.
+
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
 	future := v.db.ReadWriteTransaction(func(rwtxn *mdbs.RWTxn) interface{} {
-		if err := v.db.WriteTxnToDisk(rwtxn, f.frameTxnId, action.TxnReader.Data); err != nil {
+		if err := rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err != nil {
 			return types.EmptyStructVal
-		} else if err := rwtxn.Put(v.db.Vars, v.UUId[:], varData, 0); err != nil {
-			return types.EmptyStructVal
-		} else if curFrameOnDisk != nil {
-			v.db.DeleteTxnFromDisk(rwtxn, curFrameOnDisk.frameTxnId)
+		}
+
+		if f.frameValueTxn == nil {
+			// we are confident that it's already on disk, so we need to
+			// just bump the ref count.
+			if err := v.db.IncrTxnRefCount(rwtxn, f.frameValueTxnId); err != nil {
+				return types.EmptyStructVal
+			}
+		} else {
+			if err := v.db.WriteTxnToDisk(rwtxn, f.frameValueTxn.Id, f.frameValueTxn.Data); err != nil {
+				return types.EmptyStructVal
+			}
+		}
+
+		if v.curFrameOnDisk != nil {
+			// DeleteTxnFromDisk is idempotent and does not error if the txn is not on disk.
+			if err := v.db.DeleteTxnFromDisk(rwtxn, v.curFrameOnDisk.frameValueTxnId); err != nil {
+				return types.EmptyStructVal
+			}
 		}
 		return types.EmptyStructVal
 	})
@@ -244,8 +261,7 @@ func (v *Var) maybeWriteFrame(f *frame, action *localAction) {
 			v.applyToSelf(func() {
 				utils.DebugLog(v.vm.logger, "debug", "Written to disk.", "VarUUId", v.UUId, "TxnId", f.frameTxnId)
 				v.curFrameOnDisk = f
-				for ancestor := f.parent; ancestor != nil && ancestor.DescendentOnDisk(); ancestor = ancestor.parent {
-				}
+				f.FrameNowOnDisk()
 				v.writeInProgress()
 			})
 		}
@@ -276,7 +292,7 @@ func (v *Var) isIdle() bool {
 }
 
 func (v *Var) isOnDisk(cancelSubs bool) bool {
-	if v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty() {
+	if v.writeInProgress == nil && v.curFrame.IsFrameOnDisk() && v.curFrame.isEmpty() {
 		if cancelSubs {
 			for _, sub := range v.subscribers {
 				sub.Cancel(v)
@@ -306,11 +322,6 @@ func (v *Var) applyToSelf(fun func()) {
 
 func (v *Var) Status(sc *status.StatusConsumer) {
 	sc.Emit(v.UUId.String())
-	if v.positions == nil {
-		sc.Emit("- Positions: unknown")
-	} else {
-		sc.Emit(fmt.Sprintf("- Positions: %v", v.positions))
-	}
 	sc.Emit("- CurFrame:")
 	v.curFrame.Status(sc.Fork())
 	sc.Emit(fmt.Sprintf("- Subscribers: %v", len(v.subscribers)))

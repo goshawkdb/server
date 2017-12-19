@@ -62,7 +62,7 @@ type localAction struct {
 	readVsn         *common.TxnId
 	writeAction     *msgs.Action
 	createPositions *common.Positions
-	roll            bool
+	roll            *common.TxnId
 	outcomeClock    vc.VectorClock
 	writesClock     *vc.VectorClockImmutable
 }
@@ -76,7 +76,7 @@ func (action *localAction) IsWrite() bool {
 }
 
 func (action *localAction) IsRoll() bool {
-	return action.roll
+	return action.roll != nil
 }
 
 func (action *localAction) IsImmigrant() bool {
@@ -274,7 +274,7 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 			if idx == actionIndex {
 				action.readVsn = common.MakeTxnId(actionCap.Version())
 				action.writeAction = &actionCap
-				action.roll = true
+				action.roll = common.MakeTxnId(actionCap.Modified().Value())
 				txn.writes = append(txn.writes, action.vUUId)
 			} else {
 				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))

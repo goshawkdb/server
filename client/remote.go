@@ -86,6 +86,8 @@ func (rts *RemoteTransactionSubmitter) Committed(txn *txnreader.TxnReader, tr *T
 		rts.metrics.TxnResubmit.Add(float64(rts.resubmitCount))
 	}
 
+	utils.DebugLog(rts.logger, "debug", "Txn Committed.", "OrigTxnId", tr.origId, "TxnId", tr.Id)
+
 	rts.bbe.Shrink(server.SubmissionMinSubmitDelay)
 
 	seg := capn.NewBuffer(nil)
@@ -157,9 +159,11 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 				idx++
 				clientAction.SetVarId(vUUId[:])
 				if vc.val == nil {
+					utils.DebugLog(rts.logger, "debug", "TxnId", txnId, "VarUUId", vUUId, "update", "DELETE")
 					clientAction.SetActionType(cmsgs.CLIENTACTIONTYPE_DELETE)
 					clientAction.SetUnmodified()
 				} else {
+					utils.DebugLog(rts.logger, "debug", "TxnId", txnId, "VarUUId", vUUId, "update", "WRITEONLY")
 					clientAction.SetActionType(cmsgs.CLIENTACTIONTYPE_WRITEONLY)
 					clientAction.SetModified()
 					clientMod := clientAction.Modified()
@@ -314,7 +318,14 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 					c.version = txnId
 					c.clockElem = clockElem
 					mod := action.Modified()
-					results[*vUUId] = &valueCached{c: c, val: mod.Value()}
+					// depending on internal capnp things, Value() here can
+					// return nil instead of an empty slice in some
+					// cases. Grrrr.
+					value := mod.Value()
+					if value == nil {
+						value = []byte{}
+					}
+					results[*vUUId] = &valueCached{c: c, val: value}
 					c.refs = mod.References().ToArray()
 					for _, ref := range c.refs {
 						vUUId := common.MakeVarUUId(ref.Id())

@@ -13,9 +13,9 @@ import (
 
 type Var C.Struct
 
-func NewVar(s *C.Segment) Var            { return Var(s.NewStruct(0, 5)) }
-func NewRootVar(s *C.Segment) Var        { return Var(s.NewRootStruct(0, 5)) }
-func AutoNewVar(s *C.Segment) Var        { return Var(s.NewStructAR(0, 5)) }
+func NewVar(s *C.Segment) Var            { return Var(s.NewStruct(0, 6)) }
+func NewRootVar(s *C.Segment) Var        { return Var(s.NewRootStruct(0, 6)) }
+func AutoNewVar(s *C.Segment) Var        { return Var(s.NewStructAR(0, 6)) }
 func ReadRootVar(s *C.Segment) Var       { return Var(s.Root(0).ToStruct()) }
 func (s Var) Id() []byte                 { return C.Struct(s).GetObject(0).ToData() }
 func (s Var) SetId(v []byte)             { C.Struct(s).SetObject(0, s.Segment.NewData(v)) }
@@ -27,6 +27,8 @@ func (s Var) WriteTxnClock() []byte      { return C.Struct(s).GetObject(3).ToDat
 func (s Var) SetWriteTxnClock(v []byte)  { C.Struct(s).SetObject(3, s.Segment.NewData(v)) }
 func (s Var) WritesClock() []byte        { return C.Struct(s).GetObject(4).ToData() }
 func (s Var) SetWritesClock(v []byte)    { C.Struct(s).SetObject(4, s.Segment.NewData(v)) }
+func (s Var) ValueTxnId() []byte         { return C.Struct(s).GetObject(5).ToData() }
+func (s Var) SetValueTxnId(v []byte)     { C.Struct(s).SetObject(5, s.Segment.NewData(v)) }
 func (s Var) WriteJSON(w io.Writer) error {
 	b := bufio.NewWriter(w)
 	var err error
@@ -136,6 +138,25 @@ func (s Var) WriteJSON(w io.Writer) error {
 	}
 	{
 		s := s.WritesClock()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
+	err = b.WriteByte(',')
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("\"valueTxnId\":")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ValueTxnId()
 		buf, err = json.Marshal(s)
 		if err != nil {
 			return err
@@ -275,6 +296,25 @@ func (s Var) WriteCapLit(w io.Writer) error {
 			return err
 		}
 	}
+	_, err = b.WriteString(", ")
+	if err != nil {
+		return err
+	}
+	_, err = b.WriteString("valueTxnId = ")
+	if err != nil {
+		return err
+	}
+	{
+		s := s.ValueTxnId()
+		buf, err = json.Marshal(s)
+		if err != nil {
+			return err
+		}
+		_, err = b.Write(buf)
+		if err != nil {
+			return err
+		}
+	}
 	err = b.WriteByte(')')
 	if err != nil {
 		return err
@@ -290,7 +330,7 @@ func (s Var) MarshalCapLit() ([]byte, error) {
 
 type Var_List C.PointerList
 
-func NewVarList(s *C.Segment, sz int) Var_List { return Var_List(s.NewCompositeList(0, 5, sz)) }
+func NewVarList(s *C.Segment, sz int) Var_List { return Var_List(s.NewCompositeList(0, 6, sz)) }
 func (s Var_List) Len() int                    { return C.PointerList(s).Len() }
 func (s Var_List) At(i int) Var                { return Var(C.PointerList(s).At(i).ToStruct()) }
 func (s Var_List) ToArray() []Var {
