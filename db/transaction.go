@@ -38,6 +38,20 @@ func (db *Databases) WriteTxnToDisk(rwtxn *mdbs.RWTxn, txnId *common.TxnId, txnB
 	}
 }
 
+func (db *Databases) IncrTxnRefCount(rwtxn *mdbs.RWTxn, txnId *common.TxnId) error {
+	bites, err := rwtxn.Get(db.TransactionRefs, txnId[:])
+
+	if err == nil {
+		count := binary.BigEndian.Uint32(bites) + 1
+		// fmt.Printf("%v +Refcount now %v\n", txnId, count)
+		binary.BigEndian.PutUint32(bites, count)
+		return rwtxn.Put(db.TransactionRefs, txnId[:], bites, 0)
+
+	} else {
+		return err // includes not found
+	}
+}
+
 func (db *Databases) ReadTxnBytesFromDisk(rtxn *mdbs.RTxn, txnId *common.TxnId) []byte {
 	bites, err := rtxn.Get(db.Transactions, txnId[:])
 	if err == nil {

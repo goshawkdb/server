@@ -37,8 +37,13 @@ type Configuration struct {
 }
 
 func BlankConfiguration() *Configuration {
-	// zero values are fine for all fields
-	return &Configuration{}
+	// Zero values are fine for all fields, apart from MaxRMCount: we
+	// need that to be non zero so that the frames will end up with
+	// non-nil positions, which is essential for them to be able to
+	// create child frames.
+	return &Configuration{
+		MaxRMCount: 1,
+	}
 }
 
 func (a *Configuration) Equal(b *Configuration) bool {

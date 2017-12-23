@@ -374,7 +374,8 @@ func (br badReads) combine(rmBal *rmBallot) {
 	badRead := rmBal.ballot.VoteCap.AbortBadRead()
 	clock := rmBal.ballot.Clock
 	txnId := common.MakeTxnId(badRead.TxnId())
-	actions := txnreader.TxnActionsFromData(badRead.TxnActions(), true).Actions()
+	badReadData := badRead.TxnActions()
+	actions := txnreader.TxnActionsFromData(badReadData, true).Actions()
 
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -498,25 +499,7 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 				newAction.SetActionType(msgs.ACTIONTYPE_MISSING)
 			case msgs.ACTIONTYPE_WRITEONLY:
 				actionsList.Set(idy, *action)
-			case msgs.ACTIONTYPE_READWRITE:
-				newAction := actionsList.At(idy)
-				newAction.SetVarId(action.VarId())
-				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
-				newAction.SetModified()
-				newMod := newAction.Modified()
-				mod := action.Modified()
-				newMod.SetValue(mod.Value())
-				newMod.SetReferences(mod.References())
-			case msgs.ACTIONTYPE_CREATE:
-				newAction := actionsList.At(idy)
-				newAction.SetVarId(action.VarId())
-				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
-				newAction.SetModified()
-				newMod := newAction.Modified()
-				mod := action.Modified()
-				newMod.SetValue(mod.Value())
-				newMod.SetReferences(mod.References())
-			case msgs.ACTIONTYPE_ROLL:
+			case msgs.ACTIONTYPE_CREATE, msgs.ACTIONTYPE_READWRITE, msgs.ACTIONTYPE_ROLL:
 				newAction := actionsList.At(idy)
 				newAction.SetVarId(action.VarId())
 				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
