@@ -146,6 +146,10 @@ func (it *dbIterator) iterate() {
 				} else if len(varCaps) == 0 {
 					continue
 				}
+				// varCaps now contains every local var that has txnId as
+				// its frameTxn. We now need to test to see which, if any,
+				// of our batches need to include a subset of these
+				// varcaps and txn.
 				for _, sb := range it.batch {
 					matchingVarCaps, err := it.matchVarsAgainstCond(sb.cond, varCaps)
 					if err != nil {
@@ -263,6 +267,7 @@ func (it *dbIterator) ConnectionEstablished(conn *sconn.ServerConnection, server
 	done()
 }
 
+// a sendBatch is for a single remote RMId. We iterate per group of sendBatch (dbIterator.batch).
 type sendBatch struct {
 	logger  log.Logger
 	version uint32

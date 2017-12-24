@@ -27,7 +27,7 @@ func (task *installTargetOld) init(base *transmogrificationTask) {
 func (task *installTargetOld) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil &&
+		task.targetConfig != nil && task.subscribed &&
 		active.Version < task.targetConfig.Version &&
 		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
 }
@@ -47,10 +47,6 @@ func (task *installTargetOld) Tick() (bool, error) {
 		// this step must be performed by the existing RMs
 		return false, nil
 	}
-	// If we're in the old config, do not share with others just yet
-	// because we may well have more information (new connections) than
-	// the others so they might calculate different targets and then
-	// we'd be racing.
 
 	targetTopology, rootsRequired, terminate, err := task.calculateTargetTopology()
 	if terminate || err != nil || targetTopology == nil {

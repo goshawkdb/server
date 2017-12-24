@@ -40,6 +40,7 @@ type transmogrificationTask struct {
 
 	ensureLocalTopology
 	joinCluster
+	subscribe
 	installTargetOld
 	installTargetNew
 	quiet
@@ -56,6 +57,7 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 	base.stages = []stage{
 		&base.ensureLocalTopology,
 		&base.joinCluster,
+		&base.subscribe,
 		&base.installTargetOld,
 		&base.installTargetNew,
 		&base.quiet,

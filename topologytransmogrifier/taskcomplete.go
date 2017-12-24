@@ -16,7 +16,7 @@ func (task *installCompletion) init(base *transmogrificationTask) {
 func (task *installCompletion) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil &&
+		task.targetConfig != nil && task.subscribed &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
 		active.NextConfiguration.InstalledOnNew &&
