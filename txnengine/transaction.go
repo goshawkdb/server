@@ -159,6 +159,9 @@ func (action localAction) String() string {
 
 func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
 	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
+	// the above will populate txn.localActions based on the action
+	// indices, which will likely be totally wrong. So we now reset and
+	// rebuild localActions:
 	txn.localActions = make([]localAction, varCaps.Len())
 	actionsMap := make(map[common.VarUUId]*localAction)
 	for idx, l := 0, varCaps.Len(); idx < l; idx++ {
@@ -174,7 +177,8 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 	}
 
 	txnActionsList := reader.Actions(true).Actions()
-
+	// but the one thing we don't have in the localAction is the actual
+	// write action, so we just look that up from the txn itself:
 	for idx, l := 0, txnActionsList.Len(); idx < l; idx++ {
 		actionCap := txnActionsList.At(idx)
 		vUUId := common.MakeVarUUId(actionCap.VarId())
@@ -183,8 +187,10 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		}
 	}
 
-	txn.Start(false)
-	txn.nextState()
+	txn.Start(false) // txn will start at txnReceiveOutcome...
+	txn.nextState()  // ...but that will get confused by outcomeClock
+	// != nil, so we must take matters into our own
+	// hands:
 	enqueuedAt := time.Now()
 	for idx := range txn.localActions {
 		action := &txn.localActions[idx]

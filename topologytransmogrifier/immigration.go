@@ -41,6 +41,10 @@ func (msg topologyTransmogrifierMsgImmigrationReceived) Exec() (bool, error) {
 	if found {
 		atomic.AddInt32(inprogressPtr, 1)
 	} else {
+		// Why 2? Well, there's one for the corresponding "completed"
+		// message we'll get from the end of this sender, and there's
+		// another one for when all of the pendingLocallyComplete goes
+		// to 0 and then we decrement inprogressPtr again.
 		inprogress := int32(2)
 		inprogressPtr = &inprogress
 		senders[sender] = inprogressPtr
@@ -80,12 +84,16 @@ func (msg topologyTransmogrifierMsgImmigrationComplete) Exec() (bool, error) {
 	}
 	inprogress := int32(0)
 	if inprogressPtr, found := senders[sender]; found {
+		// this can be zero already, eg the pendingLocallyComplete are
+		// all done already.
 		inprogress = atomic.AddInt32(inprogressPtr, -1)
 	} else {
+		// This is possible if there are zero batches that the sender
+		// thinks we should be sent and so we nevertheless need to
+		// record the sender has tried.
 		inprogressPtr = &inprogress
 		senders[sender] = inprogressPtr
 	}
-	// race here?!
 	if inprogress == 0 {
 		return msg.maybeTick()
 	}
@@ -123,6 +131,9 @@ func (mtlsc *immigrationTxnLocalStateChange) TxnLocallyComplete(txn *eng.Txn) {
 	txn.CompletionReceived()
 	if atomic.AddInt32(&mtlsc.pendingLocallyComplete, -1) == 0 &&
 		atomic.AddInt32(mtlsc.inprogressPtr, -1) == 0 {
+		// The inprogressPtr is per sender, so once this goes to 0 it
+		// shouldn't go back up. And yes, we are relying on
+		// short-circuiting of && here.
 		mtlsc.EnqueueFuncAsync(func() (bool, error) {
 			if mtlsc.currentTask != nil {
 				return mtlsc.currentTask.Tick()
