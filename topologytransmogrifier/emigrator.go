@@ -26,7 +26,7 @@ type emigrator struct {
 	self              common.RMId
 	db                *db.Databases
 	connectionManager connectionmanager.ConnectionManager
-	activeBatches     map[common.RMId]*sendBatch
+	activeSenders     map[common.RMId]*sender
 	topology          *configuration.Topology
 	conns             map[common.RMId]*sconn.ServerConnection
 }
@@ -37,7 +37,7 @@ func newEmigrator(task *migrate) *emigrator {
 		self:              task.self,
 		db:                task.db,
 		connectionManager: task.connectionManager,
-		activeBatches:     make(map[common.RMId]*sendBatch),
+		activeSenders:     make(map[common.RMId]*sender),
 	}
 	e.topology = e.connectionManager.AddTopologySubscriber(topology.EmigratorSubscriber, e)
 	e.connectionManager.AddServerConnectionSubscriber(e)
@@ -62,7 +62,7 @@ func (e *emigrator) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection) 
 }
 
 func (e *emigrator) ConnectionLost(rmId common.RMId, conns map[common.RMId]*sconn.ServerConnection) {
-	delete(e.activeBatches, rmId)
+	delete(e.activeSenders, rmId)
 }
 
 func (e *emigrator) ConnectionEstablished(conn *sconn.ServerConnection, conns map[common.RMId]*sconn.ServerConnection, done func()) {
@@ -76,31 +76,31 @@ func (e *emigrator) ConnectionEstablished(conn *sconn.ServerConnection, conns ma
 
 func (e *emigrator) startBatches() {
 	pending := e.topology.NextConfiguration.Pending
-	batchConds := make([]*sendBatch, 0, len(pending))
+	senders := make([]*sender, 0, len(pending))
 	for rmId, cond := range pending {
 		if rmId == e.self {
 			continue
 		}
-		if _, found := e.activeBatches[rmId]; found {
+		if _, found := e.activeSenders[rmId]; found {
 			continue
 		}
 		if conn, found := e.conns[rmId]; found {
 			e.logger.Log("msg", "Starting emigration batch.", "RMId", rmId)
-			batch := e.newBatch(conn, cond.Cond)
-			e.activeBatches[rmId] = batch
-			batchConds = append(batchConds, batch)
+			sender := e.newSender(conn, cond.Cond)
+			e.activeSenders[rmId] = sender
+			senders = append(senders, sender)
 		}
 	}
-	if len(batchConds) > 0 {
-		e.startBatch(batchConds)
+	if len(senders) > 0 {
+		e.newIterator(senders)
 	}
 }
 
-func (e *emigrator) startBatch(batch []*sendBatch) {
+func (e *emigrator) newIterator(senders []*sender) {
 	it := &dbIterator{
 		emigrator:     e,
 		configuration: e.topology.Configuration,
-		batch:         batch,
+		senders:       senders,
 	}
 	go it.iterate()
 }
@@ -108,7 +108,7 @@ func (e *emigrator) startBatch(batch []*sendBatch) {
 type dbIterator struct {
 	*emigrator
 	configuration *configuration.Configuration
-	batch         []*sendBatch
+	senders       []*sender
 }
 
 func (it *dbIterator) iterate() {
@@ -150,13 +150,13 @@ func (it *dbIterator) iterate() {
 				// its frameTxn. We now need to test to see which, if any,
 				// of our batches need to include a subset of these
 				// varcaps and txn.
-				for _, sb := range it.batch {
-					matchingVarCaps, err := it.matchVarsAgainstCond(sb.cond, varCaps)
+				for _, sender := range it.senders {
+					matchingVarCaps, err := it.matchVarsAgainstCond(sender.cond, varCaps)
 					if err != nil {
 						cursor.Error(err)
 						return true
 					} else if len(matchingVarCaps) != 0 {
-						sb.add(txn, matchingVarCaps)
+						sender.add(txn, matchingVarCaps)
 					}
 				}
 			}
@@ -172,8 +172,8 @@ func (it *dbIterator) iterate() {
 	if err != nil {
 		panic(fmt.Sprintf("Topology iterator error: %v", err))
 	} else if ran != nil {
-		for _, sb := range it.batch {
-			sb.flush()
+		for _, sender := range it.senders {
+			sender.flush()
 		}
 		it.connectionManager.AddServerConnectionSubscriber(it)
 	}
@@ -249,8 +249,8 @@ func (it *dbIterator) ConnectedRMs(conns map[common.RMId]*sconn.ServerConnection
 	msg.SetMigrationComplete(mc)
 	bites := common.SegToBytes(seg)
 
-	for _, sb := range it.batch {
-		if conn, found := conns[sb.conn.RMId]; found && sb.conn == conn {
+	for _, sender := range it.senders {
+		if conn, found := conns[sender.conn.RMId]; found && sender.conn == conn {
 			// The connection has not changed since we started sending to
 			// it (because we cached it, you can discount the issue of
 			// memory reuse here - phew). Therefore, it's safe to send
@@ -267,8 +267,8 @@ func (it *dbIterator) ConnectionEstablished(conn *sconn.ServerConnection, server
 	done()
 }
 
-// a sendBatch is for a single remote RMId. We iterate per group of sendBatch (dbIterator.batch).
-type sendBatch struct {
+// a sender is for a single remote RMId. We iterate per group of sender (dbIterator.batch).
+type sender struct {
 	logger  log.Logger
 	version uint32
 	conn    *sconn.ServerConnection
@@ -281,8 +281,8 @@ type migrationElem struct {
 	vars []*msgs.Var
 }
 
-func (e *emigrator) newBatch(conn *sconn.ServerConnection, cond configuration.Cond) *sendBatch {
-	return &sendBatch{
+func (e *emigrator) newSender(conn *sconn.ServerConnection, cond configuration.Cond) *sender {
+	return &sender{
 		logger:  e.logger,
 		version: e.topology.NextConfiguration.Version,
 		conn:    conn,
@@ -291,17 +291,17 @@ func (e *emigrator) newBatch(conn *sconn.ServerConnection, cond configuration.Co
 	}
 }
 
-func (sb *sendBatch) flush() {
-	if len(sb.elems) == 0 {
+func (s *sender) flush() {
+	if len(s.elems) == 0 {
 		return
 	}
 	seg := capn.NewBuffer(nil)
 	msg := msgs.NewRootMessage(seg)
 	migration := msgs.NewMigration(seg)
-	migration.SetVersion(sb.version)
-	elems := msgs.NewMigrationElementList(seg, len(sb.elems))
-	for idx, elem := range sb.elems {
-		sb.elems[idx] = nil
+	migration.SetVersion(s.version)
+	elems := msgs.NewMigrationElementList(seg, len(s.elems))
+	for idx, elem := range s.elems {
+		s.elems[idx] = nil
 		elemCap := msgs.NewMigrationElement(seg)
 		elemCap.SetTxn(elem.txn.Data)
 		vars := msgs.NewVarList(seg, len(elem.vars))
@@ -314,18 +314,18 @@ func (sb *sendBatch) flush() {
 	migration.SetElems(elems)
 	msg.SetMigration(migration)
 	bites := common.SegToBytes(seg)
-	utils.DebugLog(sb.logger, "debug", "Migrating txns.", "count", len(sb.elems), "recipient", sb.conn.RMId)
-	sb.conn.Send(bites)
-	sb.elems = sb.elems[:0]
+	utils.DebugLog(s.logger, "debug", "Migrating txns.", "count", len(s.elems), "recipient", s.conn.RMId)
+	s.conn.Send(bites)
+	s.elems = s.elems[:0]
 }
 
-func (sb *sendBatch) add(txn *txnreader.TxnReader, varCaps []*msgs.Var) {
+func (s *sender) add(txn *txnreader.TxnReader, varCaps []*msgs.Var) {
 	elem := &migrationElem{
 		txn:  txn,
 		vars: varCaps,
 	}
-	sb.elems = append(sb.elems, elem)
-	if len(sb.elems) == server.MigrationBatchElemCount {
-		sb.flush()
+	s.elems = append(s.elems, elem)
+	if len(s.elems) == server.MigrationBatchElemCount {
+		s.flush()
 	}
 }
