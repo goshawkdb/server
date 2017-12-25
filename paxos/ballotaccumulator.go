@@ -104,7 +104,7 @@ func BallotAccumulatorFromData(txn *txnreader.TxnReader, outcome *outcomeEqualId
 		vUUId := common.MakeVarUUId(instancesForVar.VarId())
 		vBallot := ba.vUUIdToBallots[*vUUId]
 		acceptedInstances := instancesForVar.Instances()
-		rmBals := rmBallots(make([]*rmBallot, acceptedInstances.Len()))
+		rmBals := make(rmBallots, acceptedInstances.Len())
 		vBallot.rmToBallot = rmBals
 		for idy, m := 0, acceptedInstances.Len(); idy < m; idy++ {
 			acceptedInstance := acceptedInstances.At(idy)
@@ -134,7 +134,7 @@ func (ba *BallotAccumulator) BallotReceived(instanceRMId common.RMId, inst *inst
 
 	vBallot := ba.vUUIdToBallots[*vUUId]
 	if vBallot.rmToBallot == nil {
-		vBallot.rmToBallot = rmBallots(make([]*rmBallot, 0, vBallot.voters))
+		vBallot.rmToBallot = make(rmBallots, 0, vBallot.voters)
 	}
 	found := false
 	for idx, rBal := range vBallot.rmToBallot {
@@ -179,7 +179,7 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.TxnIds)
 	combinedClock := vectorclock.NewVectorClock().AsMutable()
 	aborted, deadlock := false, false
 
-	vUUIds := common.VarUUIds(make([]*common.VarUUId, 0, len(ba.vUUIdToBallots)))
+	vUUIds := make(common.VarUUIds, 0, len(ba.vUUIdToBallots))
 	commitSubscribers := make(map[common.TxnId]types.EmptyStruct)
 	br := NewBadReads()
 	utils.DebugLog(ba.logger, "debug", "determineOutcome")

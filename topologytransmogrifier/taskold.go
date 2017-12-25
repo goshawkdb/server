@@ -298,7 +298,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 }
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {
-	conditions := configuration.Conds(make(map[common.RMId]*configuration.CondSuppliers))
+	conditions := make(configuration.Conds)
 	twoFIncOld := (uint16(from.F) << 1) + 1
 
 	for _, rmIdNew := range added {

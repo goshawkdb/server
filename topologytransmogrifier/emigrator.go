@@ -220,7 +220,7 @@ func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBy
 }
 
 func (it *dbIterator) matchVarsAgainstCond(cond configuration.Cond, varCaps []*msgs.Var) ([]*msgs.Var, error) {
-	result := make([]*msgs.Var, 0, len(varCaps)>>1)
+	result := make([]*msgs.Var, 0, len(varCaps))
 	for _, varCap := range varCaps {
 		pos := varCap.Positions()
 		utils.DebugLog(it.logger, "debug", "Testing for condition.",
