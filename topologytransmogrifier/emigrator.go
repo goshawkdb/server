@@ -125,7 +125,7 @@ func (it *dbIterator) iterate() {
 				if bytes.Equal(varCap.Id(), configuration.TopologyVarUUId[:]) {
 					continue
 				}
-				txnId := common.MakeTxnId(varCap.WriteTxnId())
+				txnId := common.MakeTxnId(varCap.ValueTxnId())
 				txnBytes := it.db.ReadTxnBytesFromDisk(cursor.RTxn, txnId)
 				if txnBytes == nil {
 					return true
@@ -203,7 +203,7 @@ func (it *dbIterator) filterVars(cursor *mdbs.Cursor, vUUIdBytes []byte, txnIdBy
 			return nil, err
 		}
 		varCap := msgs.ReadRootVar(seg)
-		if !bytes.Equal(txnIdBytes, varCap.WriteTxnId()) {
+		if !bytes.Equal(txnIdBytes, varCap.ValueTxnId()) {
 			// this var has moved on to a different txn
 			continue
 		}

@@ -77,7 +77,7 @@ func (pd *ProposerDispatcher) ImmigrationReceived(migration msgs.Migration, stat
 	elemsCount := elemsList.Len()
 	for idx := 0; idx < elemsCount; idx++ {
 		elem := elemsList.At(idx)
-		txn := txnreader.TxnReaderFromData(elem.Txn())
+		txn := txnreader.TxnReaderFromData(elem.Txn()) // this is the value txn, not the frame write txn
 		txnId := txn.Id
 		varCaps := elem.Vars()
 		pd.withProposerManager(txnId, func(pm *ProposerManager) { pm.ImmigrationReceived(txn, varCaps, stateChange) })

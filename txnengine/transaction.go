@@ -40,21 +40,9 @@ type Txn struct {
 	currentState txnStateMachineComponent
 }
 
-func (txnA *Txn) Compare(txnB *Txn) common.Cmp {
-	switch {
-	case txnA == txnB:
-		return common.EQ
-	case txnA == nil:
-		return common.LT
-	case txnB == nil:
-		return common.GT
-	default:
-		return txnA.Id.Compare(txnB.Id)
-	}
-}
-
 type localAction struct {
 	*Txn
+	Id              *common.TxnId
 	vUUId           *common.VarUUId
 	ballot          *Ballot
 	frame           *frame
@@ -65,6 +53,7 @@ type localAction struct {
 	addSubscription bool
 	delSubscription *common.TxnId
 	outcomeClock    vc.VectorClock
+	immigrantVar    *msgs.Var
 	writesClock     *vc.VectorClockImmutable
 }
 
@@ -85,7 +74,7 @@ func (action *localAction) IsMeta() bool {
 }
 
 func (action *localAction) IsImmigrant() bool {
-	return action.writesClock != nil
+	return action.immigrantVar != nil
 }
 
 func (action *localAction) VoteDeadlock(clock *vc.VectorClockMutable) {
@@ -128,7 +117,7 @@ func (a *localAction) Compare(bC sl.Comparable) sl.Cmp {
 		case b == nil:
 			return sl.GT
 		default:
-			return sl.Cmp(a.Txn.Compare(b.Txn))
+			return sl.Cmp(a.Id.Compare(b.Id))
 		}
 	}
 }
@@ -145,7 +134,7 @@ func (action localAction) String() string {
 		b = "|b"
 	}
 	i := ""
-	if action.writesClock != nil {
+	if action.immigrantVar != nil {
 		i = "|i"
 	}
 	s := ""
@@ -157,30 +146,44 @@ func (action localAction) String() string {
 	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i, s)
 }
 
-func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, ourRMId common.RMId, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
-	txn := TxnFromReader(exe, vd, stateChange, ourRMId, reader, logger)
-	// the above will populate txn.localActions based on the action
-	// indices, which will likely be totally wrong. So we now reset and
-	// rebuild localActions:
-	txn.localActions = make([]localAction, varCaps.Len())
+func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
+	txn := &Txn{
+		logger:       logger,
+		Id:           reader.Id,
+		localActions: make([]localAction, varCaps.Len()),
+		writes:       make(common.VarUUIds, 0, varCaps.Len()),
+		TxnReader:    reader,
+		exe:          exe,
+		vd:           vd,
+		stateChange:  stateChange,
+	}
+	// build localActions based only on the varCaps that we've received
+	// - not on the actions of the txn, because the original txn action
+	// allocations will have been based on the topology at the time,
+	// and the topology has changed. So the emigrator will have figured
+	// out which varcaps to send us based on what is now allocated to
+	// this RM.
 	actionsMap := make(map[common.VarUUId]*localAction)
 	for idx, l := 0, varCaps.Len(); idx < l; idx++ {
-		varCap := varCaps.At(idx)
 		action := &txn.localActions[idx]
 		action.Txn = txn
+		varCap := varCaps.At(idx)
+		action.Id = common.MakeTxnId(varCap.WriteTxnId())
 		action.vUUId = common.MakeVarUUId(varCap.Id())
 		positions := varCap.Positions()
 		action.createPositions = (*common.Positions)(&positions)
 		action.outcomeClock = vc.VectorClockFromData(varCap.WriteTxnClock(), false)
+		action.immigrantVar = &varCap
 		action.writesClock = vc.VectorClockFromData(varCap.WritesClock(), false)
 		actionsMap[*action.vUUId] = action
+		txn.writes = append(txn.writes, action.vUUId)
 	}
 
-	txnActionsList := reader.Actions(true).Actions()
 	// but the one thing we don't have in the localAction is the actual
 	// write action, so we just look that up from the txn itself:
-	for idx, l := 0, txnActionsList.Len(); idx < l; idx++ {
-		actionCap := txnActionsList.At(idx)
+	actionsList := reader.Actions(true).Actions()
+	for idx, l := 0, actionsList.Len(); idx < l; idx++ {
+		actionCap := actionsList.At(idx)
 		vUUId := common.MakeVarUUId(actionCap.VarId())
 		if action, found := actionsMap[*vUUId]; found {
 			action.writeAction = &actionCap
@@ -209,18 +212,18 @@ func TxnFromReader(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnL
 	txnId := reader.Id
 	actions := reader.Actions(true)
 	actionsList := actions.Actions()
-	txnCap := reader.Txn
+
 	txn := &Txn{
 		logger:      logger,
 		Id:          txnId,
-		writes:      make([]*common.VarUUId, 0, actionsList.Len()),
+		writes:      make(common.VarUUIds, 0, actionsList.Len()),
 		TxnReader:   reader,
 		exe:         exe,
 		vd:          vd,
 		stateChange: stateChange,
 	}
 
-	allocations := txnCap.Allocations()
+	allocations := reader.Txn.Allocations()
 	for idx, l := 0, allocations.Len(); idx < l; idx++ {
 		alloc := allocations.At(idx)
 		rmId := common.RMId(alloc.RmId())
@@ -246,6 +249,7 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 	}
 
 	for idx, l := 0, actionsList.Len(); idx < l; idx++ {
+		action.Id = txn.Id
 		actionCap := actionsList.At(idx)
 
 		if idx == actionIndex {

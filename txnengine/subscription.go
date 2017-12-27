@@ -19,13 +19,14 @@ func NewSubscriptions(vm *VarManager) *Subscriptions {
 	return &Subscriptions{
 		vm:   vm,
 		subs: make(map[common.TxnId]bool),
+		data: []byte{},
 	}
 }
 
 func NewSubscriptionsFromData(vm *VarManager, data []byte) (*Subscriptions, error) {
 	s := NewSubscriptions(vm)
+	s.data = data
 	if len(data) > 0 {
-		s.data = data
 		seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 		if err != nil {
 			return nil, err
@@ -38,6 +39,10 @@ func NewSubscriptionsFromData(vm *VarManager, data []byte) (*Subscriptions, erro
 		}
 	}
 	return s, nil
+}
+
+func (s *Subscriptions) IsDirty() bool {
+	return s.data == nil
 }
 
 func (s *Subscriptions) AsData() []byte {
@@ -72,7 +77,11 @@ func (s *Subscriptions) Subscribers() common.TxnIds {
 }
 
 func (s *Subscriptions) Committed(action *localAction) {
-	if action.addSubscription {
+	switch {
+	case action.IsImmigrant():
+		// TOOO merge in from action.immigrantVar.Subscriptions()
+
+	case action.addSubscription:
 		added, found := s.subs[*action.Id]
 		if found && added {
 			// duplicate, do nothing
@@ -84,7 +93,8 @@ func (s *Subscriptions) Committed(action *localAction) {
 			// new and it's valid
 			s.subs[*action.Id] = true
 		}
-	} else if action.delSubscription != nil {
+
+	case action.delSubscription != nil:
 		added, found := s.subs[*action.delSubscription]
 		if found && added {
 			// cancelling

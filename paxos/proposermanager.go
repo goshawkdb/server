@@ -160,7 +160,7 @@ func (pm *ProposerManager) SetMetrics(metrics *ProposerMetrics) {
 }
 
 func (pm *ProposerManager) ImmigrationReceived(txn *txnreader.TxnReader, varCaps msgs.Var_List, stateChange eng.TxnLocalStateChange) {
-	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, pm.RMId, txn, varCaps, pm.logger)
+	eng.ImmigrationTxnFromCap(pm.Exe, pm.VarDispatcher, stateChange, txn, varCaps, pm.logger)
 }
 
 func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *txnreader.TxnReader) {

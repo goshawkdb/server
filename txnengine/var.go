@@ -249,11 +249,11 @@ func (v *Var) maybeMakeInactive() {
 }
 
 func (v *Var) isIdle() bool {
-	return v.writeInProgress == nil && v.curFrame.isIdle()
+	return v.writeInProgress == nil && !v.subscriptions.IsDirty() && v.curFrame.isIdle()
 }
 
 func (v *Var) isOnDisk() bool {
-	return v.writeInProgress == nil && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty()
+	return v.writeInProgress == nil && !v.subscriptions.IsDirty() && v.curFrame == v.curFrameOnDisk && v.curFrame.isEmpty()
 }
 
 func (v *Var) applyToSelf(fun func()) {
