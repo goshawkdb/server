@@ -64,6 +64,9 @@ func (s *Subscriptions) AsData() []byte {
 }
 
 func (s *Subscriptions) Subscribers() common.TxnIds {
+	if s == nil {
+		return nil
+	}
 	if s.active == nil {
 		s.active = make(common.TxnIds, 0, len(s.subs))
 		for txnId, added := range s.subs {

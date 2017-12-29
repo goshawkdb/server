@@ -41,7 +41,7 @@ func (task *ensureLocalTopology) Tick() (bool, error) {
 			return task.fatal(errors.New("No configuration supplied and no configuration found in local store. Cannot continue."))
 		}
 
-		_, err = task.createTopologyZero()
+		topology, err = task.createTopologyZero()
 		if err != nil {
 			return task.fatal(err)
 		}
