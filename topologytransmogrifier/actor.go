@@ -84,34 +84,6 @@ func (tt *topologyTransmogrifierInner) Init(self *actor.Actor) (bool, error) {
 
 	tt.connectionManager.AddServerConnectionSubscriber(tt.TopologyTransmogrifier)
 
-	/*
-		subscriberInstalled := make(chan struct{})
-		tt.router.VarDispatcher.ApplyToVar(func(v *eng.Var) {
-			if v == nil {
-				panic("Unable to create topology var!")
-			}
-			v.AddWriteSubscriber(configuration.VersionOne,
-				&eng.VarWriteSubscriber{
-					Observe: func(v *eng.Var, value []byte, refs *msgs.VarIdPos_List, txn *eng.Txn) {
-						topology, err := configuration.TopologyFromCap(txn.Id, refs, value)
-						if err != nil {
-							panic(fmt.Errorf("Unable to deserialize new topology: %v", err))
-						}
-						utils.DebugLog(tt.inner.Logger, "debug", "Observation enqueued.", "topology", topology)
-						tt.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
-							TopologyTransmogrifier: tt.TopologyTransmogrifier,
-							topology:               topology,
-						})
-					},
-					Cancel: func(v *eng.Var) {
-						panic("Subscriber on topology var has been cancelled!")
-					},
-				})
-			close(subscriberInstalled)
-		}, true, configuration.TopologyVarUUId)
-		<-subscriberInstalled
-	*/
-
 	return false, nil
 }
 

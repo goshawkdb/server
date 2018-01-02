@@ -1,11 +1,11 @@
 package topologytransmogrifier
 
 import (
-	"fmt"
 	"goshawkdb.io/common"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
+	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/binarybackoff"
 	"time"
@@ -18,16 +18,18 @@ import (
 
 type installTargetOld struct {
 	*transmogrificationTask
+	onTopologyInstalled func() (bool, error)
 }
 
 func (task *installTargetOld) init(base *transmogrificationTask) {
 	task.transmogrificationTask = base
+	task.onTopologyInstalled = nil
 }
 
 func (task *installTargetOld) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil && task.subscribed &&
+		task.targetConfig != nil &&
 		active.Version < task.targetConfig.Version &&
 		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
 }
@@ -53,39 +55,40 @@ func (task *installTargetOld) Tick() (bool, error) {
 		return terminate, err
 	}
 
-	// Here, we just want to use the RMs in the old topology only.
-	// And add on all new (if there are any) as passives
+	task.inner.Logger.Log("msg", "Calculated target topology.", "configuration", targetTopology.NextConfiguration,
+		"newRoots", rootsRequired)
+
+	if rootsRequired != 0 {
+		task.onTopologyInstalled = func() (bool, error) {
+			task.runTxnMsg = &topologyTransmogrifierMsgCreateRoots{
+				transmogrificationTask: task.transmogrificationTask,
+				task:          task,
+				backoff:       binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
+				rootsRequired: rootsRequired,
+				target:        targetTopology,
+			}
+			return task.runTxnMsg.Exec()
+		}
+	} else {
+		task.onTopologyInstalled = func() (bool, error) {
+			return task.installTargetOld(targetTopology)
+		}
+	}
+	return false, nil
+}
+
+func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology) (bool, error) {
+	// We use all the nodes in the old cluster as potential
+	// acceptors. We will require a majority of them are alive. And add
+	// on all new (if there are any) as passives
 	active, passive := task.formActivePassive(task.activeTopology.RMs, targetTopology.NextConfiguration.NewRMIds)
 	if active == nil {
 		return false, nil
 	}
 
-	task.inner.Logger.Log("msg", "Calculated target topology.", "configuration", targetTopology.NextConfiguration,
-		"newRoots", rootsRequired, "active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
-
-	if rootsRequired != 0 {
-		task.runTxnMsg = &topologyTransmogrifierMsgCreateRoots{
-			transmogrificationTask: task.transmogrificationTask,
-			task:           task,
-			backoff:        binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
-			rootsRequired:  rootsRequired,
-			targetTopology: targetTopology,
-			active:         active,
-			passive:        passive,
-		}
-		return task.runTxnMsg.Exec()
-	} else {
-		return task.installTargetOld(targetTopology, active, passive)
-	}
-}
-
-func (task *installTargetOld) installTargetOld(targetTopology *configuration.Topology, active, passive common.RMIds) (bool, error) {
-	// We use all the nodes in the old cluster as potential
-	// acceptors. We will require a majority of them are alive, which
-	// we've checked once above.
 	twoFInc := uint16(task.activeTopology.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.activeTopology, targetTopology, twoFInc, active, passive)
-	task.runTopologyTransaction(txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive, targetTopology)
 	return false, nil
 }
 
@@ -136,8 +139,18 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		}
 	}
 
-	// this will now start connections to allRemoteHosts
-	task.installTopology(active, nil, localHost, allRemoteHosts)
+	// this will now start connections to allRemoteHosts. CreateRoots
+	// uses a client transaction which means we have to make sure a
+	// non-blank topology has made it into localConnection before we
+	// try to create roots. Hence using the callback mechanism here.
+	task.installTopology(active, map[topo.TopologyChangeSubscriberType]func() (bool, error){
+		topo.ConnectionSubscriber: func() (bool, error) {
+			if task.currentTask == task && task.onTopologyInstalled != nil {
+				return task.onTopologyInstalled()
+			}
+			return false, nil
+		},
+	}, localHost, allRemoteHosts)
 	task.ensureShareGoalWithAll()
 
 	// the -1 is because allRemoteHosts will not include localHost

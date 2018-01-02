@@ -40,8 +40,9 @@ type transmogrificationTask struct {
 
 	ensureLocalTopology
 	joinCluster
-	subscribe
 	installTargetOld
+	// migrateTopology here?
+	subscribe
 	installTargetNew
 	quiet
 	migrate
@@ -57,8 +58,8 @@ func (tt *TopologyTransmogrifier) newTransmogrificationTask(targetConfig *config
 	base.stages = []stage{
 		&base.ensureLocalTopology,
 		&base.joinCluster,
-		&base.subscribe,
 		&base.installTargetOld,
+		&base.subscribe,
 		&base.installTargetNew,
 		&base.quiet,
 		&base.migrate,
@@ -172,14 +173,15 @@ func (tt *transmogrificationTask) Abandon() {
 	tt.shutdown()
 }
 
-func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) {
+func (tt *transmogrificationTask) runTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds, target *configuration.Topology) {
 	tt.runTxnMsg = &topologyTransmogrifierMsgRunTransaction{
 		transmogrificationTask: tt,
-		backoff:                binarybackoff.NewBinaryBackoffEngine(tt.rng, 2*time.Second, time.Duration(len(tt.targetConfig.Hosts)+1)*2*time.Second),
-		txn:                    txn,
-		task:                   tt.currentTask,
-		active:                 active,
-		passive:                passive,
+		task:    tt.currentTask,
+		backoff: binarybackoff.NewBinaryBackoffEngine(tt.rng, 2*time.Second, time.Duration(len(tt.targetConfig.Hosts)+1)*2*time.Second),
+		txn:     txn,
+		target:  target,
+		active:  active,
+		passive: passive,
 	}
 	tt.EnqueueMsg(tt.runTxnMsg)
 }
@@ -421,52 +423,52 @@ func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology,
 	}
 }
 
-func (tt *transmogrificationTask) rewriteTopology(txn *msgs.Txn, active, passive common.RMIds) (bool, bool, error) {
+func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) (*configuration.Topology, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
 	utils.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, nil, active...)
 	if result == nil || err != nil {
-		return false, false, err
+		return nil, false, err
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
 		utils.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
-		return true, false, nil
+		return nil, false, nil
 	}
 	abort := result.Abort()
 	utils.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-		return false, true, nil
+		return nil, true, nil
 	}
 	abortUpdates := abort.Rerun()
 	if abortUpdates.Len() != 1 {
-		return false, false,
-			fmt.Errorf("Internal error: readwrite of topology gave %v updates (1 expected)",
-				abortUpdates.Len())
+		panic(
+			fmt.Sprintf("Internal error: readwrite of topology gave %v updates (1 expected)",
+				abortUpdates.Len()))
 	}
 	update := abortUpdates.At(0)
 	dbversion := common.MakeTxnId(update.TxnId())
 
 	updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
-		return false, false,
-			fmt.Errorf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
-				updateActions.Len())
+		panic(
+			fmt.Sprintf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
+				updateActions.Len()))
 	}
 	updateAction := updateActions.At(0)
 	if !bytes.Equal(updateAction.VarId(), configuration.TopologyVarUUId[:]) {
-		return false, false,
-			fmt.Errorf("Internal error: update action from readwrite of topology is not for topology! %v",
-				common.MakeVarUUId(updateAction.VarId()))
+		panic(
+			fmt.Sprintf("Internal error: update action from readwrite of topology is not for topology! %v",
+				common.MakeVarUUId(updateAction.VarId())))
 	}
 	if updateAction.ActionType() != msgs.ACTIONTYPE_WRITEONLY {
-		return false, false,
-			fmt.Errorf("Internal error: update action from readwrite of topology gave non-write action!")
+		panic(
+			fmt.Sprintf("Internal error: update action from readwrite of topology gave non-write action!"))
 	}
 	mod := updateAction.Modified()
 	refs := mod.References()
-	_, err = configuration.TopologyFromCap(dbversion, &refs, mod.Value())
-	return false, false, err
+	topologyBadRead, err := configuration.TopologyFromCap(dbversion, &refs, mod.Value())
+	return topologyBadRead, false, err
 }
 
 func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {

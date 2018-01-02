@@ -3,6 +3,7 @@ package topologytransmogrifier
 import (
 	"errors"
 	"fmt"
+	"goshawkdb.io/common"
 	"goshawkdb.io/server/configuration"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
@@ -29,8 +30,12 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 				"goalVersion", topology.Version, "activeVersion", tt.activeTopology.Version)
 			return false, nil
 
-		case tt.activeTopology.Configuration.Equal(topology.Configuration):
-			// silently ignore it
+		case tt.activeTopology.DBVersion.Compare(topology.DBVersion) == common.EQ &&
+			tt.activeTopology.Configuration.Equal(topology.Configuration):
+			// silently ignore it. Don't simplify this to just the
+			// DBVersion comparison: during join, we go from blank to
+			// blank-with-bits without going via the DB so the DBVersion
+			// doesn't change in that case.
 			return false, nil
 		}
 	}

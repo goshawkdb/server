@@ -838,7 +838,11 @@ func (fo *frameOpen) maybeCreateChild() {
 		childValueTxnId = childValueTxn.Id
 	} else if winner.IsRoll() || winner.IsMeta() {
 		winnerLocalAction = nil
-		childValueTxnId = winner.roll
+		if winner.IsRoll() {
+			childValueTxnId = winner.roll
+		} else if winner.IsMeta() {
+			childValueTxnId = winner.readVsn
+		}
 		// The winning txn itself does not need to go to disk at all!
 		childValueTxn = nil
 		childValueActions = nil
@@ -858,6 +862,16 @@ func (fo *frameOpen) maybeCreateChild() {
 			// - even if childValueActions is nil. And vice versa:
 			// childValueTxn can be nil and childValueActions non-nil.
 			childValueTxn = fo.frameValueTxn
+
+		} else if fo.frameTxnId.Compare(childValueTxnId) == common.EQ {
+			// Winner doesn't reference our frame value, but it does
+			// reference this frame itself. Which also tells us that this
+			// frame txn is different from the frame value txn. So in
+			// this case, we can always pass on our frameValueActions
+			// (which can still be nil if they've not been loaded).
+			childValueTxnId = fo.frameValueTxnId
+			childValueTxn = fo.frameValueTxn
+			childValueActions = fo.frameValueActions
 
 		} else { // hunt for the corresponding write
 			for node := fo.writes.First(); childValueTxn == nil && node != nil; node = node.Next() {
@@ -1164,6 +1178,7 @@ func (fe *frameErase) WriteGloballyComplete(action *localAction) {
 	if node := fe.writes.Get(action); node != nil && node.Value == completing {
 		node.Remove()
 		fe.v.curFrame.subtractClock(action.outcomeClock)
+		fe.maybeErase()
 	} else {
 		panic(fmt.Sprintf("WriteGloballyComplete for invalid action %v %v", fe.frame, node))
 	}

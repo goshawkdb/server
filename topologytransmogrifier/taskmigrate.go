@@ -17,10 +17,10 @@ func (task *migrate) init(base *transmogrificationTask) {
 func (task *migrate) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil && task.subscribed &&
+		task.targetConfig != nil &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
-		active.NextConfiguration.InstalledOnNew &&
+		task.subscribed && active.NextConfiguration.InstalledOnNew &&
 		active.NextConfiguration.QuietRMIds[task.self] &&
 		len(active.NextConfiguration.Pending) > 0
 }
@@ -89,7 +89,7 @@ func (task *migrate) Tick() (bool, error) {
 		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
-	task.runTopologyTransaction(txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive, topology)
 
 	task.ensureShareGoalWithAll()
 	return false, nil

@@ -20,9 +20,10 @@ func (task *installTargetNew) init(base *transmogrificationTask) {
 func (task *installTargetNew) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
-		task.targetConfig != nil && task.subscribed &&
+		task.targetConfig != nil &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
+		task.subscribed &&
 		!active.NextConfiguration.InstalledOnNew
 }
 
@@ -51,11 +52,6 @@ func (task *installTargetNew) Tick() (bool, error) {
 		return false, nil
 	}
 
-	// From this point onwards, we have the possibility that some
-	// node-to-be-removed has rushed ahead and has shutdown. So we
-	// can't rely on any to-be-removed node. So that means we can only
-	// rely on the nodes in next.RMs, which means we need a majority of
-	// them to be alive; and we use the removed RMs as extra passives.
 	active, passive := task.formActivePassive(next.RMs, next.LostRMIds)
 	if active == nil {
 		return false, nil
@@ -69,6 +65,6 @@ func (task *installTargetNew) Tick() (bool, error) {
 
 	twoFInc := uint16(next.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.activeTopology, topology, twoFInc, active, passive)
-	task.runTopologyTransaction(txn, active, passive)
+	task.runTopologyTransaction(txn, active, passive, topology)
 	return false, nil
 }
