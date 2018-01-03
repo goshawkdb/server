@@ -225,7 +225,7 @@ func (ba *BallotAccumulator) determineOutcome() (*outcomeEqualId, common.TxnIds)
 		} else {
 			abort.SetRerun(br.AddToSeg(seg))
 		}
-		ba.subscribers = nil
+		ba.subscribers = common.TxnIds{}
 
 	} else {
 		outcome.SetTxn(ba.txn.Data)

@@ -74,6 +74,9 @@ func (ts *TransactionSubmitter) Status(sc *status.StatusConsumer) {
 }
 
 func (ts *TransactionSubmitter) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
+	if subId.Compare(txn.Id) != common.EQ {
+		ts.logger.Log("subId", subId, "txnId", txn.Id)
+	}
 	if tr, found := ts.txns[*subId]; found {
 		return tr.SubmissionOutcomeReceived(sender, subId, txn, outcome)
 	} else {

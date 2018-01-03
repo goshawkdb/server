@@ -66,11 +66,12 @@ func BallotFromData(data []byte) *Ballot {
 		subs[idx] = common.MakeTxnId(subsCap.At(idx))
 	}
 	return &Ballot{
-		VarUUId: vUUId,
-		Data:    data,
-		VoteCap: &voteCap,
-		Clock:   vc.VectorClockFromData(ballotCap.Clock(), false),
-		Vote:    Vote(voteCap.Which()),
+		VarUUId:     vUUId,
+		Data:        data,
+		VoteCap:     &voteCap,
+		Clock:       vc.VectorClockFromData(ballotCap.Clock(), false),
+		Subscribers: subs,
+		Vote:        Vote(voteCap.Which()),
 	}
 }
 
