@@ -74,9 +74,6 @@ func (ts *TransactionSubmitter) Status(sc *status.StatusConsumer) {
 }
 
 func (ts *TransactionSubmitter) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
-	if subId.Compare(txn.Id) != common.EQ {
-		ts.logger.Log("subId", subId, "txnId", txn.Id)
-	}
 	if tr, found := ts.txns[*subId]; found {
 		return tr.SubmissionOutcomeReceived(sender, subId, txn, outcome)
 	} else {
@@ -151,6 +148,7 @@ type transactionOutcomeReceiver interface {
 type TransactionRecord struct {
 	*TransactionSubmitter
 	transactionOutcomeReceiver
+	subManager  *SubscriptionManager
 	cache       *Cache
 	birthday    time.Time
 	Id          *common.TxnId
@@ -195,13 +193,29 @@ func (tr *TransactionRecord) Submit() {
 }
 
 func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId *common.TxnId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
-	if tr.outcome, _ = tr.accumulator.BallotOutcomeReceived(sender, outcome); tr.outcome != nil {
-		delete(tr.txns, *txn.Id)
-		err := tr.terminate(txn, subId)
-		if tr.shuttingDown != nil && len(tr.txns) == 0 {
-			tr.shuttingDown()
+	// Be aware of exciting possibilities here. For example, for a
+	// subscription txn, it's possible that we're going to receive
+	// updates for that subscription *before* we know here whether or
+	// not the subscription txn committed.
+	if subId.Compare(txn.Id) == common.EQ { // normal txn
+		if tr.outcome, _ = tr.accumulator.BallotOutcomeReceived(sender, outcome); tr.outcome != nil {
+			err := tr.terminate(txn, subId)
+			if tr.shuttingDown == nil {
+				if tr.subManager == nil || tr.outcome.Which() == msgs.OUTCOME_ABORT {
+					delete(tr.txns, *txn.Id) // not a subscription, or it aborted, so tidy up
+				}
+			} else { // we're shutting down, let's tidy up
+				delete(tr.txns, *txn.Id)
+				if len(tr.txns) == 0 {
+					tr.shuttingDown()
+				}
+			}
+			return err
 		}
-		return err
+	} else if tr.subManager == nil {
+		panic(fmt.Sprintf("Recevied update transaction for non-subscription! %v %v", subId, txn.Id))
+	} else {
+		return tr.subManager.SubmissionOutcomeReceived(sender, txn, outcome)
 	}
 	return nil
 }

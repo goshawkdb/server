@@ -1,12 +1,15 @@
 package topologytransmogrifier
 
 import (
+	"bytes"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/utils/binarybackoff"
+	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -104,12 +107,40 @@ func (task *subscribe) Tick() (bool, error) {
 
 	task.runTxnMsg = &topologyTransmogrifierMsgAddSubscription{
 		transmogrificationTask: task.transmogrificationTask,
-		task:    task,
-		backoff: binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
-		txn:     &txn,
-		target:  topology,
-		active:  active,
-		passive: passive,
+		task:                 task,
+		backoff:              binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
+		txn:                  &txn,
+		subscriptionConsumer: task.SubscriptionConsumer,
+		target:               topology,
+		active:               active,
+		passive:              passive,
 	}
 	return task.runTxnMsg.Exec()
+}
+
+func (task *subscribe) SubscriptionConsumer(txn *txnreader.TxnReader, tr *client.TransactionRecord) error {
+	actions := txn.Actions(true).Actions()
+	for idx, l := 0, actions.Len(); idx < l; idx++ {
+		action := actions.At(idx)
+		if bytes.Compare(action.VarId(), configuration.TopologyVarUUId[:]) != 0 {
+			continue
+		}
+		switch action.ActionType() {
+		case msgs.ACTIONTYPE_CREATE, msgs.ACTIONTYPE_WRITEONLY, msgs.ACTIONTYPE_READWRITE:
+			mod := action.Modified()
+			value := mod.Value()
+			refs := mod.References()
+			if topology, err := configuration.TopologyFromCap(txn.Id, &refs, value); err != nil {
+				return err
+			} else {
+				task.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
+					TopologyTransmogrifier: task.TopologyTransmogrifier,
+					topology:               topology,
+				})
+			}
+		default:
+		}
+		return nil
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
@@ -72,6 +73,16 @@ func (tt *TopologyTransmogrifier) ConnectionEstablished(conn *sconn.ServerConnec
 	}
 }
 
+type topologyTransmogrifierMsgTopologyObserved struct {
+	*TopologyTransmogrifier
+	topology *configuration.Topology
+}
+
+func (msg topologyTransmogrifierMsgTopologyObserved) Exec() (bool, error) {
+	utils.DebugLog(msg.inner.Logger, "debug", "New topology observed.", "topology", msg.topology)
+	return msg.setActiveTopology(msg.topology)
+}
+
 type topologyTransmogrifierMsgRunTransaction struct {
 	*transmogrificationTask
 	task    Task
@@ -93,7 +104,7 @@ func (msg *topologyTransmogrifierMsgRunTransaction) Exec() (bool, error) {
 }
 
 func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
-	topologyBadRead, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.active, msg.passive)
+	topologyBadRead, resubmit, err := msg.submitTopologyTransaction(msg.txn, nil, msg.active, msg.passive)
 	switch {
 	case err != nil:
 		msg.EnqueueFuncAsync(func() (bool, error) { return false, err })
@@ -160,12 +171,13 @@ func (msg *topologyTransmogrifierMsgCreateRoots) runTxn() {
 
 type topologyTransmogrifierMsgAddSubscription struct {
 	*transmogrificationTask
-	task    Task
-	backoff *binarybackoff.BinaryBackoffEngine
-	txn     *msgs.Txn
-	target  *configuration.Topology
-	active  common.RMIds
-	passive common.RMIds
+	task                 Task
+	backoff              *binarybackoff.BinaryBackoffEngine
+	txn                  *msgs.Txn
+	subscriptionConsumer client.SubscriptionConsumer
+	target               *configuration.Topology
+	active               common.RMIds
+	passive              common.RMIds
 }
 
 func (msg *topologyTransmogrifierMsgAddSubscription) Exec() (bool, error) {
@@ -179,7 +191,7 @@ func (msg *topologyTransmogrifierMsgAddSubscription) Exec() (bool, error) {
 }
 
 func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
-	topologyBadRead, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.active, msg.passive)
+	topologyBadRead, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.subscriptionConsumer, msg.active, msg.passive)
 	switch {
 	case err != nil:
 		msg.EnqueueFuncAsync(func() (bool, error) { return false, err })

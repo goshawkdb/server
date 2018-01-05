@@ -10,6 +10,7 @@ import (
 	"goshawkdb.io/common/actor"
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
@@ -367,7 +368,7 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 	for {
 		txn := tt.createTopologyTransaction(nil, nil, 1, []common.RMId{tt.self}, nil)
 
-		_, result, err := tt.localConnection.RunTransaction(txn, nil, backoff, tt.self)
+		_, result, err := tt.localConnection.RunTransaction(txn, nil, nil, backoff, tt.self)
 		if err != nil {
 			return nil, err
 		} else if result == nil {
@@ -409,7 +410,7 @@ func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology,
 	txnId := topology.DBVersion
 	txn.SetId(txnId[:])
 	// in general, we do backoff locally, so don't pass backoff through here
-	_, result, err := tt.localConnection.RunTransaction(txn, txnId, nil, tt.self)
+	_, result, err := tt.localConnection.RunTransaction(txn, txnId, nil, nil, tt.self)
 	if err != nil {
 		return nil, err
 	}
@@ -423,10 +424,10 @@ func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology,
 	}
 }
 
-func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, active, passive common.RMIds) (*configuration.Topology, bool, error) {
+func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, subscriptionConsumer client.SubscriptionConsumer, active, passive common.RMIds) (*configuration.Topology, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
 	utils.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
-	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, nil, active...)
+	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, subscriptionConsumer, nil, active...)
 	if result == nil || err != nil {
 		return nil, false, err
 	}

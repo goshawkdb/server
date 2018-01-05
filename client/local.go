@@ -21,7 +21,7 @@ func (cont LocalTxnCompletionContinuation) Aborted(txn *txnreader.TxnReader, tr 
 	return cont(txn, tr.outcome, nil)
 }
 
-func (ts *TransactionSubmitter) SubmitLocalServerTransaction(txnId *common.TxnId, txn *msgs.Txn, active common.RMIds, bbe *binarybackoff.BinaryBackoffEngine, cont LocalTxnCompletionContinuation) {
+func (ts *TransactionSubmitter) SubmitLocalServerTransaction(txnId *common.TxnId, txn *msgs.Txn, subscriptionConsumer SubscriptionConsumer, active common.RMIds, bbe *binarybackoff.BinaryBackoffEngine, cont LocalTxnCompletionContinuation) {
 	tr := &TransactionRecord{
 		TransactionSubmitter:       ts,
 		transactionOutcomeReceiver: cont,
@@ -30,6 +30,9 @@ func (ts *TransactionSubmitter) SubmitLocalServerTransaction(txnId *common.TxnId
 		server: txn,
 		active: active,
 		bbe:    bbe,
+	}
+	if subscriptionConsumer != nil {
+		tr.subManager = NewSubscriptionManager(txnId, tr, subscriptionConsumer)
 	}
 	ts.AddTransactionRecord(tr)
 	tr.Submit()

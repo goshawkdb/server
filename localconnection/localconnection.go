@@ -209,13 +209,14 @@ func (lc *LocalConnection) RunClientTransaction(txn *cmsgs.ClientTxn, isTopology
 type localConnectionMsgRunTxn struct {
 	actor.MsgSyncQuery
 	*LocalConnection
-	txn       *msgs.Txn
-	txnId     *common.TxnId
-	activeRMs []common.RMId
-	backoff   *binarybackoff.BinaryBackoffEngine
-	txnReader *txnreader.TxnReader
-	outcome   *msgs.Outcome
-	err       error
+	txn                  *msgs.Txn
+	txnId                *common.TxnId
+	subscriptionConsumer client.SubscriptionConsumer
+	activeRMs            []common.RMId
+	backoff              *binarybackoff.BinaryBackoffEngine
+	txnReader            *txnreader.TxnReader
+	outcome              *msgs.Outcome
+	err                  error
 }
 
 func (msg *localConnectionMsgRunTxn) setOutcomeError(txn *txnreader.TxnReader, outcome *msgs.Outcome, err error) error {
@@ -234,18 +235,19 @@ func (msg *localConnectionMsgRunTxn) Exec() (bool, error) {
 		txn.SetId(txnId[:])
 	}
 	utils.DebugLog(msg.inner.Logger, "debug", "Starting txn.", "TxnId", txnId)
-	msg.submitter.SubmitLocalServerTransaction(txnId, txn, msg.activeRMs, msg.backoff, msg.setOutcomeError)
+	msg.submitter.SubmitLocalServerTransaction(txnId, txn, msg.subscriptionConsumer, msg.activeRMs, msg.backoff, msg.setOutcomeError)
 	return false, nil
 }
 
 // txn must be root in its segment
-func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, backoff *binarybackoff.BinaryBackoffEngine, activeRMs ...common.RMId) (*txnreader.TxnReader, *msgs.Outcome, error) {
+func (lc *LocalConnection) RunTransaction(txn *msgs.Txn, txnId *common.TxnId, subscriptionConsumer client.SubscriptionConsumer, backoff *binarybackoff.BinaryBackoffEngine, activeRMs ...common.RMId) (*txnreader.TxnReader, *msgs.Outcome, error) {
 	msg := &localConnectionMsgRunTxn{
-		LocalConnection: lc,
-		txn:             txn,
-		txnId:           txnId,
-		activeRMs:       activeRMs,
-		backoff:         backoff,
+		LocalConnection:      lc,
+		txn:                  txn,
+		txnId:                txnId,
+		subscriptionConsumer: subscriptionConsumer,
+		activeRMs:            activeRMs,
+		backoff:              backoff,
 	}
 	msg.InitMsg(lc)
 	if lc.EnqueueMsg(msg) && msg.Wait() {
