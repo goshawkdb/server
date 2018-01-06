@@ -51,15 +51,12 @@ func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.S
 
 func (ts *TransactionSubmitter) Shutdown(onceEmpty func()) {
 	ts.shuttingDown = onceEmpty
+	for subId, tr := range ts.txns {
+		subIdCopy := subId
+		tr.terminate(nil, &subIdCopy)
+	}
 	if len(ts.txns) == 0 {
 		onceEmpty()
-	} else {
-		for subId, tr := range ts.txns {
-			subIdCopy := subId
-			if err := tr.terminate(nil, &subIdCopy); err != nil {
-				ts.logger.Log("error", err)
-			}
-		}
 	}
 }
 
@@ -198,20 +195,70 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 	// updates for that subscription *before* we know here whether or
 	// not the subscription txn committed.
 	if subId.Compare(txn.Id) == common.EQ { // normal txn
-		if tr.outcome, _ = tr.accumulator.BallotOutcomeReceived(sender, outcome); tr.outcome != nil {
-			err := tr.terminate(txn, subId)
-			if tr.shuttingDown == nil {
-				if tr.subManager == nil || tr.outcome.Which() == msgs.OUTCOME_ABORT {
-					delete(tr.txns, *txn.Id) // not a subscription, or it aborted, so tidy up
-				}
-			} else { // we're shutting down, let's tidy up
-				delete(tr.txns, *txn.Id)
+		outcome, _ := tr.accumulator.BallotOutcomeReceived(sender, outcome)
+
+		var err error
+		// BallotOutcomeReceived is actually edge triggered: we will
+		// only get a non-nil outcome once, so we really are safe here:
+		if outcome != nil {
+			tr.outcome = outcome
+			if outcome.Which() == msgs.OUTCOME_COMMIT {
+				err = tr.Committed(txn, tr)
+			} else {
+				err = tr.Aborted(txn, tr)
+			}
+
+			// We can now tidy up the txn submission sender: If the node
+			// is staying up, but this client connection is going down
+			// then we must hang around to tidy up ourselves (otherwise
+			// we could be left with dangling txns if our txn sender only
+			// sent to some but not all proposers).
+			if tr.sender != nil {
+				tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
+				tr.sender = nil
+			}
+
+			// We now send TSC to all acceptors. There is a chance that
+			// some will not have received any votes yet so we have the
+			// risk of TSCs arriving first. But the acceptors will ignore
+			// that, so it's safe, and eventually when they do send us an
+			// outcome, we'll respond with another TSC - if we're
+			// completed then this tr will have been removed from tr.txns
+			// - so this is all safe really.
+			senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id, subId), tr.connPub, tr.acceptors...)
+
+		} else if tr.outcome != nil {
+			// We already have a result, but we need to make sure the
+			// sending acceptor gets a TSC from us. It is possible for us
+			// to receive outcomes multiple times from the same acceptor
+			// and thus be here multiple times. An acceptor receiving a
+			// TSC is idempotent, so we're safe. We could optimise this
+			// however. TODO.
+
+			// We will only be here if we're a sub which committed and so
+			// we can't rely on the default handling to send out TSCs.
+			senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id, subId), tr.connPub, sender)
+		}
+
+		// We can delete ourself if any of these are true:
+		// 1. tr.outcome != nil && subManager == nil (normal txn, result known, TSCs will be sent by default)
+		// 2. tr.outcome != nil && is Aborted (must be a sub, but it aborted anyway, so same as above)
+		// 3. tr.outcome != nil && shuttingDown (committed, and sub, but we're shutting down)
+		// NB we test tr.outcome and not outcome because outcome will be non-nil only once!
+
+		if tr.outcome != nil &&
+			(tr.subManager == nil || tr.outcome.Which() == msgs.OUTCOME_ABORT || tr.shuttingDown != nil) {
+
+			delete(tr.txns, *txn.Id)
+			if tr.shuttingDown != nil {
 				if len(tr.txns) == 0 {
 					tr.shuttingDown()
 				}
 			}
-			return err
 		}
+
+		return err
+
 	} else if tr.subManager == nil {
 		panic(fmt.Sprintf("Recevied update transaction for non-subscription! %v %v", subId, txn.Id))
 	} else {
@@ -220,48 +267,11 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 	return nil
 }
 
-func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader, subId *common.TxnId) error {
-	completed := txn != nil
-	// If this node is going down then we have to rely on others
-	// noticing, and tidying up for us.
-	//
-	// If the node is staying up, but this client connection is going
-	// down then we must hang around to tidy up ourselves (otherwise we
-	// could be left with dangling txns if our txnsubmitter only sent
-	// to some but not all proposers).
-	//
-	// So we only remove stuff when we really are completed.
-	if completed {
-		if tr.sender != nil {
-			tr.connPub.RemoveServerConnectionSubscriber(tr.sender)
-			tr.sender = nil
-		}
-
-		// We now send TSC to all acceptors. There is a chance that some
-		// will not have received any votes yet so we have the risk of
-		// TSCs arriving first. But the acceptors will ignore that, so
-		// it's safe, and eventually when they do send us an outcome,
-		// we'll respond with another TSC - if we're completed then this
-		// tr will have been removed from tr.txns - so this is all safe
-		// really.
-		senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id, subId), tr.connPub, tr.acceptors...)
-
-		if tr.outcome.Which() == msgs.OUTCOME_COMMIT {
-			return tr.Committed(txn, tr)
-		} else {
-			return tr.Aborted(txn, tr)
-		}
-	} else {
-		/* TODO adjust to subscribe
-		if !completed && tr.server.Retry() {
-			// If this msg doesn't make it then proposers should
-			// observe our death and tidy up anyway. If it's just this
-			// connection shutting down then there should be no
-			// problem with these msgs getting to the proposers.
-			senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionAbortMsg(tr.Id), tr.connPub, tr.active...)
-		}
-		*/
-		return nil
+func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader, subId *common.TxnId) {
+	if tr.outcome != nil {
+		// we aleady have an outcome, so if we still exist we must have
+		// committed and been a sub. So we're safe to stop now.
+		delete(tr.txns, *txn.Id)
 	}
 }
 
