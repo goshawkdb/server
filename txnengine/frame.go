@@ -291,7 +291,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 		action.frame = fo.frame
 		fo.calculateReadVoteClock()
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteCommit", "readVoteClock", fo.readVoteClock, "TxnId", txn.Id)
-		if !action.VoteCommit(fo.readVoteClock, fo.v.subscriptions) {
+		if !action.VoteCommit(fo.readVoteClock, nil) { // read doesn't inform subscribers!
 			fo.ReadAborted(action)
 		}
 	default:

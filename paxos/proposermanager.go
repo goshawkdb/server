@@ -175,10 +175,7 @@ func (pm *ProposerManager) TxnReceived(sender common.RMId, txn *txnreader.TxnRea
 		utils.DebugLog(pm.logger, "debug", "Received.", "TxnId", txnId)
 		accept := true
 		if pm.topology != nil {
-			accept = pm.topology.Version == txnCap.TopologyVersion()
-			if accept && pm.topology.NextConfiguration != nil {
-				accept = txnCap.IsTopology()
-			}
+			accept = pm.topology.Version == txnCap.TopologyVersion() || txnCap.IsTopology()
 			if accept {
 				_, found := pm.topology.RMsRemoved[sender]
 				accept = !found

@@ -125,20 +125,19 @@ func (task *subscribe) SubscriptionConsumer(txn *txnreader.TxnReader, tr *client
 		if bytes.Compare(action.VarId(), configuration.TopologyVarUUId[:]) != 0 {
 			continue
 		}
-		switch action.ActionType() {
-		case msgs.ACTIONTYPE_CREATE, msgs.ACTIONTYPE_WRITEONLY, msgs.ACTIONTYPE_READWRITE:
-			mod := action.Modified()
-			value := mod.Value()
-			refs := mod.References()
-			if topology, err := configuration.TopologyFromCap(txn.Id, &refs, value); err != nil {
-				return err
-			} else {
-				task.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
-					TopologyTransmogrifier: task.TopologyTransmogrifier,
-					topology:               topology,
-				})
-			}
-		default:
+
+		// We only get passed actions which contain the real value, so
+		// we don't need to check actionType.
+		mod := action.Modified()
+		value := mod.Value()
+		refs := mod.References()
+		if topology, err := configuration.TopologyFromCap(txn.Id, &refs, value); err != nil {
+			return err
+		} else {
+			task.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
+				TopologyTransmogrifier: task.TopologyTransmogrifier,
+				topology:               topology,
+			})
 		}
 		return nil
 	}

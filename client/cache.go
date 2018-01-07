@@ -26,7 +26,7 @@ func NewCache(rng *rand.Rand, roots map[common.VarUUId]*types.PosCapVer) *Cache 
 	for vUUId, posCap := range roots {
 		c.m[vUUId] = &Cached{
 			Cache:     c,
-			version:   posCap.Version,
+			VerClock:  VerClock{version: posCap.Version},
 			caps:      posCap.Capability,
 			positions: posCap.Positions,
 		}
@@ -84,8 +84,7 @@ func (c *Cache) copyReferences(dstSeg *capn.Segment, refsAcc *[]*msgs.VarIdPos, 
 
 type Cached struct {
 	*Cache
-	version   *common.TxnId
-	clockElem uint64
+	VerClock
 	caps      common.Capability
 	refs      []msgs.VarIdPos
 	positions *common.Positions

@@ -371,6 +371,8 @@ func (aalc *acceptorAwaitLocallyComplete) start() {
 		subscribersRMs[subIdRM] = types.EmptyStructVal
 	}
 
+	utils.DebugLog(aalc, "debug", "Acceptor on disk, awaiting TLCs/TSCs.", "pendingTLC", aalc.pendingTLC, "pendingTSC", aalc.pendingTSC, "subscribersRMs", subscribersRMs)
+
 	if len(aalc.pendingTLC) == 0 && len(aalc.pendingTSC) == 0 {
 		aalc.maybeDelete()
 

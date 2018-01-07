@@ -184,7 +184,9 @@ func (v *Var) maybeWriteFrame(f *frame) {
 	varData := common.SegToBytes(varSeg)
 
 	// NB v.curFrameOnDisk cannot change whilst we're in here, so it's
-	// safe to access it directly.
+	// safe to access it directly. But, frameValueTxn can change so we
+	// need to copy that out now:
+	frameValueTxn := f.frameValueTxn
 
 	// to ensure correct order of writes, schedule the write from
 	// the current go-routine...
@@ -193,14 +195,14 @@ func (v *Var) maybeWriteFrame(f *frame) {
 			return types.EmptyStructVal
 		}
 
-		if f.frameValueTxn == nil {
+		if frameValueTxn == nil {
 			// we are confident that it's already on disk, so we need to
 			// just bump the ref count.
 			if err := v.db.IncrTxnRefCount(rwtxn, f.frameValueTxnId); err != nil {
 				return types.EmptyStructVal
 			}
 		} else {
-			if err := v.db.WriteTxnToDisk(rwtxn, f.frameValueTxn.Id, f.frameValueTxn.Data); err != nil {
+			if err := v.db.WriteTxnToDisk(rwtxn, frameValueTxn.Id, frameValueTxn.Data); err != nil {
 				return types.EmptyStructVal
 			}
 		}

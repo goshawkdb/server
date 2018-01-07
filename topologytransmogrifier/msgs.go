@@ -104,7 +104,7 @@ func (msg *topologyTransmogrifierMsgRunTransaction) Exec() (bool, error) {
 }
 
 func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
-	topologyBadRead, resubmit, err := msg.submitTopologyTransaction(msg.txn, nil, msg.active, msg.passive)
+	topologyBadRead, txnId, resubmit, err := msg.submitTopologyTransaction(msg.txn, nil, msg.active, msg.passive)
 	switch {
 	case err != nil:
 		msg.EnqueueFuncAsync(func() (bool, error) { return false, err })
@@ -123,7 +123,9 @@ func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
 			// which will fail with badRead, so eventually everything
 			// should sort itself out.
 			if topologyBadRead == nil { // it committed
-				return msg.setActiveTopology(msg.target)
+				target := msg.target.Clone()
+				target.DBVersion = txnId
+				return msg.setActiveTopology(target)
 			} else {
 				return msg.setActiveTopology(topologyBadRead)
 			}
@@ -191,7 +193,7 @@ func (msg *topologyTransmogrifierMsgAddSubscription) Exec() (bool, error) {
 }
 
 func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
-	topologyBadRead, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.subscriptionConsumer, msg.active, msg.passive)
+	topologyBadRead, txnId, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.subscriptionConsumer, msg.active, msg.passive)
 	switch {
 	case err != nil:
 		msg.EnqueueFuncAsync(func() (bool, error) { return false, err })
@@ -205,7 +207,9 @@ func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
 			}
 			if topologyBadRead == nil {
 				msg.subscribed = true
-				return msg.setActiveTopology(msg.target)
+				target := msg.target.Clone()
+				target.DBVersion = txnId
+				return msg.setActiveTopology(target)
 			} else {
 				return msg.setActiveTopology(topologyBadRead)
 			}

@@ -424,22 +424,22 @@ func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology,
 	}
 }
 
-func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, subscriptionConsumer client.SubscriptionConsumer, active, passive common.RMIds) (*configuration.Topology, bool, error) {
+func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, subscriptionConsumer client.SubscriptionConsumer, active, passive common.RMIds) (*configuration.Topology, *common.TxnId, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
 	utils.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, subscriptionConsumer, nil, active...)
 	if result == nil || err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
 		utils.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
-		return nil, false, nil
+		return nil, txnId, false, nil
 	}
 	abort := result.Abort()
 	utils.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-		return nil, true, nil
+		return nil, txnId, true, nil
 	}
 	abortUpdates := abort.Rerun()
 	if abortUpdates.Len() != 1 {
@@ -469,7 +469,7 @@ func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, subsc
 	mod := updateAction.Modified()
 	refs := mod.References()
 	topologyBadRead, err := configuration.TopologyFromCap(dbversion, &refs, mod.Value())
-	return topologyBadRead, false, err
+	return topologyBadRead, txnId, false, err
 }
 
 func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, configuration.Roots, error) {

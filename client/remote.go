@@ -328,7 +328,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 						} else {
 							pos := common.Positions(ref.Positions())
 							rts.cache.AddCached(vUUId, &Cached{
-								version:   common.VersionZero,
+								VerClock:  VerClock{version: common.VersionZero},
 								caps:      caps,
 								positions: &pos,
 							})
