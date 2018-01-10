@@ -95,6 +95,7 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			return nil, err
 		}
 
+		modNeeded := true
 		switch clientActionType {
 		case cmsgs.CLIENTACTIONTYPE_CREATE:
 			// but, don't add it to the cache yet
@@ -112,7 +113,7 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			}
 			action.SetActionType(msgs.ACTIONTYPE_READONLY)
 			action.SetVersion(c.version[:])
-			action.SetUnmodified()
+			modNeeded = false
 
 		case cmsgs.CLIENTACTIONTYPE_WRITEONLY:
 			if !c.caps.CanWrite() {
@@ -134,6 +135,18 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			action.SetActionType(msgs.ACTIONTYPE_ROLL)
 			action.SetVersion(c.version[:])
 
+		case cmsgs.CLIENTACTIONTYPE_ADDSUBSCRIPTION, cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION:
+			if !c.caps.CanRead() {
+				return nil, fmt.Errorf("Illegal subscription of %v", vUUId)
+			}
+			cat := msgs.ACTIONTYPE_ADDSUBSCRIPTION
+			if clientActionType == cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION {
+				cat = msgs.ACTIONTYPE_DELSUBSCRIPTION
+			}
+			action.SetActionType(cat)
+			action.SetVersion(c.version[:])
+			modNeeded = false
+
 		default:
 			panic(fmt.Sprintf("%v: %v: Unexpected action type: %v", tr.origId, vUUId, clientAction.Which()))
 		}
@@ -142,7 +155,7 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			return nil, err
 		}
 
-		if clientActionType != cmsgs.CLIENTACTIONTYPE_READONLY {
+		if modNeeded {
 			action.SetModified()
 			actionMod := action.Modified()
 			clientActionMod := clientAction.Modified()
@@ -152,6 +165,8 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			} else {
 				return nil, err
 			}
+		} else {
+			action.SetUnmodified()
 		}
 
 		tr.objs[*vUUId] = c

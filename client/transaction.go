@@ -52,8 +52,7 @@ func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.S
 func (ts *TransactionSubmitter) Shutdown(onceEmpty func()) {
 	ts.shuttingDown = onceEmpty
 	for subId, tr := range ts.txns {
-		subIdCopy := subId
-		tr.terminate(nil, &subIdCopy)
+		tr.terminate(subId)
 	}
 	if len(ts.txns) == 0 {
 		onceEmpty()
@@ -267,11 +266,11 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 	return nil
 }
 
-func (tr *TransactionRecord) terminate(txn *txnreader.TxnReader, subId *common.TxnId) {
-	if tr.outcome != nil {
+func (tr *TransactionRecord) terminate(subId common.TxnId) {
+	if tr.outcome != nil && (tr.subManager == nil || tr.subManager.terminate()) {
 		// we aleady have an outcome, so if we still exist we must have
 		// committed and been a sub. So we're safe to stop now.
-		delete(tr.txns, *txn.Id)
+		delete(tr.txns, subId)
 	}
 }
 

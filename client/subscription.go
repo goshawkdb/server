@@ -52,6 +52,15 @@ type subscriptionUpdate struct {
 	outcome     *msgs.Outcome
 }
 
+func (sm *SubscriptionManager) terminate() bool {
+	for _, su := range sm.incomplete {
+		if su.outcome == nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	if outcome.Which() != msgs.OUTCOME_COMMIT {
 		panic(fmt.Sprintf("SubId %v received non-commit outcome in txn %v", sm.subId, txn.Id))
@@ -59,6 +68,24 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 
 	su, found := sm.incomplete[*txn.Id]
 	if !found {
+		twoFInc := int(txn.Txn.TwoFInc())
+		acceptors := paxos.GetAcceptorsFromTxn(txn.Txn)
+		acc := paxos.NewOutcomeAccumulator(twoFInc, acceptors, sm.logger)
+		su = &subscriptionUpdate{
+			acceptors:   acceptors,
+			accumulator: acc,
+		}
+		sm.incomplete[*txn.Id] = su
+	}
+
+	outcome, allAgreed := su.accumulator.BallotOutcomeReceived(sender, outcome)
+	if outcome != nil {
+		su.outcome = outcome
+
+		senders.NewOneShotSender(sm.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, sm.subId), sm.connPub, su.acceptors...)
+
+		utils.DebugLog(sm.logger, "debug", "Outcome known for subscription txn.", "SubId", sm.subId, "TxnId", txn.Id)
+
 		newer := false
 		actions := txn.Actions(true).Actions()
 		clock := vectorclock.VectorClockFromData(outcome.Commit(), true)
@@ -92,33 +119,13 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 			}
 		}
 
-		if !newer {
-			// ignore it - either we've already processed this and for
-			// some reason there's been a dupe of the outcome message, or
-			// we received a newer outcome first.
-			senders.NewOneShotSender(sm.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, sm.subId), sm.connPub, sender)
-			utils.DebugLog(sm.logger, "debug", "Ignoring non-newer subscription txn.", "SubId", sm.subId, "TxnId", txn.Id)
+		if newer {
+			return sm.consumer(txn, sm.TransactionRecord)
+		} else {
+			utils.DebugLog(sm.logger, "debug", "Ignoring non-newer outcome.", "SubId", sm.subId, "TxnId", txn.Id)
 			return nil
 		}
 
-		twoFInc := int(txn.Txn.TwoFInc())
-		acceptors := paxos.GetAcceptorsFromTxn(txn.Txn)
-		acc := paxos.NewOutcomeAccumulator(twoFInc, acceptors, sm.logger)
-		su = &subscriptionUpdate{
-			acceptors:   acceptors,
-			accumulator: acc,
-		}
-		sm.incomplete[*txn.Id] = su
-	}
-
-	outcome, allAgreed := su.accumulator.BallotOutcomeReceived(sender, outcome)
-	if outcome != nil {
-		su.outcome = outcome
-
-		senders.NewOneShotSender(sm.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, sm.subId), sm.connPub, su.acceptors...)
-
-		utils.DebugLog(sm.logger, "debug", "Outcome known for subscription txn.", "SubId", sm.subId, "TxnId", txn.Id)
-		return sm.consumer(txn, sm.TransactionRecord)
 	} else if su.outcome != nil {
 		senders.NewOneShotSender(sm.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, sm.subId), sm.connPub, sender)
 	}
