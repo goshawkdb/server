@@ -51,11 +51,12 @@ func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.S
 
 func (ts *TransactionSubmitter) Shutdown(onceEmpty func()) {
 	ts.shuttingDown = onceEmpty
-	for subId, tr := range ts.txns {
-		tr.terminate(subId)
-	}
 	if len(ts.txns) == 0 {
 		onceEmpty()
+	} else {
+		for _, tr := range ts.txns {
+			tr.terminate()
+		}
 	}
 }
 
@@ -124,14 +125,11 @@ func (ts *TransactionSubmitter) calculateDisabledHashcodes() error {
 	return nil
 }
 
-func (ts *TransactionSubmitter) AddTransactionRecord(tr *TransactionRecord) {
-	if ts.txns == nil { // shutdown
-		return
-	}
+func (ts *TransactionSubmitter) AddTransactionRecord(tr *TransactionRecord, force bool) {
 	if _, found := ts.txns[*tr.Id]; found {
 		panic("Transaction already exists! " + tr.Id.String())
 	}
-	if tr.shuttingDown == nil {
+	if force || tr.shuttingDown == nil {
 		ts.txns[*tr.Id] = tr
 	}
 }
@@ -202,6 +200,7 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 		if outcome != nil {
 			tr.outcome = outcome
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
+				tr.terminateSubscriptions(txn)
 				err = tr.Committed(txn, tr)
 			} else {
 				err = tr.Aborted(txn, tr)
@@ -239,21 +238,12 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 			senders.NewOneShotSender(tr.logger, paxos.MakeTxnSubmissionCompleteMsg(tr.Id, subId), tr.connPub, sender)
 		}
 
-		// We can delete ourself if any of these are true:
-		// 1. tr.outcome != nil && subManager == nil (normal txn, result known, TSCs will be sent by default)
-		// 2. tr.outcome != nil && is Aborted (must be a sub, but it aborted anyway, so same as above)
-		// 3. tr.outcome != nil && shuttingDown (committed, and sub, but we're shutting down)
-		// NB we test tr.outcome and not outcome because outcome will be non-nil only once!
-
+		// NB test tr.outcome and not outcome because outcome will be non-nil only once!
+		// NB If we aborted, then by dfn, even if we are a sub, subManager will be empty.
+		// I.e. we're done here unless we committed and we're a sub.
 		if tr.outcome != nil &&
 			(tr.subManager == nil || tr.outcome.Which() == msgs.OUTCOME_ABORT || tr.shuttingDown != nil) {
-
-			delete(tr.txns, *txn.Id)
-			if tr.shuttingDown != nil {
-				if len(tr.txns) == 0 {
-					tr.shuttingDown()
-				}
-			}
+			tr.terminate()
 		}
 
 		return err
@@ -266,11 +256,30 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 	return nil
 }
 
-func (tr *TransactionRecord) terminate(subId common.TxnId) {
-	if tr.outcome != nil && (tr.subManager == nil || tr.subManager.terminate()) {
-		// we aleady have an outcome, so if we still exist we must have
-		// committed and been a sub. So we're safe to stop now.
-		delete(tr.txns, subId)
+func (tr *TransactionRecord) terminate() {
+	// Ordering of this test is specific to ensure subManager records we want to terminate.
+	if (tr.subManager == nil || tr.subManager.terminate()) && tr.outcome != nil {
+		delete(tr.txns, *tr.Id)
+		if tr.shuttingDown != nil && len(tr.txns) == 0 {
+			tr.shuttingDown()
+		}
+	}
+}
+
+func (tr *TransactionRecord) terminateSubscriptions(txn *txnreader.TxnReader) {
+	actions := txn.Actions(true).Actions()
+	for idx, l := 0, actions.Len(); idx < l; idx++ {
+		action := actions.At(idx)
+		if action.ActionType() != msgs.ACTIONTYPE_DELSUBSCRIPTION {
+			continue
+		}
+		vUUId := common.MakeVarUUId(action.VarId())
+		subId := common.MakeTxnId(action.Modified().Value())
+		// it is impossible for us to be here *before* the sub record
+		// has been added.
+		if subTr, found := tr.txns[*subId]; found && subTr.subManager != nil {
+			subTr.subManager.Deleted(vUUId)
+		}
 	}
 }
 

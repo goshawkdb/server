@@ -558,7 +558,11 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 	if tcc.submitter == nil {
 		onceEmpty()
 	} else {
-		tcc.submitter.Shutdown(onceEmpty)
+		subs := tcc.submitter.Shutdown(onceEmpty)
+		for _, subManager := range subs {
+			ctxn := subManager.CreateUnsubscribeTxn()
+			tcc.LocalConnection.Submit(ctxn)
+		}
 	}
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }

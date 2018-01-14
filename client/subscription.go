@@ -2,7 +2,9 @@ package client
 
 import (
 	"fmt"
+	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
+	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
 	"goshawkdb.io/server/utils"
@@ -35,10 +37,11 @@ func NewSubscriptionManager(subId *common.TxnId, tr *TransactionRecord, consumer
 
 type SubscriptionManager struct {
 	*TransactionRecord
-	subId      *common.TxnId
-	consumer   SubscriptionConsumer
-	incomplete map[common.TxnId]*subscriptionUpdate
-	cache      map[common.VarUUId]*VerClock
+	subId       *common.TxnId
+	consumer    SubscriptionConsumer
+	incomplete  map[common.TxnId]*subscriptionUpdate
+	cache       map[common.VarUUId]*VerClock
+	terminating bool
 }
 
 type VerClock struct {
@@ -53,6 +56,7 @@ type subscriptionUpdate struct {
 }
 
 func (sm *SubscriptionManager) terminate() bool {
+	sm.terminating = true
 	for _, su := range sm.incomplete {
 		if su.outcome == nil {
 			return false
@@ -61,13 +65,65 @@ func (sm *SubscriptionManager) terminate() bool {
 	return true
 }
 
-func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
+func (sm *SubscriptionManager) CreateUnsubscribeTxn() *cmsgs.ClientTxn {
+	seg := capn.NewBuffer(nil)
+	ctxn := cmsgs.NewClientTxn(seg)
+	actions := cmsgs.NewClientActionList(seg, len(sm.cache))
+	ctxn.SetActions(actions)
+	idx := 0
+	for vUUId := range sm.cache {
+		action := actions.At(idx)
+		idx++
+		action.SetActionType(cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION)
+		action.SetVarId(vUUId[:])
+		action.SetModified()
+		mod := action.Modified()
+		mod.SetValue(sm.Id[:])
+	}
+
+	return &ctxn
+}
+
+func (sm *SubscriptionManager) Deleted(vUUId *common.VarUUId) {
+	// One of the most surprising things about how subscriptions are
+	// implemented is that individual vars can be removed from a
+	// subscription. This was not a conscious design decision...
+	delete(sm.cache, *vUUId)
+	if len(sm.cache) == 0 {
+		sm.TransactionRecord.terminate()
+	}
+}
+
+func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn *txnreader.TxnReader, outcome *msgs.Outcome) (err error) {
 	if outcome.Which() != msgs.OUTCOME_COMMIT {
 		panic(fmt.Sprintf("SubId %v received non-commit outcome in txn %v", sm.subId, txn.Id))
 	}
 
 	su, found := sm.incomplete[*txn.Id]
 	if !found {
+		if sm.terminating {
+			// if we're terminating then don't create any new updaters,
+			// just reply and ignore.
+			senders.NewOneShotSender(sm.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, sm.subId), sm.connPub, sender)
+			return
+		}
+
+		// This can still do the wrong thing, and I've no idea how to
+		// fix this properly. The problem is that we should be able to
+		// cope with a duplicate receipt of a 2B/outcome. So, we could
+		// test to see whether the outcome fails the "newer" test below,
+		// but this is flawed: we can't act on the outcome until we have
+		// consensus as an acceptor can change its mind. So we then have
+		// a race - we could have reached consensus (in fact further -
+		// allAgreed), sent back the TSC, and deleted the record. But
+		// due to a network issue at this point, just before the TSC
+		// arrives at one of the acceptors, the acceptor decides to send
+		// us a duplicate 2B/outcome. Without keeping a total history of
+		// all outcomes we've received, which would be very expensive, I
+		// can't quite see how to avoid accidentally creating a new
+		// subscriptionUpdate in such a case, or how we could ever clear
+		// it up. TODO.
+
 		twoFInc := int(txn.Txn.TwoFInc())
 		acceptors := paxos.GetAcceptorsFromTxn(txn.Txn)
 		acc := paxos.NewOutcomeAccumulator(twoFInc, acceptors, sm.logger)
@@ -119,11 +175,14 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 			}
 		}
 
+		if sm.terminating {
+			sm.TransactionRecord.terminate()
+		}
+
 		if newer {
-			return sm.consumer(txn, sm.TransactionRecord)
+			err = sm.consumer(txn, sm.TransactionRecord)
 		} else {
 			utils.DebugLog(sm.logger, "debug", "Ignoring non-newer outcome.", "SubId", sm.subId, "TxnId", txn.Id)
-			return nil
 		}
 
 	} else if su.outcome != nil {
@@ -134,5 +193,5 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 		delete(sm.incomplete, *txn.Id)
 	}
 
-	return nil
+	return err
 }

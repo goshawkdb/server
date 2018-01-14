@@ -34,7 +34,7 @@ func (ts *TransactionSubmitter) SubmitLocalServerTransaction(txnId *common.TxnId
 	if subscriptionConsumer != nil {
 		tr.subManager = NewSubscriptionManager(txnId, tr, subscriptionConsumer)
 	}
-	ts.AddTransactionRecord(tr)
+	ts.AddTransactionRecord(tr, false)
 	tr.Submit()
 }
 
@@ -57,7 +57,7 @@ func (ts *TransactionSubmitter) SubmitLocalClientTransaction(txnId *common.TxnId
 		if err := tr.formServerTxn(translationCallback, isTopologyTxn); err != nil {
 			return cont(nil, nil, err)
 		}
-		ts.AddTransactionRecord(tr)
+		ts.AddTransactionRecord(tr, false)
 		tr.Submit()
 		return nil
 	}

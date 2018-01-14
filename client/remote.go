@@ -68,6 +68,18 @@ func (rts *RemoteTransactionSubmitter) TopologyChanged(topology *configuration.T
 	return rts.TransactionSubmitter.TopologyChanged(topology)
 }
 
+func (rts *RemoteTransactionSubmitter) Shutdown(onceEmpty func()) []*SubscriptionManager {
+	// We need to gather up the subscriptions and issue unsubscribes for them.
+	subs := make([]*SubscriptionManager, 0, len(rts.txns))
+	for _, tr := range rts.txns {
+		if tr.subManager != nil {
+			subs = append(subs, tr.subManager)
+		}
+	}
+	rts.TransactionSubmitter.Shutdown(onceEmpty)
+	return subs
+}
+
 type RemoteTxnCompletionContinuation func(*cmsgs.ClientTxnOutcome, error) error
 
 func (rts *RemoteTransactionSubmitter) Committed(txn *txnreader.TxnReader, tr *TransactionRecord) error {
@@ -200,21 +212,21 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 	client.SetRetry(tr.client.Retry())
 	client.SetActions(tr.client.Actions())
 
-	return rts.submitRemoteClientTransaction(tr.origId, txnId, &client, cont)
+	return rts.submitRemoteClientTransaction(tr.origId, txnId, &client, cont, false)
 }
 
 func (rts *RemoteTransactionSubmitter) SubmitRemoteClientTransaction(txnId *common.TxnId, txn *cmsgs.ClientTxn, cont RemoteTxnCompletionContinuation) error {
-	return rts.submitRemoteClientTransaction(txnId, txnId, txn, cont)
+	return rts.submitRemoteClientTransaction(txnId, txnId, txn, cont, false)
 }
 
-func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, txnId *common.TxnId, txn *cmsgs.ClientTxn, cont RemoteTxnCompletionContinuation) error {
+func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, txnId *common.TxnId, txn *cmsgs.ClientTxn, cont RemoteTxnCompletionContinuation, forceSubmission bool) error {
 	if rts.cont != nil {
 		return cont(nil, errors.New("Live Transaction already exists."))
 	}
 
 	if rts.topology.IsBlank() {
 		rts.bufferedSubmissions = append(rts.bufferedSubmissions, func() {
-			rts.submitRemoteClientTransaction(origTxnId, txnId, txn, cont)
+			rts.submitRemoteClientTransaction(origTxnId, txnId, txn, cont, forceSubmission)
 		})
 		return nil
 	} else {
@@ -232,7 +244,7 @@ func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, 
 		}
 		rts.cont = cont
 		rts.resubmitCount = 0
-		rts.AddTransactionRecord(tr)
+		rts.AddTransactionRecord(tr, forceSubmission)
 		tr.Submit()
 		if rts.metrics != nil {
 			rts.metrics.TxnSubmit.Inc()
