@@ -7,6 +7,8 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/paxos"
+	"goshawkdb.io/server/types"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/senders"
 	"goshawkdb.io/server/utils/txnreader"
@@ -65,13 +67,23 @@ func (sm *SubscriptionManager) terminate() bool {
 	return true
 }
 
-func (sm *SubscriptionManager) CreateUnsubscribeTxn() *cmsgs.ClientTxn {
+func (sm *SubscriptionManager) createUnsubscribeTxn(cache *Cache) (*cmsgs.ClientTxn, map[common.VarUUId]*types.PosCapVer) {
+	roots := make(map[common.VarUUId]*types.PosCapVer, len(sm.cache))
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
 	actions := cmsgs.NewClientActionList(seg, len(sm.cache))
 	ctxn.SetActions(actions)
 	idx := 0
 	for vUUId := range sm.cache {
+		c, err := cache.Find(&vUUId, true)
+		if err != nil {
+			panic(err)
+		}
+		roots[vUUId] = &types.PosCapVer{
+			Positions:  c.positions,
+			Capability: common.ReadOnlyCapability,
+			Version:    c.version, // use the version from c, not sm.cache, as c may be more up to date!
+		}
 		action := actions.At(idx)
 		idx++
 		action.SetActionType(cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION)
@@ -81,7 +93,51 @@ func (sm *SubscriptionManager) CreateUnsubscribeTxn() *cmsgs.ClientTxn {
 		mod.SetValue(sm.Id[:])
 	}
 
-	return &ctxn
+	return &ctxn, roots
+}
+
+func (sm *SubscriptionManager) Unsubscribe(lc localconnection.LocalConnection, cache *Cache) error {
+	for {
+		ctxn, roots := sm.createUnsubscribeTxn(cache)
+		_, outcome, err := lc.RunClientTransaction(ctxn, false, roots, nil)
+		if err != nil {
+			return err
+		}
+		if outcome.Which() == msgs.OUTCOME_COMMIT {
+			return nil
+		}
+		abort := outcome.Abort()
+		if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
+			continue
+		}
+		updates := abort.Rerun()
+		for idx, l := 0, updates.Len(); idx < l; idx++ {
+			update := updates.At(idx)
+			txnId := common.MakeTxnId(update.TxnId())
+			clock := vectorclock.VectorClockFromData(update.Clock(), true)
+			actions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
+			for idy, m := 0, actions.Len(); idy < m; idy++ {
+				action := actions.At(idy)
+				vUUId := common.MakeVarUUId(action.VarId())
+				_, found := sm.cache[*vUUId]
+				if !found {
+					continue
+				}
+				c := cache.m[*vUUId]
+				if action.ActionType() != msgs.ACTIONTYPE_WRITEONLY {
+					continue
+				}
+				cmp := c.version.Compare(txnId)
+				clockElem := clock.At(vUUId)
+				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
+					c.version = txnId
+					c.clockElem = clockElem
+					// we don't care about updating refs or caps or anything like that at this point.
+				}
+			}
+		}
+		// now with the updated cache, just go around again
+	}
 }
 
 func (sm *SubscriptionManager) Deleted(vUUId *common.VarUUId) {
@@ -90,6 +146,10 @@ func (sm *SubscriptionManager) Deleted(vUUId *common.VarUUId) {
 	// subscription. This was not a conscious design decision...
 	delete(sm.cache, *vUUId)
 	if len(sm.cache) == 0 {
+		// unattach ourself first so that we don't risk ending up in
+		// shuttingDownSubs: clearly, all our subscriptions have been
+		// removed.
+		sm.subManager = nil
 		sm.TransactionRecord.terminate()
 	}
 }

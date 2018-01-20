@@ -68,18 +68,6 @@ func (rts *RemoteTransactionSubmitter) TopologyChanged(topology *configuration.T
 	return rts.TransactionSubmitter.TopologyChanged(topology)
 }
 
-func (rts *RemoteTransactionSubmitter) Shutdown(onceEmpty func()) []*SubscriptionManager {
-	// We need to gather up the subscriptions and issue unsubscribes for them.
-	subs := make([]*SubscriptionManager, 0, len(rts.txns))
-	for _, tr := range rts.txns {
-		if tr.subManager != nil {
-			subs = append(subs, tr.subManager)
-		}
-	}
-	rts.TransactionSubmitter.Shutdown(onceEmpty)
-	return subs
-}
-
 type RemoteTxnCompletionContinuation func(*cmsgs.ClientTxnOutcome, error) error
 
 func (rts *RemoteTransactionSubmitter) Committed(txn *txnreader.TxnReader, tr *TransactionRecord) error {

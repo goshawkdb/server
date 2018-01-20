@@ -221,13 +221,13 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	// submitter have been completed - one way or another. Otherwise,
 	// if this connection dies but this node stays up, we could create
 	// dangling transactions.
-	onceEmpty := func() {
+	onceEmpty := func(subs []*client.SubscriptionManager) {
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
 		wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
 		wmpc.ShutdownCompleted()
 	}
 	if wmpc.submitter == nil {
-		onceEmpty()
+		onceEmpty(nil)
 	} else {
 		wmpc.submitter.Shutdown(onceEmpty)
 	}

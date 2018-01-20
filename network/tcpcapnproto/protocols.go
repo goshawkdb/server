@@ -550,19 +550,18 @@ func (tcc *TLSCapnpClient) InternalShutdown() {
 	// submitter have been completed - one way or another. Otherwise,
 	// if this connection dies but this node stays up, we could create
 	// dangling transactions.
-	onceEmpty := func() {
+	onceEmpty := func(subs []*client.SubscriptionManager) {
 		tcc.TLSCapnpHandshaker.connectionManager.ClientLost(tcc.connectionNumber, tcc)
 		tcc.TLSCapnpHandshaker.connectionManager.RemoveServerConnectionSubscriber(tcc)
+		for _, sm := range subs {
+			sm.Unsubscribe(tcc.localConnection)
+		}
 		tcc.ShutdownCompleted()
 	}
 	if tcc.submitter == nil {
-		onceEmpty()
+		onceEmpty(nil)
 	} else {
-		subs := tcc.submitter.Shutdown(onceEmpty)
-		for _, subManager := range subs {
-			ctxn := subManager.CreateUnsubscribeTxn()
-			tcc.LocalConnection.Submit(ctxn)
-		}
+		tcc.submitter.Shutdown(onceEmpty)
 	}
 	tcc.TLSCapnpHandshaker.InternalShutdown()
 }

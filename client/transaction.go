@@ -34,7 +34,8 @@ type TransactionSubmitter struct {
 	actor               actor.EnqueueActor
 	rng                 *rand.Rand
 	bufferedSubmissions []func() // only needed for client txns
-	shuttingDown        func()
+	shuttingDown        func([]*SubscriptionManager)
+	shuttingDownSubs    []*SubscriptionManager
 }
 
 func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger) *TransactionSubmitter {
@@ -49,11 +50,22 @@ func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.S
 	}
 }
 
-func (ts *TransactionSubmitter) Shutdown(onceEmpty func()) {
+func (ts *TransactionSubmitter) Shutdown(onceEmpty func([]*SubscriptionManager)) {
+	if ts.shuttingDown != nil {
+		return
+	}
 	ts.shuttingDown = onceEmpty
 	if len(ts.txns) == 0 {
-		onceEmpty()
+		onceEmpty(nil)
 	} else {
+		// NB, we could have live txns which are trying to delete
+		// subscriptions, but the subscriptions they are trying to
+		// delete are safe to "terminate" first. So they would end up in
+		// shuttingDownSubs. So the content of shuttingDownSubs may be
+		// greater than necessary, but it shouldn't miss anything: if
+		// there's an addSubscription in flight, then when the outcome
+		// is known for that, it'll be added in.
+		ts.shuttingDownSubs = make([]*SubscriptionManager, 0, len(ts.txns))
 		for _, tr := range ts.txns {
 			tr.terminate()
 		}
@@ -200,7 +212,7 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 		if outcome != nil {
 			tr.outcome = outcome
 			if outcome.Which() == msgs.OUTCOME_COMMIT {
-				tr.terminateSubscriptions(txn)
+				tr.deleteSubscriptions(txn)
 				err = tr.Committed(txn, tr)
 			} else {
 				err = tr.Aborted(txn, tr)
@@ -260,13 +272,18 @@ func (tr *TransactionRecord) terminate() {
 	// Ordering of this test is specific to ensure subManager records we want to terminate.
 	if (tr.subManager == nil || tr.subManager.terminate()) && tr.outcome != nil {
 		delete(tr.txns, *tr.Id)
-		if tr.shuttingDown != nil && len(tr.txns) == 0 {
-			tr.shuttingDown()
+		if tr.shuttingDown != nil {
+			if tr.subManager != nil && tr.outcome.Which() == msgs.OUTCOME_COMMIT {
+				tr.shuttingDownSubs = append(tr.shuttingDownSubs, tr.subManager)
+			}
+			if len(tr.txns) == 0 {
+				tr.shuttingDown(tr.shuttingDownSubs)
+			}
 		}
 	}
 }
 
-func (tr *TransactionRecord) terminateSubscriptions(txn *txnreader.TxnReader) {
+func (tr *TransactionRecord) deleteSubscriptions(txn *txnreader.TxnReader) {
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
