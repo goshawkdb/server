@@ -12,6 +12,7 @@ import (
 	"goshawkdb.io/server/network"
 	ghttp "goshawkdb.io/server/network/http"
 	"goshawkdb.io/server/types/connectionmanager"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/types/topology"
 	"net/http"
 	"sync"
@@ -29,6 +30,7 @@ type WebsocketListener struct {
 	mux               *ghttp.HttpListenerWithMux
 	topology          *configuration.Topology
 	topologyLock      sync.RWMutex
+	localConnection   localconnection.LocalConnection
 
 	inner websocketListenerInner
 }
@@ -38,13 +40,14 @@ type websocketListenerInner struct {
 	*actor.BasicServerInner
 }
 
-func NewWebsocketListener(mux *ghttp.HttpListenerWithMux, rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, logger log.Logger) *WebsocketListener {
+func NewWebsocketListener(mux *ghttp.HttpListenerWithMux, rmId common.RMId, bootCount uint32, cm connectionmanager.ConnectionManager, localConnection localconnection.LocalConnection, logger log.Logger) *WebsocketListener {
 	l := &WebsocketListener{
 		parentLogger:      logger,
 		self:              rmId,
 		bootCount:         bootCount,
 		connectionManager: cm,
 		mux:               mux,
+		localConnection:   localConnection,
 	}
 
 	li := &l.inner
@@ -158,6 +161,7 @@ func (l *websocketListenerInner) wsHandler(connNumber uint32, w http.ResponseWri
 			peerCerts:         peerCerts,
 			roots:             roots,
 			connectionManager: l.connectionManager,
+			localConnection:   l.localConnection,
 		}
 		network.NewConnection(yesman, l.connectionManager, logger)
 

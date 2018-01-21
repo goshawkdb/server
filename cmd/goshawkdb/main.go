@@ -265,7 +265,7 @@ func (s *server) start() {
 	sp := stats.NewStatsPublisher(cm, lc, s.logger)
 	s.addOnShutdown(sp.ShutdownSync)
 
-	listener, err := tcpcapnproto.NewListener(s.port, s.self, s.bootCount, router, cm, s.logger)
+	listener, err := tcpcapnproto.NewListener(s.port, s.self, s.bootCount, router, cm, lc, s.logger)
 	s.maybeShutdown(err)
 	s.addOnShutdown(listener.ShutdownSync)
 
@@ -280,7 +280,7 @@ func (s *server) start() {
 		}
 		wssMux, err = ghttp.NewHttpListenerWithMux(s.wssPort, cm, s.logger, wssWG)
 		s.maybeShutdown(err)
-		wssListener := websocketmsgpack.NewWebsocketListener(wssMux, s.self, s.bootCount, cm, s.logger)
+		wssListener := websocketmsgpack.NewWebsocketListener(wssMux, s.self, s.bootCount, cm, lc, s.logger)
 		s.addOnShutdown(wssListener.ShutdownSync)
 	}
 

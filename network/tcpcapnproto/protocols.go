@@ -20,6 +20,7 @@ import (
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/txnreader"
 	"net"
@@ -38,10 +39,11 @@ type TLSCapnpHandshaker struct {
 	router            *router.Router
 	connectionManager connectionmanager.ConnectionManager
 	topology          *configuration.Topology
+	localConnection   localconnection.LocalConnection
 	serverRemote      *sconn.ServerConnection
 }
 
-func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootCount uint32, router *router.Router, cm connectionmanager.ConnectionManager, serverRemote *sconn.ServerConnection) *TLSCapnpHandshaker {
+func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32, rmId common.RMId, bootCount uint32, router *router.Router, cm connectionmanager.ConnectionManager, localConnection localconnection.LocalConnection, serverRemote *sconn.ServerConnection) *TLSCapnpHandshaker {
 	return &TLSCapnpHandshaker{
 		TLSCapnpHandshakerBase: common.NewTLSCapnpHandshakerBase(dialer),
 		logger:                 logger,
@@ -51,6 +53,7 @@ func NewTLSCapnpHandshaker(dialer common.Dialer, logger log.Logger, count uint32
 		restartable:            count == 0,
 		router:                 router,
 		connectionManager:      cm,
+		localConnection:        localConnection,
 		serverRemote:           serverRemote,
 	}
 }

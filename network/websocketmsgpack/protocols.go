@@ -20,6 +20,7 @@ import (
 	"goshawkdb.io/server/types"
 	"goshawkdb.io/server/types/connectionmanager"
 	sconn "goshawkdb.io/server/types/connections/server"
+	"goshawkdb.io/server/types/localconnection"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/txnreader"
 	"net/http"
@@ -44,6 +45,7 @@ type wssMsgPackClient struct {
 	rootsPosCapVer    map[common.VarUUId]*types.PosCapVer
 	namespace         []byte
 	connectionManager connectionmanager.ConnectionManager
+	localConnection   localconnection.LocalConnection
 	topology          *configuration.Topology
 	submitter         *client.RemoteTransactionSubmitter
 	reader            *common.SocketReader
@@ -224,6 +226,9 @@ func (wmpc *wssMsgPackClient) InternalShutdown() {
 	onceEmpty := func(subs []*client.SubscriptionManager) {
 		wmpc.connectionManager.ClientLost(wmpc.connectionNumber, wmpc)
 		wmpc.connectionManager.RemoveServerConnectionSubscriber(wmpc)
+		for _, sm := range subs {
+			sm.Unsubscribe(wmpc.localConnection)
+		}
 		wmpc.ShutdownCompleted()
 	}
 	if wmpc.submitter == nil {

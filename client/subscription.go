@@ -96,7 +96,10 @@ func (sm *SubscriptionManager) createUnsubscribeTxn(cache *Cache) (*cmsgs.Client
 	return &ctxn, roots
 }
 
-func (sm *SubscriptionManager) Unsubscribe(lc localconnection.LocalConnection, cache *Cache) error {
+// NB due to access to the cache, this is not safe to run concurrently
+// with other SMs off the same TxnSubmitter.
+func (sm *SubscriptionManager) Unsubscribe(lc localconnection.LocalConnection) error {
+	cache := sm.TransactionRecord.cache
 	for {
 		ctxn, roots := sm.createUnsubscribeTxn(cache)
 		_, outcome, err := lc.RunClientTransaction(ctxn, false, roots, nil)
