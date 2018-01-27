@@ -96,7 +96,7 @@ func (v *Var) ReceiveTxn(action *localAction, enqueuedAt time.Time) {
 		v.curFrame.AddReadWrite(action)
 	case isRead:
 		v.curFrame.AddRead(action)
-	case isWrite: // includes roll
+	case isWrite:
 		v.curFrame.AddWrite(action)
 	default:
 		panic(fmt.Sprintf("Received txn action I don't understand: %v", action))
@@ -146,7 +146,7 @@ func (v *Var) ReceiveTxnOutcome(action *localAction, enqueuedAt time.Time) {
 	}
 }
 
-func (v *Var) SetCurFrame(f *frame, frameAction *localAction) {
+func (v *Var) SetCurFrame(f *frame) {
 	utils.DebugLog(v.vm.logger, "debug", "SetCurFrame.", "VarUUId", v.UUId, "frameTxnId", f.frameTxnId, "frameValueTxnId", f.frameValueTxnId)
 
 	v.curFrame = f

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
@@ -10,7 +11,7 @@ import (
 	ch "goshawkdb.io/server/utils/consistenthash"
 )
 
-func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationCallback, isTopologyTxn bool) error {
+func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationCallback, isTopologyTxn bool) (bool, error) {
 	outgoingSeg := capn.NewBuffer(nil)
 	txnCap := msgs.NewRootTxn(outgoingSeg)
 
@@ -29,9 +30,9 @@ func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationC
 
 	picker := ch.NewCombinationPicker(int(tr.topology.FInc), tr.disabledHashCodes)
 
-	rmIdToActionIndices, err := tr.formServerActions(translationCallback, picker, &actions, &clientActions)
+	rmIdToActionIndices, addsSubs, err := tr.formServerActions(tr.client.Counter(), translationCallback, picker, &actions, &clientActions)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	txnCap.SetActions(common.SegToBytes(actionsListSeg))
@@ -41,7 +42,7 @@ func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationC
 	// passive actions.
 	activeRMs, passiveRMs, err := picker.Choose()
 	if err != nil {
-		return err
+		return false, err
 	}
 	allocations := msgs.NewAllocationList(outgoingSeg, len(activeRMs)+len(passiveRMs))
 	txnCap.SetAllocations(allocations)
@@ -51,7 +52,7 @@ func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationC
 	tr.server = &txnCap
 	tr.active = activeRMs
 
-	return nil
+	return addsSubs, nil
 }
 
 func (tr *TransactionRecord) setAllocations(seg *capn.Segment, rmIds common.RMIds, active bool, allocIdx int, rmIdToActionIndices map[common.RMId]*[]int, allocations *msgs.Allocation_List) {
@@ -74,12 +75,15 @@ func (tr *TransactionRecord) setAllocations(seg *capn.Segment, rmIds common.RMId
 	}
 }
 
-func (tr *TransactionRecord) formServerActions(translationCallback loco.TranslationCallback, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, error) {
+var badCounter = errors.New("Counter too low; rerun needed.")
+
+func (tr *TransactionRecord) formServerActions(counter uint32, translationCallback loco.TranslationCallback, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, bool, error) {
 	// if a.refs[n] --pointsTo-> b, and b is new, then we will need to
 	// create positions for b, and write those into the pointer too.
 	// referencesInNeedOfPositions keeps track of all such pointers.
 	referencesInNeedOfPositions := []*msgs.VarIdPos{}
 	rmIdToActionIndices := make(map[common.RMId]*[]int)
+	addsSubs := false
 
 	for idx, l := 0, clientActions.Len(); idx < l; idx++ {
 		clientAction := clientActions.At(idx)
@@ -87,93 +91,116 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 		vUUId := common.MakeVarUUId(clientAction.VarId())
 		action.SetVarId(vUUId[:])
 
-		clientActionType := clientAction.ActionType()
-		create := clientActionType == cmsgs.CLIENTACTIONTYPE_CREATE
+		clientValue := clientAction.Value()
+		create := clientValue.Which() == cmsgs.CLIENTACTIONVALUE_CREATE
 		c, err := tr.cache.Find(vUUId, !create)
 		if err != nil {
 			// either we found it and we're creating, or we didn't find it and we're not creating
-			return nil, err
+			return nil, false, err
 		}
 
-		modNeeded := true
-		switch clientActionType {
-		case cmsgs.CLIENTACTIONTYPE_CREATE:
+		clientMeta, actionMeta := clientAction.Meta(), action.Meta()
+		readRequired := false
+		readOrCreateRequired := false
+
+		if clientMeta.AddSub() {
+			if !c.caps.CanRead() {
+				return nil, false, fmt.Errorf("Illegal addSub of %v", vUUId)
+			}
+			readOrCreateRequired = true
+			actionMeta.SetAddSub(true)
+		}
+		if delSub := clientMeta.DelSub(); len(delSub) != 0 {
+			if !c.caps.CanRead() {
+				return nil, false, fmt.Errorf("Illegal delSub of %v", vUUId)
+			}
+			readRequired = true
+			actionMeta.SetDelSub(delSub)
+		}
+
+		switch actionValue := action.Value(); clientValue.Which() {
+		case cmsgs.CLIENTACTIONVALUE_CREATE:
+			clientCreate := clientValue.Create()
 			// but, don't add it to the cache yet
 			c = &Cached{
-				Cache: tr.cache,
-				caps:  common.ReadWriteCapability,
+				Cache:   tr.cache,
+				counter: counter,
+				caps:    common.ReadWriteCapability,
 			}
 			c.CreatePositions(int(tr.topology.MaxRMCount))
-			action.SetActionType(msgs.ACTIONTYPE_CREATE)
-			action.SetPositions((capn.UInt8List)(*c.positions))
-
-		case cmsgs.CLIENTACTIONTYPE_READONLY:
-			if !c.caps.CanRead() {
-				return nil, fmt.Errorf("Illegal read of %v", vUUId)
+			actionValue.SetCreate()
+			actionCreate := actionValue.Create()
+			actionCreate.SetPositions((capn.UInt8List)(*c.positions))
+			actionCreate.SetValue(clientCreate.Value())
+			if actionRefs, err := c.copyReferences(action.Segment, &referencesInNeedOfPositions, clientCreate.References()); err != nil {
+				return nil, false, err
+			} else {
+				actionCreate.SetReferences(*actionRefs)
 			}
-			action.SetActionType(msgs.ACTIONTYPE_READONLY)
-			action.SetVersion(c.version[:])
-			modNeeded = false
+			readOrCreateRequired = false
 
-		case cmsgs.CLIENTACTIONTYPE_WRITEONLY:
-			if !c.caps.CanWrite() {
-				return nil, fmt.Errorf("Illegal write of %v", vUUId)
-			}
-			action.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
+		case cmsgs.CLIENTACTIONVALUE_EXISTING:
+			clientExisting := clientValue.Existing()
+			actionValue.SetExisting()
+			actionExisting := actionValue.Existing()
 
-		case cmsgs.CLIENTACTIONTYPE_READWRITE:
-			if c.caps != common.ReadWriteCapability {
-				return nil, fmt.Errorf("Illegal read-write of %v", vUUId)
-			}
-			action.SetActionType(msgs.ACTIONTYPE_READWRITE)
-			action.SetVersion(c.version[:])
+			switch clientModify, actionModify := clientExisting.Modify(), actionExisting.Modify(); clientModify.Which() {
+			case cmsgs.CLIENTACTIONVALUEEXISTINGMODIFY_NOT:
+				actionModify.SetNot()
 
-		case cmsgs.CLIENTACTIONTYPE_ROLL:
-			if c.caps != common.ReadWriteCapability {
-				return nil, fmt.Errorf("Illegal roll of %v", vUUId)
-			}
-			action.SetActionType(msgs.ACTIONTYPE_ROLL)
-			action.SetVersion(c.version[:])
+			case cmsgs.CLIENTACTIONVALUEEXISTINGMODIFY_ROLL:
+				if !c.caps.CanRead() {
+					return nil, false, fmt.Errorf("Illegal roll of %v (insufficient capabilities)", vUUId)
+				} else if counter < c.counter { // for completeness. In reality, not possible to fail
+					return nil, false, badCounter
+				}
+				actionModify.SetRoll()
+				readRequired = true
 
-		case cmsgs.CLIENTACTIONTYPE_ADDSUBSCRIPTION, cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION:
-			if !c.caps.CanRead() {
-				return nil, fmt.Errorf("Illegal subscription of %v", vUUId)
-			}
-			cat := msgs.ACTIONTYPE_ADDSUBSCRIPTION
-			if clientActionType == cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION {
-				cat = msgs.ACTIONTYPE_DELSUBSCRIPTION
-			}
-			action.SetActionType(cat)
-			action.SetVersion(c.version[:])
-			modNeeded = false
+			case cmsgs.CLIENTACTIONVALUEEXISTINGMODIFY_WRITE:
+				clientWrite := clientModify.Write()
+				actionModify.SetWrite()
+				actionWrite := actionModify.Write()
+				actionWrite.SetValue(clientWrite.Value())
+				if actionRefs, err := c.copyReferences(action.Segment, &referencesInNeedOfPositions, clientWrite.References()); err != nil {
+					return nil, false, err
+				} else {
+					actionWrite.SetReferences(*actionRefs)
+				}
 
+			default:
+				panic(fmt.Sprintf("%v: %v: Unexpected action value existing modify: %v", tr.origId, vUUId, clientModify.Which()))
+			}
+
+			if clientExisting.Read() {
+				if !c.caps.CanRead() {
+					return nil, false, fmt.Errorf("Illegal read of %v", vUUId)
+				} else if counter < c.counter {
+					return nil, false, badCounter
+				}
+				actionExisting.SetRead(c.version[:])
+				readRequired = false
+				readOrCreateRequired = false
+			}
 		default:
-			panic(fmt.Sprintf("%v: %v: Unexpected action type: %v", tr.origId, vUUId, clientAction.Which()))
+			panic(fmt.Sprintf("%v: %v: Unexpected action value: %v", tr.origId, vUUId, clientValue.Which()))
+		}
+
+		if readRequired {
+			return nil, false, fmt.Errorf("Illegal action in %v (read required and not provided)", vUUId)
+		} else if readOrCreateRequired {
+			return nil, false, fmt.Errorf("Illegal action in %v (read or create required and not provided)", vUUId)
 		}
 
 		if err = c.EnsureHashCodes(); err != nil {
-			return nil, err
-		}
-
-		if modNeeded {
-			action.SetModified()
-			actionMod := action.Modified()
-			clientActionMod := clientAction.Modified()
-			actionMod.SetValue(clientActionMod.Value())
-			if actionRefs, err := c.copyReferences(action.Segment, &referencesInNeedOfPositions, clientActionMod.References()); err == nil {
-				actionMod.SetReferences(*actionRefs)
-			} else {
-				return nil, err
-			}
-		} else {
-			action.SetUnmodified()
+			return nil, false, err
 		}
 
 		tr.objs[*vUUId] = c
 
 		if translationCallback != nil {
 			if err = translationCallback(&clientAction, &action, c.hashCodes, tr.connections); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 
@@ -204,14 +231,14 @@ func (tr *TransactionRecord) formServerActions(translationCallback loco.Translat
 			var err error
 			c, err = tr.cache.Find(target, true)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		dstRef.SetPositions((capn.UInt8List)(*c.positions))
 		if !c.caps.IsSubset(common.NewCapability(dstRef.Capability())) {
-			return nil, fmt.Errorf("Attempt made to widen received capability to %v.", target)
+			return nil, false, fmt.Errorf("Attempt made to widen received capability to %v.", target)
 		}
 	}
 
-	return rmIdToActionIndices, nil
+	return rmIdToActionIndices, addsSubs, nil
 }

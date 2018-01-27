@@ -382,13 +382,20 @@ func (br badReads) combine(rmBal *rmBallot) {
 		vUUId := common.MakeVarUUId(action.VarId())
 		clockElem := clock.At(vUUId)
 
+		actionValue := action.Value()
+		actionMeta := action.Meta()
+		isReadOnly := actionValue.Which() == msgs.ACTIONVALUE_EXISTING &&
+			len(actionValue.Existing().Read()) != 0 &&
+			actionValue.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
+			!actionMeta.AddSub() && len(actionMeta.DelSub()) == 0
+
 		if bra, found := br[*vUUId]; found {
 			bra.combine(&action, rmBal, txnId, clockElem)
-		} else if action.ActionType() == msgs.ACTIONTYPE_READONLY {
+		} else if isReadOnly {
 			br[*vUUId] = &badReadAction{
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
-				txnId:     common.MakeTxnId(action.Version()),
+				txnId:     common.MakeTxnId(actionValue.Existing().Read()),
 				clockElem: clockElem - 1,
 				action:    &action,
 			}
@@ -422,46 +429,58 @@ func (bra *badReadAction) set(action *msgs.Action, rmBal *rmBallot, txnId *commo
 	bra.action = action
 }
 
-func (bra *badReadAction) combine(action *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
-	newActionType := action.ActionType()
-	braActionType := bra.action.ActionType()
+func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
+	braAction := bra.action
+	braValue := braAction.Value()
+	braMeta := braAction.Meta()
+	braIsReadOnly := braValue.Which() == msgs.ACTIONVALUE_EXISTING &&
+		len(braValue.Existing().Read()) != 0 &&
+		braValue.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
+		!braMeta.AddSub() && len(braMeta.DelSub()) == 0
+
+	newValue := newAction.Value()
+	newMeta := newAction.Meta()
+	newIsReadOnly := newValue.Which() == msgs.ACTIONVALUE_EXISTING &&
+		len(newValue.Existing().Read()) != 0 &&
+		newValue.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
+		!newMeta.AddSub() && len(newMeta.DelSub()) == 0
 
 	switch {
-	case braActionType != msgs.ACTIONTYPE_READONLY && newActionType != msgs.ACTIONTYPE_READONLY:
+	case !braIsReadOnly && !newIsReadOnly:
 		// They're both writes in some way. Just order the txns
 		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
-			bra.set(action, rmBal, txnId, clockElem)
+			bra.set(newAction, rmBal, txnId, clockElem)
 		}
 
-	case braActionType == msgs.ACTIONTYPE_READONLY && newActionType == msgs.ACTIONTYPE_READONLY:
+	case braIsReadOnly && newIsReadOnly:
 		clockElem--
 		// If they read the same version, we really don't care.
-		if !bytes.Equal(bra.action.Version(), action.Version()) {
+		if newRead := newValue.Existing().Read(); !bytes.Equal(braValue.Existing().Read(), newRead) {
 			// They read different versions, but which version was the latter?
 			if clockElem > bra.clockElem {
-				bra.set(action, rmBal, common.MakeTxnId(action.Version()), clockElem)
+				bra.set(newAction, rmBal, common.MakeTxnId(newRead), clockElem)
 			}
 		}
 
-	case braActionType == msgs.ACTIONTYPE_READONLY:
+	case braIsReadOnly:
 		if bytes.Equal(bra.txnId[:], txnId[:]) {
 			// The write will obviously be in the past of the
 			// existing read, but it's better to have the write
 			// as we can update the client with the actual
 			// value.
-			bra.set(action, rmBal, txnId, clockElem)
+			bra.set(newAction, rmBal, txnId, clockElem)
 		} else if clockElem > bra.clockElem {
 			// The write is after than the read
-			bra.set(action, rmBal, txnId, clockElem)
+			bra.set(newAction, rmBal, txnId, clockElem)
 		}
 
 	default: // Existing is not a read, but new is a read.
 		clockElem--
 		// If the read is a read of the existing write, better to keep the write
-		if !bytes.Equal(bra.txnId[:], action.Version()) {
+		if newRead := newValue.Existing().Read(); !bytes.Equal(bra.txnId[:], newRead) {
 			if clockElem > bra.clockElem {
 				// The read must be of some value which was written after our existing write.
-				bra.set(action, rmBal, common.MakeTxnId(action.Version()), clockElem)
+				bra.set(newAction, rmBal, common.MakeTxnId(newRead), clockElem)
 			}
 		}
 	}
@@ -491,27 +510,41 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 		clock := vectorclock.NewVectorClock().AsMutable()
 		for idy, bra := range *badReadActions {
 			action := bra.action
-			switch action.ActionType() {
-			case msgs.ACTIONTYPE_READONLY:
-				newAction := actionsList.At(idy)
-				newAction.SetVarId(action.VarId())
-				newAction.SetUnmodified()
-				newAction.SetActionType(msgs.ACTIONTYPE_MISSING)
-			case msgs.ACTIONTYPE_WRITEONLY:
-				actionsList.Set(idy, *action)
-			case msgs.ACTIONTYPE_CREATE, msgs.ACTIONTYPE_READWRITE, msgs.ACTIONTYPE_ROLL:
-				newAction := actionsList.At(idy)
-				newAction.SetVarId(action.VarId())
-				newAction.SetActionType(msgs.ACTIONTYPE_WRITEONLY)
-				newAction.SetModified()
-				newMod := newAction.Modified()
-				mod := action.Modified()
-				newMod.SetValue(mod.Value())
-				newMod.SetReferences(mod.References())
+			newAction := actionsList.At(idy)
+			newAction.SetVarId(action.VarId())
+			newValue := newAction.Value()
+			switch actionValue := action.Value(); actionValue.Which() {
+			case msgs.ACTIONVALUE_CREATE:
+				newValue.SetExisting()
+				newModify := newValue.Existing().Modify()
+				newModify.SetWrite()
+				newWrite := newModify.Write()
+				actionCreate := actionValue.Create()
+				newWrite.SetValue(actionCreate.Value())
+				newWrite.SetReferences(actionCreate.References())
+
+			case msgs.ACTIONVALUE_EXISTING:
+				switch actionModify := actionValue.Existing().Modify(); actionModify.Which() {
+				case msgs.ACTIONVALUEEXISTINGMODIFY_NOT:
+					newValue.SetMissing()
+				case msgs.ACTIONVALUEEXISTINGMODIFY_WRITE:
+					newValue.SetExisting()
+					newModify := newValue.Existing().Modify()
+					newModify.SetWrite()
+					newWrite := newModify.Write()
+					actionWrite := actionModify.Write()
+					newWrite.SetValue(actionWrite.Value())
+					newWrite.SetReferences(actionWrite.References())
+				default:
+					panic(fmt.Sprintf("Unexpected action existing modify (%v) for badread of %v at %v",
+						actionModify.Which(), action.VarId(), txnId))
+				}
+
 			default:
-				panic(fmt.Sprintf("Unexpected action type (%v) for badread of %v at %v",
-					action.Which(), action.VarId(), txnId))
+				panic(fmt.Sprintf("Unexpected action value (%v) for badread of %v at %v",
+					actionValue.Which(), action.VarId(), txnId))
 			}
+
 			clock.SetVarIdMax(bra.vUUId, bra.clockElem)
 		}
 		update.SetActions(common.SegToBytes(actionsListSeg))

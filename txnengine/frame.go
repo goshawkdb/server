@@ -229,21 +229,45 @@ func (fo *frameOpen) ensureFrameValueActions() *txnreader.TxnActions {
 				panic(fmt.Sprintf("Unable to find ourself in frameValueTxnId actions. %v %v", fo.frameValueTxnId, fo.v.UUId))
 			}
 
-			utils.DebugLog(fo.ensureLogger(), "debug", "Reducing value txn.", "valueActionType", ourAction.ActionType())
+			utils.DebugLog(fo.ensureLogger(), "debug", "Reducing value txn.")
 			// we now have to copy it to a new actions seg so that we
 			// drop all the other actions that were in the orig txn.
+
+			// the orig txn could have been a create, or even some form
+			// of meta action. We always reduce to a read-write however.
 			seg := capn.NewBuffer(nil)
 			root := msgs.NewRootActionListWrapper(seg)
 			list := msgs.NewActionList(seg, 1)
 			newAction := list.At(0)
 			newAction.SetVarId(vUUIdBytes)
-			newAction.SetActionType(ourAction.ActionType())
-			newAction.SetVersion(ourAction.Version())
-			newAction.SetModified()
-			newMod := newAction.Modified()
-			ourMod := ourAction.Modified()
-			newMod.SetValue(ourMod.Value())
-			newMod.SetReferences(ourMod.References())
+			newValue := newAction.Value()
+			newValue.SetExisting()
+			newExisting := newValue.Existing()
+			newExisting.SetRead(fo.frameValueTxnId[:])
+			newModify := newExisting.Modify()
+			newModify.SetWrite()
+			newWrite := newModify.Write()
+
+			switch ourValue := ourAction.Value(); ourValue.Which() {
+			case msgs.ACTIONVALUE_CREATE:
+				ourCreate := ourValue.Create()
+				newWrite.SetValue(ourCreate.Value())
+				newWrite.SetReferences(ourCreate.References())
+			case msgs.ACTIONVALUE_EXISTING:
+				ourModify := ourValue.Existing().Modify()
+				if ourModify.Which() == msgs.ACTIONVALUEEXISTINGMODIFY_WRITE {
+					ourWrite := ourModify.Write()
+					newWrite.SetValue(ourWrite.Value())
+					newWrite.SetReferences(ourWrite.References())
+				} else {
+					panic(fmt.Sprintf("Our frame value txn action did not write our value! %v %v %v",
+						fo.frameValueTxnId, fo.v.UUId, ourModify.Which()))
+				}
+			default:
+				panic(fmt.Sprintf("Our frame value txn action is neither create or existing! %v %v %v",
+					fo.frameValueTxnId, fo.v.UUId, ourValue.Which()))
+			}
+
 			root.SetActions(list)
 			fo.frameValueActions = txnreader.TxnActionsFromData(common.SegToBytes(seg), false)
 		}
@@ -252,25 +276,9 @@ func (fo *frameOpen) ensureFrameValueActions() *txnreader.TxnActions {
 	return fo.frameValueActions
 }
 
-func (fo *frameOpen) ReadRetry(action *localAction) bool {
-	txn := action.Txn
-	utils.DebugLog(fo.ensureLogger(), "debug", "ReadRetry", "TxnId", txn.Id)
-	switch {
-	case fo.currentState != fo:
-		panic(fmt.Sprintf("%v ReadRetry called for %v with frame in state %v", fo.v, txn, fo.currentState))
-	case fo.frameTxnId == nil || fo.frameTxnId.Compare(action.readVsn) == common.EQ:
-		return false
-	default:
-		utils.DebugLog(fo.ensureLogger(), "debug", "VoteBadRead", "frameTxnClock", fo.frameTxnClock, "TxnId", txn.Id)
-		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.ensureFrameValueActions())
-		fo.v.maybeMakeInactive()
-		return true
-	}
-}
-
 func (fo *frameOpen) AddRead(action *localAction) {
 	txn := action.Txn
-	utils.DebugLog(fo.ensureLogger(), "debug", "AddRead", "TxnId", txn.Id, "vsn", action.readVsn)
+	utils.DebugLog(fo.ensureLogger(), "debug", "AddRead", "TxnId", txn.Id, "vsn", action.read)
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddRead called for %v with frame in state %v", fo.v, txn, fo.currentState))
@@ -278,7 +286,7 @@ func (fo *frameOpen) AddRead(action *localAction) {
 		// We could have learnt a write at this point but we're still fine to accept smaller reads.
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteDeadlock", "TxnId", txn.Id)
 		action.VoteDeadlock(fo.frameTxnClock)
-	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
+	case fo.frameTxnId.Compare(action.read) != common.EQ:
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteBadRead", "frameTxnClock", fo.frameTxnClock, "TxnId", txn.Id)
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.ensureFrameValueActions())
 		fo.v.maybeMakeInactive()
@@ -396,8 +404,8 @@ func (fo *frameOpen) WriteCommitted(action *localAction) {
 	if node := fo.writes.Get(action); node != nil && node.Value == uncommitted {
 		node.Value = committed
 		fo.uncommittedWrites--
-		if fo.positions == nil && action.createPositions != nil {
-			fo.positions = action.createPositions
+		if fo.positions == nil && action.create != nil {
+			fo.positions = action.create
 		}
 		fo.maybeCreateChild()
 	} else {
@@ -407,14 +415,14 @@ func (fo *frameOpen) WriteCommitted(action *localAction) {
 
 func (fo *frameOpen) AddReadWrite(action *localAction) {
 	txn := action.Txn
-	utils.DebugLog(fo.ensureLogger(), "debug", "AddReadWrite", "TxnId", txn.Id, "vsn", action.readVsn)
+	utils.DebugLog(fo.ensureLogger(), "debug", "AddReadWrite", "TxnId", txn.Id, "vsn", action.read)
 	switch {
 	case fo.currentState != fo:
 		panic(fmt.Sprintf("%v AddReadWrite called for %v with frame in state %v", fo.v, txn, fo.currentState))
 	case fo.writes.Len() != 0 || (fo.maxUncommittedRead != nil && action.Compare(fo.maxUncommittedRead) == sl.LT) || fo.frameTxnId == nil || len(fo.learntFutureReads) != 0:
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteDeadlock", "TxnId", txn.Id)
 		action.VoteDeadlock(fo.frameTxnClock)
-	case fo.frameTxnId.Compare(action.readVsn) != common.EQ:
+	case fo.frameTxnId.Compare(action.read) != common.EQ:
 		utils.DebugLog(fo.ensureLogger(), "debug", "VoteBadRead", "frameTxnClock", fo.frameTxnClock, "TxnId", txn.Id)
 		action.VoteBadRead(fo.frameTxnClock, fo.frameTxnId, fo.ensureFrameValueActions())
 		fo.v.maybeMakeInactive()
@@ -488,7 +496,7 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 	}
 	actClockElem--
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
-	if action.readVsn.Compare(fo.frameTxnId) != common.EQ {
+	if action.read.Compare(fo.frameTxnId) != common.EQ {
 		// The write would be one less than the read. We want to know if
 		// this read is of a write before or after our current frame
 		// write. If the clock elems are equal then the read _must_ be
@@ -573,8 +581,8 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	if fo.writes.Get(action) == nil {
 		fo.writes.Insert(action, committed)
 		action.frame = fo.frame
-		if fo.positions == nil && action.createPositions != nil {
-			fo.positions = action.createPositions
+		if fo.positions == nil && action.create != nil {
+			fo.positions = action.create
 		}
 		// See corresponding comment in ReadLearnt. We only force the
 		// readvoteclock here because we cannot calculate the
@@ -832,25 +840,23 @@ func (fo *frameOpen) maybeCreateChild() {
 	childValueTxnId := winner.Id
 	childValueTxn := winner.TxnReader
 	childValueActions := winner.TxnReader.Actions(false)
-	winnerLocalAction := winner
 
 	if winner.IsImmigrant() {
+		// for an immigrant winner, winner.Id will be the txnId of the
+		// frame itself. But the value txn is in the TxnReader
 		childValueTxnId = childValueTxn.Id
-	} else if winner.IsRoll() || winner.IsMeta() {
-		winnerLocalAction = nil
-		if winner.IsRoll() {
-			childValueTxnId = winner.roll
-		} else if winner.IsMeta() {
-			childValueTxnId = winner.readVsn
-		}
+	} else if winner.IsNoopWrite() {
+		childValueTxnId = nil
+
 		// The winning txn itself does not need to go to disk at all!
 		childValueTxn = nil
 		childValueActions = nil
 
-		if fo.frameValueTxnId.Compare(childValueTxnId) == common.EQ {
-			// Winner is a roll/meta of our frame value. We must be
+		if fo.frameValueTxnId.Compare(winner.read) == common.EQ {
+			childValueTxnId = fo.frameValueTxnId
+			// Winner is a noopWrite of our frame value. We must be
 			// careful: we can only pass on our frameValueActions to the
-			// child if we are ourselves already a roll of some more
+			// child if we are ourselves already a noopWrite of some more
 			// ancient value (i.e. the actions have already been stripped
 			// down):
 			if fo.frameValueTxnId.Compare(fo.frameTxnId) != common.EQ {
@@ -863,7 +869,7 @@ func (fo *frameOpen) maybeCreateChild() {
 			// childValueTxn can be nil and childValueActions non-nil.
 			childValueTxn = fo.frameValueTxn
 
-		} else if fo.frameTxnId.Compare(childValueTxnId) == common.EQ {
+		} else if fo.frameTxnId.Compare(winner.read) == common.EQ {
 			// Winner doesn't reference our frame value, but it does
 			// reference this frame itself. Which also tells us that this
 			// frame txn is different from the frame value txn. So in
@@ -873,22 +879,39 @@ func (fo *frameOpen) maybeCreateChild() {
 			childValueTxn = fo.frameValueTxn
 			childValueActions = fo.frameValueActions
 
-		} else { // hunt for the corresponding write
-			for node := fo.writes.First(); childValueTxn == nil && node != nil; node = node.Next() {
-				action := node.Key.(*localAction)
-				if childValueTxnId.Compare(action.Id) == common.EQ {
-					// Even though we've found it, we cannot pass these
-					// actions through to the child frame because these txn
-					// actions have not been reduced.  But, we must write
-					// this to disk, so we do pass the txn itself through.
-					childValueTxn = action.TxnReader
+		} else {
+			// We need to hunt down the winner.read txn. The complication
+			// is that that txn too could be in this frame, and it could
+			// be a noopWrite, so we will have to loop until we find a
+			// "real" write txn.
+			childValueTxnId = winner.read
+			for childValueTxn == nil {
+				// Yes, this is technically N^2, but it's pretty unlikely
+				// we're going to have to make many passes, so it's
+				// unlikely this is a problem.
+				found := false
+				for node := fo.writes.Last(); childValueTxn == nil && node != nil; node = node.Prev() {
+					action := node.Key.(*localAction)
+					if childValueTxnId.Compare(action.Id) == common.EQ {
+						found = true
+						if action.IsNoopWrite() {
+							childValueTxnId = action.read
+						} else {
+							// Even though we've found it, we cannot pass
+							// these actions through to the child frame
+							// because these txn actions have not been
+							// reduced. But, we must write this to disk, so
+							// we do pass the txn itself through.
+							childValueTxn = action.TxnReader
+						}
+					}
 				}
-			}
-			if childValueTxn == nil {
-				// We know that the child value txn is not on disk and we
-				// know it has to be. So we must be waiting to learn
-				// it. So we refuse to progress at this point.
-				return
+				if !found {
+					// We know that the child value txn is not on disk and we
+					// know it has to be. So we must be waiting to learn
+					// it. So we refuse to progress at this point.
+					return
+				}
 			}
 		}
 	}
@@ -905,7 +928,7 @@ func (fo *frameOpen) maybeCreateChild() {
 		childFrameTxnId, childValueTxnId, childValueTxn, childValueActions,
 		winner.outcomeClock.AsMutable(), written)
 
-	fo.v.SetCurFrame(fo.child, winnerLocalAction)
+	fo.v.SetCurFrame(fo.child)
 	for _, action := range fo.learntFutureReads {
 		action.frame = nil
 		utils.DebugLog(fo.ensureLogger(), "debug", "New frame learns future reads.")
@@ -1041,21 +1064,21 @@ func (fo *frameOpen) createRollClientTxn() (*cmsgs.ClientTxn, map[common.VarUUId
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
-	ctxn.SetRetry(false)
 	actions := cmsgs.NewClientActionList(seg, 1)
 	ctxn.SetActions(actions)
 	action := actions.At(0)
 	action.SetVarId(fo.v.UUId[:])
-	action.SetActionType(cmsgs.CLIENTACTIONTYPE_ROLL)
-	action.SetModified()
-	modified := action.Modified()
-	modified.SetValue(fo.frameValueTxnId[:])
+	value := action.Value()
+	value.SetExisting()
+	existing := value.Existing()
+	existing.SetRead(true)
+	existing.Modify().SetRoll()
 
 	fo.rollTxn = &ctxn
 	posMap := map[common.VarUUId]*types.PosCapVer{
 		*fo.v.UUId: &types.PosCapVer{
 			Positions:  fo.positions,
-			Capability: common.ReadWriteCapability,
+			Capability: common.ReadOnlyCapability,
 			Version:    fo.frameTxnId,
 		},
 	}

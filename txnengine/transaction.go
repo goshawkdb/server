@@ -42,35 +42,38 @@ type Txn struct {
 
 type localAction struct {
 	*Txn
-	Id              *common.TxnId
-	vUUId           *common.VarUUId
-	ballot          *Ballot
-	frame           *frame
-	readVsn         *common.TxnId
-	writeAction     *msgs.Action
-	createPositions *common.Positions
-	roll            *common.TxnId
-	addSubscription bool
-	delSubscription *common.TxnId
-	outcomeClock    vc.VectorClock
-	immigrantVar    *msgs.Var
-	writesClock     *vc.VectorClockImmutable
+	Id     *common.TxnId
+	vUUId  *common.VarUUId
+	ballot *Ballot
+	frame  *frame
+
+	create *common.Positions
+	read   *common.TxnId
+	write  bool
+	roll   bool
+
+	addSub bool
+	delSub *common.TxnId
+
+	outcomeClock vc.VectorClock
+	immigrantVar *msgs.Var
+	writesClock  *vc.VectorClockImmutable
 }
 
 func (action *localAction) IsRead() bool {
-	return action.readVsn != nil
+	return action.read != nil
 }
 
 func (action *localAction) IsWrite() bool {
-	return action.writeAction != nil
+	return action.write || action.roll || action.addSub || action.delSub != nil
 }
 
-func (action *localAction) IsRoll() bool {
-	return action.roll != nil
+func (action *localAction) IsNoopWrite() bool {
+	return !action.write && (action.roll || action.addSub || action.delSub != nil)
 }
 
 func (action *localAction) IsMeta() bool {
-	return action.addSubscription || action.delSubscription != nil
+	return action.addSub || action.delSub != nil
 }
 
 func (action *localAction) IsImmigrant() bool {
@@ -123,8 +126,8 @@ func (a *localAction) Compare(bC sl.Comparable) sl.Cmp {
 }
 
 func (action localAction) String() string {
-	isCreate := action.createPositions != nil
-	isWrite := action.writeAction != nil
+	isCreate := action.create != nil
+	isWrite := action.write
 	f := ""
 	if action.frame != nil {
 		f = "|f"
@@ -134,16 +137,16 @@ func (action localAction) String() string {
 		b = "|b"
 	}
 	i := ""
-	if action.immigrantVar != nil {
+	if action.IsImmigrant() {
 		i = "|i"
 	}
 	s := ""
-	if action.addSubscription {
+	if action.addSub {
 		s = "|+"
-	} else if action.delSubscription != nil {
-		s = fmt.Sprintf("|-(%v)", action.delSubscription)
+	} else if action.delSub != nil {
+		s = fmt.Sprintf("|-(%v)", action.delSub)
 	}
-	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s%s", action.Id, action.vUUId, isCreate, action.readVsn, isWrite, action.roll, f, b, i, s)
+	return fmt.Sprintf("Action from %v for %v: create:%v|read:%v|write:%v|roll:%v%s%s%s%s", action.Id, action.vUUId, isCreate, action.read, isWrite, action.roll, f, b, i, s)
 }
 
 func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateChange TxnLocalStateChange, reader *txnreader.TxnReader, varCaps msgs.Var_List, logger log.Logger) {
@@ -171,23 +174,13 @@ func ImmigrationTxnFromCap(exe *dispatcher.Executor, vd *VarDispatcher, stateCha
 		action.Id = common.MakeTxnId(varCap.WriteTxnId())
 		action.vUUId = common.MakeVarUUId(varCap.Id())
 		positions := varCap.Positions()
-		action.createPositions = (*common.Positions)(&positions)
+		action.create = (*common.Positions)(&positions)
+		action.write = true
 		action.outcomeClock = vc.VectorClockFromData(varCap.WriteTxnClock(), false)
 		action.immigrantVar = &varCap
 		action.writesClock = vc.VectorClockFromData(varCap.WritesClock(), false)
 		actionsMap[*action.vUUId] = action
 		txn.writes = append(txn.writes, action.vUUId)
-	}
-
-	// but the one thing we don't have in the localAction is the actual
-	// write action, so we just look that up from the txn itself:
-	actionsList := reader.Actions(true).Actions()
-	for idx, l := 0, actionsList.Len(); idx < l; idx++ {
-		actionCap := actionsList.At(idx)
-		vUUId := common.MakeVarUUId(actionCap.VarId())
-		if action, found := actionsMap[*vUUId]; found {
-			action.writeAction = &actionCap
-		}
 	}
 
 	txn.Start(false) // txn will start at txnReceiveOutcome...
@@ -251,85 +244,65 @@ func (txn *Txn) populate(actionIndices capn.UInt16List, actionsList *msgs.Action
 	for idx, l := 0, actionsList.Len(); idx < l; idx++ {
 		action.Id = txn.Id
 		actionCap := actionsList.At(idx)
+		actionValue := actionCap.Value()
+
+		isWrite := false
 
 		if idx == actionIndex {
 			action.Txn = txn
 			action.vUUId = common.MakeVarUUId(actionCap.VarId())
-		}
 
-		switch actionCap.ActionType() {
-		case msgs.ACTIONTYPE_CREATE:
-			if idx == actionIndex {
-				positions := common.Positions(actionCap.Positions())
-				action.writeAction = &actionCap
-				action.createPositions = &positions
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
+			switch actionValue.Which() {
+			case msgs.ACTIONVALUE_CREATE:
+				actionCreate := actionValue.Create()
+				positions := common.Positions(actionCreate.Positions())
+				action.create = &positions
+				isWrite = true
+
+			case msgs.ACTIONVALUE_EXISTING:
+				actionExisting := actionValue.Existing()
+				if actionRead := actionExisting.Read(); len(actionRead) != 0 {
+					action.read = common.MakeTxnId(actionRead)
+				}
+				switch actionModify := actionExisting.Modify(); actionModify.Which() {
+				case msgs.ACTIONVALUEEXISTINGMODIFY_ROLL:
+					action.roll = true
+					isWrite = true
+				case msgs.ACTIONVALUEEXISTINGMODIFY_WRITE:
+					action.write = true
+					isWrite = true
+				}
+
+			default:
+				panic(fmt.Sprintf("Unexpected action value: %v", actionValue.Which()))
 			}
 
-		case msgs.ACTIONTYPE_READONLY:
-			if idx == actionIndex {
-				action.readVsn = common.MakeTxnId(actionCap.Version())
+			actionMeta := actionCap.Meta()
+			if actionMeta.AddSub() {
+				action.addSub = true
+				isWrite = true
+			}
+			if delSub := actionMeta.DelSub(); len(delSub) != 0 {
+				action.delSub = common.MakeTxnId(delSub)
+				isWrite = true
 			}
 
-		case msgs.ACTIONTYPE_WRITEONLY:
-			if idx == actionIndex {
-				action.writeAction = &actionCap
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		case msgs.ACTIONTYPE_READWRITE:
-			if idx == actionIndex {
-				action.readVsn = common.MakeTxnId(actionCap.Version())
-				action.writeAction = &actionCap
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		case msgs.ACTIONTYPE_ROLL:
-			if idx == actionIndex {
-				action.readVsn = common.MakeTxnId(actionCap.Version())
-				action.writeAction = &actionCap
-				action.roll = common.MakeTxnId(actionCap.Modified().Value())
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		case msgs.ACTIONTYPE_ADDSUBSCRIPTION:
-			if idx == actionIndex {
-				action.readVsn = common.MakeTxnId(actionCap.Version())
-				action.writeAction = &actionCap
-				action.addSubscription = true
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		case msgs.ACTIONTYPE_DELSUBSCRIPTION:
-			if idx == actionIndex {
-				action.readVsn = common.MakeTxnId(actionCap.Version())
-				action.writeAction = &actionCap
-				action.delSubscription = common.MakeTxnId(actionCap.Modified().Value())
-				txn.writes = append(txn.writes, action.vUUId)
-			} else {
-				txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
-			}
-
-		default:
-			panic(fmt.Sprintf("Unexpected action type: %v", actionCap.Which()))
-		}
-
-		if idx == actionIndex {
 			actionIndicesIdx++
 			if actionIndicesIdx < actionIndices.Len() {
 				actionIndex = int(actionIndices.At(actionIndicesIdx))
 				action = &localActions[actionIndicesIdx]
 			}
+
+		} else {
+			isWrite = actionValue.Which() == msgs.ACTIONVALUE_CREATE
+			if !isWrite && actionValue.Which() == msgs.ACTIONVALUE_EXISTING {
+				modifyWhich := actionValue.Existing().Modify().Which()
+				isWrite = modifyWhich != msgs.ACTIONVALUEEXISTINGMODIFY_NOT
+			}
+		}
+
+		if isWrite {
+			txn.writes = append(txn.writes, common.MakeVarUUId(actionCap.VarId()))
 		}
 	}
 	if actionIndicesIdx != actionIndices.Len() {

@@ -227,8 +227,10 @@ func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, 
 			client: txn,
 			bbe:    rts.bbe,
 		}
-		if err := tr.formServerTxn(nil, false); err != nil {
+		if addsSubs, err := tr.formServerTxn(nil, false); err != nil {
 			return cont(nil, err)
+		} else if addsSubs {
+			tr.subManager = NewSubscriptionManager(txnId, tr, rts.SubscriptionConsumer)
 		}
 		rts.cont = cont
 		rts.resubmitCount = 0
@@ -239,6 +241,10 @@ func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, 
 		}
 		return nil
 	}
+}
+
+func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(txn *txnreader.TxnReader, tr *TransactionRecord) error {
+	return nil
 }
 
 type valueCached struct {

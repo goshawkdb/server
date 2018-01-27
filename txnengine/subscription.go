@@ -84,7 +84,7 @@ func (s *Subscriptions) Committed(action *localAction) {
 	case action.IsImmigrant():
 		// TOOO merge in from action.immigrantVar.Subscriptions()
 
-	case action.addSubscription:
+	case action.addSub:
 		added, found := s.subs[*action.Id]
 		if found && added {
 			// duplicate, do nothing
@@ -97,8 +97,8 @@ func (s *Subscriptions) Committed(action *localAction) {
 			s.subs[*action.Id] = true
 		}
 
-	case action.delSubscription != nil:
-		added, found := s.subs[*action.delSubscription]
+	case action.delSub != nil:
+		added, found := s.subs[*action.delSub]
 		if found && added {
 			// cancelling
 			delete(s.subs, *action.Id)

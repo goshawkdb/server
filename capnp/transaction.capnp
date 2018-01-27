@@ -21,28 +21,30 @@ struct ActionListWrapper {
 }
 
 struct Action {
-  varId      @0: Data;
-  version    @1: Data;
-  positions  @2: List(UInt8);
-  union {
-    unmodified   @3: Void;
-    modified :group {
-      value      @4: Data;
-      references @5: List(Var.VarIdPos);
+  varId @0: Data;
+  value :union {
+    missing @1: Void;
+    create :group {
+      positions  @2: List(UInt8);
+      value      @3: Data;
+      references @4: List(Var.VarIdPos);
+    }
+    existing :group {
+      read   @5: Data;
+      modify :union {
+        not  @6: Void;
+        roll @7: Void;
+        write :group {
+          value      @8: Data;
+          references @9: List(Var.VarIdPos);
+        }
+      }
     }
   }
-  actionType @6: ActionType;
-}
-
-enum ActionType {
-  create          @0;
-  readOnly        @1;
-  writeOnly       @2;
-  readWrite       @3;
-  missing         @4;
-  roll            @5;
-  addSubscription @6;
-  delSubscription @7;
+  meta :group {
+    addSub @10: Bool; # requires create or read
+    delSub @11: Data; # requires read
+  }
 }
 
 struct Allocation {

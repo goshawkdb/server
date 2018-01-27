@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"goshawkdb.io/common"
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
@@ -54,8 +55,10 @@ func (ts *TransactionSubmitter) SubmitLocalClientTransaction(txnId *common.TxnId
 			client: txn,
 		}
 		tr.cache.SetResolver(ch.NewResolver(ts.topology.RMs, ts.topology.TwoFInc))
-		if err := tr.formServerTxn(translationCallback, isTopologyTxn); err != nil {
+		if addsSubs, err := tr.formServerTxn(translationCallback, isTopologyTxn); err != nil {
 			return cont(nil, nil, err)
+		} else if addsSubs {
+			return cont(nil, nil, errors.New("AddSubscriptions not supported for local client transactions yet."))
 		}
 		ts.AddTransactionRecord(tr, false)
 		tr.Submit()

@@ -119,7 +119,7 @@ func (actions *TxnActions) decode() {
 		panic(fmt.Sprintf("Error when decoding actions: %v", err))
 	}
 	actions.actionsCap = msgs.ReadRootActionListWrapper(seg).Actions()
-	actions.deflated = actions.actionsCap.Len() == 0 || actions.actionsCap.At(0).ActionType() == msgs.ACTIONTYPE_MISSING
+	actions.deflated = actions.actionsCap.Len() == 0 || actions.actionsCap.At(0).Value().Which() == msgs.ACTIONVALUE_MISSING
 }
 
 func (actions *TxnActions) Actions() *msgs.Action_List {
@@ -142,8 +142,7 @@ func (actions *TxnActions) AsDeflated() *TxnActions {
 	for idx := 0; idx < l; idx++ {
 		newAction := list.At(idx)
 		newAction.SetVarId(cap.At(idx).VarId())
-		newAction.SetUnmodified()
-		newAction.SetActionType(msgs.ACTIONTYPE_MISSING)
+		newAction.Value().SetMissing()
 	}
 
 	return &TxnActions{
