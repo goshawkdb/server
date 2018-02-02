@@ -498,7 +498,7 @@ func (tcc *TLSCapnpClient) Run(conn *network.Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewRemoteTransactionSubmitter(tcc.self, tcc.bootCount, cm, tcc.Connection, tcc.Rng, tcc.logger, tcc.rootsPosCapVer, metrics)
+		tcc.submitter = client.NewRemoteTransactionSubmitter(tcc.namespace, cm, tcc.Connection, tcc.Rng, tcc.logger, tcc.rootsPosCapVer, metrics)
 		if err := tcc.submitter.TopologyChanged(tcc.topology); err != nil {
 			return err
 		}

@@ -57,7 +57,7 @@ func NewLocalConnection(rmId common.RMId, bootCount uint32, cm connectionmanager
 		nextVarNumber:     0,
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	lc.submitter = client.NewTransactionSubmitter(rmId, bootCount, cm, lc, lc.rng, logger)
+	lc.submitter = client.NewTransactionSubmitter(cm, lc, lc.rng, logger)
 
 	lci := &lc.inner
 	lci.LocalConnection = lc

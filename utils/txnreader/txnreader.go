@@ -152,3 +152,21 @@ func (actions *TxnActions) AsDeflated() *TxnActions {
 		actionsCap: list,
 	}
 }
+
+func IsWrite(action *msgs.Action) bool {
+	meta := action.Meta()
+	if meta.AddSub() || len(meta.DelSub()) != 0 {
+		return true
+	}
+	value := action.Value()
+	switch value.Which() {
+	case msgs.ACTIONVALUE_MISSING:
+		return false
+	case msgs.ACTIONVALUE_CREATE:
+		return true
+	case msgs.ACTIONVALUE_EXISTING:
+		return value.Existing().Modify().Which() != msgs.ACTIONVALUEEXISTINGMODIFY_NOT
+	default:
+		panic(fmt.Sprintf("Unexpected action value: %v", value.Which()))
+	}
+}

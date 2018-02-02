@@ -77,7 +77,7 @@ func (tr *TransactionRecord) setAllocations(seg *capn.Segment, rmIds common.RMId
 
 var badCounter = errors.New("Counter too low; rerun needed.")
 
-func (tr *TransactionRecord) formServerActions(counter uint32, translationCallback loco.TranslationCallback, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, bool, error) {
+func (tr *TransactionRecord) formServerActions(counter uint64, translationCallback loco.TranslationCallback, picker *ch.CombinationPicker, actions *msgs.Action_List, clientActions *cmsgs.ClientAction_List) (map[common.RMId]*[]int, bool, error) {
 	// if a.refs[n] --pointsTo-> b, and b is new, then we will need to
 	// create positions for b, and write those into the pointer too.
 	// referencesInNeedOfPositions keeps track of all such pointers.
@@ -196,6 +196,9 @@ func (tr *TransactionRecord) formServerActions(counter uint32, translationCallba
 			return nil, false, err
 		}
 
+		if _, found := tr.objs[*vUUId]; found {
+			return nil, false, fmt.Errorf("Illegal transaction: %v used twice", vUUId)
+		}
 		tr.objs[*vUUId] = c
 
 		if translationCallback != nil {

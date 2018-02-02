@@ -24,8 +24,6 @@ import (
 
 type TransactionSubmitter struct {
 	logger              log.Logger
-	rmId                common.RMId
-	bootCount           uint32
 	connPub             sconn.ServerConnectionPublisher
 	disabledHashCodes   map[common.RMId]types.EmptyStruct
 	connections         map[common.RMId]*sconn.ServerConnection
@@ -38,15 +36,13 @@ type TransactionSubmitter struct {
 	shuttingDownSubs    []*SubscriptionManager
 }
 
-func NewTransactionSubmitter(self common.RMId, bootCount uint32, connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger) *TransactionSubmitter {
+func NewTransactionSubmitter(connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger) *TransactionSubmitter {
 	return &TransactionSubmitter{
-		logger:    logger,
-		rmId:      self,
-		bootCount: bootCount,
-		connPub:   connPub,
-		txns:      make(map[common.TxnId]*TransactionRecord),
-		actor:     actor,
-		rng:       rng,
+		logger:  logger,
+		connPub: connPub,
+		txns:    make(map[common.TxnId]*TransactionRecord),
+		actor:   actor,
+		rng:     rng,
 	}
 }
 
@@ -287,11 +283,12 @@ func (tr *TransactionRecord) deleteSubscriptions(txn *txnreader.TxnReader) {
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
-		if action.ActionType() != msgs.ACTIONTYPE_DELSUBSCRIPTION {
+		meta := action.Meta()
+		if len(meta.DelSub()) == 0 {
 			continue
 		}
 		vUUId := common.MakeVarUUId(action.VarId())
-		subId := common.MakeTxnId(action.Modified().Value())
+		subId := common.MakeTxnId(meta.DelSub())
 		// it is impossible for us to be here *before* the sub record
 		// has been added.
 		if subTr, found := tr.txns[*subId]; found && subTr.subManager != nil {

@@ -22,9 +22,23 @@ func NewSubscriptionManager(subId *common.TxnId, tr *TransactionRecord, consumer
 	cache := make(map[common.VarUUId]*VerClock, actions.Len())
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
-		if action.ActionType() == msgs.ACTIONTYPE_ADDSUBSCRIPTION {
+		meta := action.Meta()
+		if meta.AddSub() {
+			value := action.Value()
+			var version *common.TxnId
+			switch value.Which() {
+			case msgs.ACTIONVALUE_CREATE:
+				version = subId
+			case msgs.ACTIONVALUE_EXISTING:
+				if read := value.Existing().Read(); len(read) == 0 {
+					continue
+				} else {
+					version = common.MakeTxnId(read)
+				}
+			default:
+				continue
+			}
 			vUUId := common.MakeVarUUId(action.VarId())
-			version := common.MakeTxnId(action.Version())
 			cache[*vUUId] = &VerClock{version: version}
 		}
 	}
@@ -86,11 +100,14 @@ func (sm *SubscriptionManager) createUnsubscribeTxn(cache *Cache) (*cmsgs.Client
 		}
 		action := actions.At(idx)
 		idx++
-		action.SetActionType(cmsgs.CLIENTACTIONTYPE_DELSUBSCRIPTION)
 		action.SetVarId(vUUId[:])
-		action.SetModified()
-		mod := action.Modified()
-		mod.SetValue(sm.Id[:])
+		meta := action.Meta()
+		meta.SetDelSub(sm.Id[:])
+		value := action.Value()
+		value.SetExisting()
+		existing := value.Existing()
+		existing.Modify().SetNot()
+		existing.SetRead(true)
 	}
 
 	return &ctxn, roots
@@ -121,15 +138,16 @@ func (sm *SubscriptionManager) Unsubscribe(lc localconnection.LocalConnection) e
 			actions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 			for idy, m := 0, actions.Len(); idy < m; idy++ {
 				action := actions.At(idy)
+				value := action.Value()
+				if value.Which() != msgs.ACTIONVALUE_EXISTING {
+					continue
+				}
 				vUUId := common.MakeVarUUId(action.VarId())
 				_, found := sm.cache[*vUUId]
 				if !found {
 					continue
 				}
 				c := cache.m[*vUUId]
-				if action.ActionType() != msgs.ACTIONTYPE_WRITEONLY {
-					continue
-				}
 				cmp := c.version.Compare(txnId)
 				clockElem := clock.At(vUUId)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
@@ -205,6 +223,9 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 
 		utils.DebugLog(sm.logger, "debug", "Outcome known for subscription txn.", "SubId", sm.subId, "TxnId", txn.Id)
 
+		// The point of newer is that within each subscription, we can
+		// get updates out of order, so at this stage we're just
+		// correcting the order of updates within a subscription.
 		newer := false
 		actions := txn.Actions(true).Actions()
 		clock := vectorclock.VectorClockFromData(outcome.Commit(), true)
@@ -220,10 +241,9 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 			// have the value to which it refers. So to keep matters
 			// simple, we ignore all actions which don't contain the real
 			// value:
-			actionType := action.ActionType()
-			if actionType != msgs.ACTIONTYPE_CREATE &&
-				actionType != msgs.ACTIONTYPE_WRITEONLY &&
-				actionType != msgs.ACTIONTYPE_READWRITE {
+			actionValue := action.Value()
+			if actionValue.Which() != msgs.ACTIONVALUE_EXISTING ||
+				actionValue.Existing().Modify().Which() != msgs.ACTIONVALUEEXISTINGMODIFY_WRITE {
 				continue
 			}
 
