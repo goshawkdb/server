@@ -15,7 +15,7 @@ import (
 	"goshawkdb.io/server/utils/vectorclock"
 )
 
-type SubscriptionConsumer func(txn *txnreader.TxnReader, tr *TransactionRecord) error
+type SubscriptionConsumer func(sm *SubscriptionManager, txn *txnreader.TxnReader, outcome *msgs.Outcome) error
 
 func NewSubscriptionManager(subId *common.TxnId, tr *TransactionRecord, consumer SubscriptionConsumer) *SubscriptionManager {
 	actions := txnreader.TxnActionsFromData(tr.server.Actions(), true).Actions()
@@ -232,28 +232,33 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
 			action := actions.At(idx)
 
-			// A normal update via a badread would never contain a ROLL
-			// action. But this isn't a badread - this is the committed
-			// txn, and so that really can contain rolls,
-			// addSubscriptions, delSubscriptions. This then becomes a
-			// problem when we factor in that we can receive txns in any
-			// order: we could receive a roll and judge it newer, but not
-			// have the value to which it refers. So to keep matters
-			// simple, we ignore all actions which don't contain the real
-			// value:
-			actionValue := action.Value()
-			if actionValue.Which() != msgs.ACTIONVALUE_EXISTING ||
-				actionValue.Existing().Modify().Which() != msgs.ACTIONVALUEEXISTINGMODIFY_WRITE {
+			vUUId := common.MakeVarUUId(action.VarId())
+			vc, found := sm.cache[*vUUId]
+			if !found {
 				continue
 			}
 
-			vUUId := common.MakeVarUUId(action.VarId())
-			if verClock, found := sm.cache[*vUUId]; found {
-				clockElem := clock.At(vUUId)
-				if clockElem > verClock.clockElem || (clockElem == verClock.clockElem && txn.Id.Compare(verClock.version) == common.GT) {
+			// A normal update via a badread would never contain a ROLL
+			// action. But this isn't a badread - this is the committed
+			// txn, and so that really can contain rolls, addSubs,
+			// delSubs etc. It doesn't matter if we don't have the value,
+			// we just need to be a bit more careful.
+			clockElem := clock.At(vUUId)
+			if txnreader.IsReadOnly(&action) {
+				clockElem--
+				txnId := common.MakeTxnId(action.Value().Existing().Read())
+				if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
 					newer = true
-					verClock.version = txn.Id
-					verClock.clockElem = clockElem
+					vc.version = txnId
+					vc.clockElem = clockElem
+				}
+
+			} else {
+				txnId := txn.Id
+				if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
+					newer = true
+					vc.version = txnId
+					vc.clockElem = clockElem
 				}
 			}
 		}
@@ -263,7 +268,7 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 		}
 
 		if newer {
-			err = sm.consumer(txn, sm.TransactionRecord)
+			err = sm.consumer(sm, txn, outcome)
 		} else {
 			utils.DebugLog(sm.logger, "debug", "Ignoring non-newer outcome.", "SubId", sm.subId, "TxnId", txn.Id)
 		}

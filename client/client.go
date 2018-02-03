@@ -21,6 +21,9 @@ func (tr *TransactionRecord) formServerTxn(translationCallback loco.TranslationC
 	txnCap.SetTopologyVersion(tr.topology.Version)
 
 	clientActions := tr.client.Actions()
+	if clientActions.Len() == 0 {
+		return false, errors.New("No actions found.")
+	}
 	tr.objs = make(map[common.VarUUId]*Cached, clientActions.Len())
 
 	actionsListSeg := capn.NewBuffer(nil)
@@ -102,6 +105,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 		clientMeta, actionMeta := clientAction.Meta(), action.Meta()
 		readRequired := false
 		readOrCreateRequired := false
+		actionFound := false
 
 		if clientMeta.AddSub() {
 			if !c.caps.CanRead() {
@@ -138,6 +142,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 				actionCreate.SetReferences(*actionRefs)
 			}
 			readOrCreateRequired = false
+			actionFound = true
 
 		case cmsgs.CLIENTACTIONVALUE_EXISTING:
 			clientExisting := clientValue.Existing()
@@ -156,6 +161,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 				}
 				actionModify.SetRoll()
 				readRequired = true
+				actionFound = true
 
 			case cmsgs.CLIENTACTIONVALUEEXISTINGMODIFY_WRITE:
 				clientWrite := clientModify.Write()
@@ -167,6 +173,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 				} else {
 					actionWrite.SetReferences(*actionRefs)
 				}
+				actionFound = true
 
 			default:
 				panic(fmt.Sprintf("%v: %v: Unexpected action value existing modify: %v", tr.origId, vUUId, clientModify.Which()))
@@ -181,6 +188,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 				actionExisting.SetRead(c.version[:])
 				readRequired = false
 				readOrCreateRequired = false
+				actionFound = true
 			}
 		default:
 			panic(fmt.Sprintf("%v: %v: Unexpected action value: %v", tr.origId, vUUId, clientValue.Which()))
@@ -190,6 +198,8 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 			return nil, false, fmt.Errorf("Illegal action in %v (read required and not provided)", vUUId)
 		} else if readOrCreateRequired {
 			return nil, false, fmt.Errorf("Illegal action in %v (read or create required and not provided)", vUUId)
+		} else if !actionFound {
+			return nil, false, fmt.Errorf("Illegal action in %v (no action found)", vUUId)
 		}
 
 		if err = c.EnsureHashCodes(); err != nil {

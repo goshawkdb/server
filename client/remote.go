@@ -46,23 +46,27 @@ import (
 type RemoteTransactionSubmitter struct {
 	*TransactionSubmitter
 	minTxnCount    uint64
+	curCounter     uint64
 	namespace      []byte
 	cache          *Cache
 	bbe            *binarybackoff.BinaryBackoffEngine
 	metrics        *cconn.ClientTxnMetrics
+	subCont        RemoteTxnCompletionContinuation
 	cont           RemoteTxnCompletionContinuation
 	resubmitCount  int
 	pendingUpdates []func() error
 }
 
-func NewRemoteTransactionSubmitter(namespace []byte, connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger, roots map[common.VarUUId]*types.PosCapVer, metrics *cconn.ClientTxnMetrics) *RemoteTransactionSubmitter {
+func NewRemoteTransactionSubmitter(namespace []byte, connPub sconn.ServerConnectionPublisher, actor actor.EnqueueActor, rng *rand.Rand, logger log.Logger, roots map[common.VarUUId]*types.PosCapVer, metrics *cconn.ClientTxnMetrics, subCont RemoteTxnCompletionContinuation) *RemoteTransactionSubmitter {
 	return &RemoteTransactionSubmitter{
 		TransactionSubmitter: NewTransactionSubmitter(connPub, actor, rng, logger),
 		minTxnCount:          0,
+		curCounter:           0,
 		namespace:            namespace,
 		cache:                NewCache(rng, roots),
 		bbe:                  binarybackoff.NewBinaryBackoffEngine(rng, server.SubmissionMinSubmitDelay, server.SubmissionMaxSubmitDelay),
 		metrics:              metrics,
+		subCont:              subCont,
 	}
 }
 
@@ -74,7 +78,7 @@ func (rts *RemoteTransactionSubmitter) TopologyChanged(topology *configuration.T
 	return rts.TransactionSubmitter.TopologyChanged(topology)
 }
 
-type RemoteTxnCompletionContinuation func(*cmsgs.ClientTxnOutcome, error) error
+type RemoteTxnCompletionContinuation func(origTxnId, txnId *common.TxnId, outcome *cmsgs.ClientTxnOutcome, err error) error
 
 func (rts *RemoteTransactionSubmitter) Committed(txn *txnreader.TxnReader, tr *TransactionRecord) error {
 	cont := rts.cont
@@ -129,7 +133,7 @@ func (rts *RemoteTransactionSubmitter) Committed(txn *txnreader.TxnReader, tr *T
 		}
 	}
 
-	if err := cont(&clientOutcome, nil); err != nil {
+	if err := cont(tr.origId, txn.Id, &clientOutcome, nil); err != nil {
 		return err
 	} else {
 		return rts.processPendingUpdates()
@@ -193,7 +197,7 @@ func (rts *RemoteTransactionSubmitter) Aborted(txn *txnreader.TxnReader, tr *Tra
 				rts.metrics.TxnRerun.Inc()
 				rts.metrics.TxnResubmit.Add(float64(rts.resubmitCount))
 			}
-			if err := cont(&clientOutcome, nil); err != nil {
+			if err := cont(tr.origId, txn.Id, &clientOutcome, nil); err != nil {
 				return err
 			} else {
 				return rts.processPendingUpdates()
@@ -230,9 +234,9 @@ func (rts *RemoteTransactionSubmitter) SubmitRemoteClientTransaction(txnId *comm
 
 func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, txnId *common.TxnId, txn *cmsgs.ClientTxn, cont RemoteTxnCompletionContinuation, forceSubmission bool) error {
 	if rts.cont != nil {
-		return cont(nil, errors.New("Live Transaction already exists."))
+		return cont(origTxnId, txnId, nil, errors.New("Live Transaction already exists."))
 	} else if !bytes.Equal(txnId[8:], rts.namespace) || binary.BigEndian.Uint64(txnId[:8]) < rts.minTxnCount {
-		return cont(nil, fmt.Errorf("Illegal txnId %v", txnId))
+		return cont(origTxnId, txnId, nil, fmt.Errorf("Illegal txnId %v", txnId))
 	}
 
 	if rts.topology.IsBlank() {
@@ -259,10 +263,10 @@ func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, 
 			clientOutcome.SetCounter(0)
 			clientActions := cmsgs.NewClientActionList(clientSeg, 0)
 			clientOutcome.SetAbort(clientActions)
-			return cont(&clientOutcome, nil)
+			return cont(origTxnId, txnId, &clientOutcome, nil)
 
 		} else if err != nil {
-			return cont(nil, err)
+			return cont(origTxnId, txnId, nil, err)
 
 		} else if addsSubs {
 			tr.subManager = NewSubscriptionManager(txnId, tr, rts.SubscriptionConsumer)
@@ -289,17 +293,125 @@ func (rts *RemoteTransactionSubmitter) validateCreatesCallback(clientAction *cms
 	return nil
 }
 
-func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(txn *txnreader.TxnReader, tr *TransactionRecord) error {
+func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionManager, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	if rts.pendingUpdates != nil {
 		rts.pendingUpdates = append(rts.pendingUpdates, func() error {
-			return rts.SubscriptionConsumer(txn, tr)
+			return rts.SubscriptionConsumer(sm, txn, outcome)
 		})
 		return nil
 	}
-	return nil
+
+	if len(sm.cache) == 0 { // the sub has been completely deleted
+		return nil
+	}
+
+	// here we need to form updates for the client, but based off real
+	// txns, not badreads.
+	actions := txn.Actions(true).Actions()
+	clock := vectorclock.VectorClockFromData(outcome.Commit(), true)
+
+	clientSeg := capn.NewBuffer(nil)
+	clientActions := make([]*cmsgs.ClientAction, 0, actions.Len())
+
+	counter := rts.curCounter + 1
+
+	for idx, l := 0, actions.Len(); idx < l; idx++ {
+		action := actions.At(idx)
+		vUUId := common.MakeVarUUId(action.VarId())
+		value := action.Value()
+
+		// if we're subscribed to vUUId then we must be able to read it,
+		// and we must send it down even if the cache version is 0.
+		_, subscribed := sm.cache[*vUUId]
+		c, found := rts.cache.m[*vUUId]
+		if !subscribed && (!found || c.version.IsZero() || !c.caps.CanRead()) {
+			continue
+		}
+
+		txnId := txn.Id
+		clockElem := clock.At(vUUId)
+		if txnreader.IsWriteWithValue(&action) {
+			if clockElem > c.clockElem || (clockElem == c.clockElem && c.version.Compare(txn.Id) == common.LT) {
+				clientAction := cmsgs.NewClientAction(clientSeg)
+				clientValue := clientAction.Value()
+				clientValue.SetExisting()
+				clientModify := clientValue.Existing().Modify()
+				clientModify.SetWrite()
+				clientWrite := clientModify.Write()
+				switch value.Which() {
+				case msgs.ACTIONVALUE_CREATE:
+					create := value.Create()
+					clientWrite.SetValue(create.Value())
+					c.refs = create.References().ToArray()
+				case msgs.ACTIONVALUE_EXISTING:
+					write := value.Existing().Modify().Write()
+					clientWrite.SetValue(write.Value())
+					c.refs = write.References().ToArray()
+				}
+
+				c.version = txnId
+				c.clockElem = clockElem
+				c.counter = counter
+				rts.expandRefs(c)
+
+				clientRefs := cmsgs.NewClientVarIdPosList(clientSeg, len(c.refs))
+				for idy, ref := range c.refs {
+					clientRef := clientRefs.At(idy)
+					clientRef.SetVarId(ref.Id())
+					clientRef.SetCapability(ref.Capability())
+				}
+				clientWrite.SetReferences(clientRefs)
+				clientActions = append(clientActions, &clientAction)
+			}
+
+		} else {
+			// we don't have a value, so the only thing we can do is
+			// delete from the client...
+			if c.version.IsZero() {
+				continue // no point deleting twice!
+			}
+			// in here we need to not only cope with readOnly actions,
+			// but also rolls, addSubs, delSubs - actions with no known
+			// value.
+			if txnreader.IsReadOnly(&action) {
+				clockElem-- // because the corresponding write would be 1 before.
+				txnId = common.MakeTxnId(value.Existing().Read())
+			}
+			if clockElem > c.clockElem || (clockElem == c.clockElem && c.version.Compare(txnId) == common.LT) {
+				clientAction := cmsgs.NewClientAction(clientSeg)
+				clientValue := clientAction.Value()
+				clientValue.SetMissing()
+				clientActions = append(clientActions, &clientAction)
+
+				c.counter = counter
+				c.version = common.VersionZero
+				c.clockElem = 0
+				c.refs = nil
+			}
+		}
+	}
+
+	if len(clientActions) == 0 {
+		return nil
+	} else {
+		rts.curCounter = counter
+		clientOutcome := cmsgs.NewClientTxnOutcome(clientSeg)
+		clientOutcome.SetId(sm.Id[:])
+		clientOutcome.SetFinalId([]byte{})
+		clientOutcome.SetCounter(counter)
+		clientActionsCap := cmsgs.NewClientActionList(clientSeg, len(clientActions))
+		for idx, action := range clientActions {
+			clientActionsCap.Set(idx, *action)
+		}
+		clientOutcome.SetAbort(clientActionsCap)
+		return rts.subCont(sm.Id, txn.Id, &clientOutcome, nil)
+	}
 }
 
 func (rts *RemoteTransactionSubmitter) processPendingUpdates() error {
+	if rts.cont != nil {
+		return nil
+	}
 	updates := rts.pendingUpdates
 	rts.pendingUpdates = nil
 	for _, update := range updates {
@@ -345,17 +457,18 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "canRead", false)
 				continue
 			}
+			cmp := c.version.Compare(txnId)
+			if cmp == common.EQ && clockElem != c.clockElem {
+				panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
+			}
 			value := action.Value()
 			switch value.Which() {
 			case msgs.ACTIONVALUE_MISSING:
 				// In this context, MISSING means we know there was a
-				// write of vUUId by txnId, but we have no idea what the
-				// value written was. The only safe thing we can do is
-				// remove it from the client.
-				cmp := c.version.Compare(txnId)
-				if cmp == common.EQ && clockElem != c.clockElem {
-					panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
-				}
+				// write of vUUId by txnId (i.e. txnId is the read
+				// version, *not* the Id of some txn that read vUUId), so
+				// we have no idea what the value written was. The only
+				// safe thing we can do is remove it from the client.
 				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "MISSING", "clockElem", clockElem, "clockElemCached", c.clockElem)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 					c.version = common.VersionZero
@@ -365,10 +478,6 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 				}
 
 			case msgs.ACTIONVALUE_EXISTING:
-				cmp := c.version.Compare(txnId)
-				if cmp == common.EQ && clockElem != c.clockElem {
-					panic(fmt.Sprintf("Clock version changed on missing for %v@%v (new:%v != old:%v)", vUUId, txnId, clockElem, c.clockElem))
-				}
 				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "WRITEONLY", "clockElem", clockElem, "clockElemCached", c.clockElem)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 					// If the above condition fails, then the update
@@ -394,20 +503,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 					}
 					results[*vUUId] = &valueCached{c: c, val: value}
 					c.refs = write.References().ToArray()
-					for _, ref := range c.refs {
-						vUUId := common.MakeVarUUId(ref.Id())
-						caps := common.NewCapability(ref.Capability())
-						if c, found := rts.cache.m[*vUUId]; found {
-							c.caps = c.caps.Union(caps)
-						} else {
-							pos := common.Positions(ref.Positions())
-							rts.cache.AddCached(vUUId, &Cached{
-								VerClock:  VerClock{version: common.VersionZero},
-								caps:      caps,
-								positions: &pos,
-							})
-						}
-					}
+					rts.expandRefs(c)
 				}
 
 			default:
@@ -416,4 +512,21 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 		}
 	}
 	return results
+}
+
+func (rts *RemoteTransactionSubmitter) expandRefs(c *Cached) {
+	for _, ref := range c.refs {
+		vUUId := common.MakeVarUUId(ref.Id())
+		caps := common.NewCapability(ref.Capability())
+		if c, found := rts.cache.m[*vUUId]; found {
+			c.caps = c.caps.Union(caps)
+		} else {
+			pos := common.Positions(ref.Positions())
+			rts.cache.AddCached(vUUId, &Cached{
+				VerClock:  VerClock{version: common.VersionZero},
+				caps:      caps,
+				positions: &pos,
+			})
+		}
+	}
 }

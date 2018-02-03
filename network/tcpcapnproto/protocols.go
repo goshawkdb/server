@@ -498,7 +498,7 @@ func (tcc *TLSCapnpClient) Run(conn *network.Connection) error {
 		tcc.createReader()
 
 		cm := tcc.TLSCapnpHandshaker.connectionManager
-		tcc.submitter = client.NewRemoteTransactionSubmitter(tcc.namespace, cm, tcc.Connection, tcc.Rng, tcc.logger, tcc.rootsPosCapVer, metrics)
+		tcc.submitter = client.NewRemoteTransactionSubmitter(tcc.namespace, cm, tcc.Connection, tcc.Rng, tcc.logger, tcc.rootsPosCapVer, metrics, tcc.sendOutcome)
 		if err := tcc.submitter.TopologyChanged(tcc.topology); err != nil {
 			return err
 		}
@@ -642,28 +642,16 @@ func (tcc *TLSCapnpClient) ReadAndHandleOneMsg() error {
 
 func (tcc *TLSCapnpClient) submitTransaction(ctxn cmsgs.ClientTxn) {
 	origTxnId := common.MakeTxnId(ctxn.Id())
-	tcc.submitter.SubmitRemoteClientTransaction(origTxnId, &ctxn, func(clientOutcome *cmsgs.ClientTxnOutcome, err error) error {
-		switch {
-		case err != nil: // error is non-fatal to connection
-			return tcc.SendMessage(tcc.clientTxnError(&ctxn, err, origTxnId))
-		case clientOutcome == nil: // shutdown
-			return nil
-		default:
-			seg := capn.NewBuffer(nil)
-			msg := cmsgs.NewRootClientMessage(seg)
-			msg.SetClientTxnOutcome(*clientOutcome)
-			return tcc.SendMessage(common.SegToBytes(msg.Segment))
-		}
-	})
+	tcc.submitter.SubmitRemoteClientTransaction(origTxnId, &ctxn, tcc.sendOutcome)
 }
 
-func (tcc *TLSCapnpClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, origTxnId *common.TxnId) []byte {
+func (tcc *TLSCapnpClient) clientTxnError(origTxnId, txnId *common.TxnId, err error) []byte {
 	seg := capn.NewBuffer(nil)
 	msg := cmsgs.NewRootClientMessage(seg)
 	outcome := cmsgs.NewClientTxnOutcome(seg)
 	msg.SetClientTxnOutcome(outcome)
 	outcome.SetId(origTxnId[:])
-	outcome.SetFinalId(ctxn.Id())
+	outcome.SetFinalId(txnId[:])
 	outcome.SetError(err.Error())
 	return common.SegToBytes(seg)
 }
@@ -672,5 +660,19 @@ func (tcc *TLSCapnpClient) createReader() {
 	if tcc.reader == nil {
 		tcc.reader = common.NewSocketReader(tcc.Connection, tcc)
 		tcc.reader.Start()
+	}
+}
+
+func (tcc *TLSCapnpClient) sendOutcome(origTxnId, txnId *common.TxnId, clientOutcome *cmsgs.ClientTxnOutcome, err error) error {
+	switch {
+	case err != nil: // error is non-fatal to connection
+		return tcc.SendMessage(tcc.clientTxnError(origTxnId, txnId, err))
+	case clientOutcome == nil: // shutdown
+		return nil
+	default:
+		seg := capn.NewBuffer(nil)
+		msg := cmsgs.NewRootClientMessage(seg)
+		msg.SetClientTxnOutcome(*clientOutcome)
+		return tcc.SendMessage(common.SegToBytes(msg.Segment))
 	}
 }

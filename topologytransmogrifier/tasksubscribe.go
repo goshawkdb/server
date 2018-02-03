@@ -75,9 +75,12 @@ func (task *subscribe) Tick() (bool, error) {
 	actionsWrapper.SetActions(actions)
 	action := actions.At(0)
 	action.SetVarId(configuration.TopologyVarUUId[:])
-	action.SetVersion(topology.DBVersion[:])
-	action.SetUnmodified()
-	action.SetActionType(msgs.ACTIONTYPE_ADDSUBSCRIPTION)
+	value := action.Value()
+	value.SetExisting()
+	value.Existing().SetRead(topology.DBVersion[:])
+	value.Existing().Modify().SetNot()
+	meta := action.Meta()
+	meta.SetAddSub(true)
 	txn.SetActions(common.SegToBytes(actionsSeg))
 
 	allocs := msgs.NewAllocationList(seg, len(active)+len(passive))
@@ -118,19 +121,30 @@ func (task *subscribe) Tick() (bool, error) {
 	return task.runTxnMsg.Exec()
 }
 
-func (task *subscribe) SubscriptionConsumer(txn *txnreader.TxnReader, tr *client.TransactionRecord) error {
+func (task *subscribe) SubscriptionConsumer(sm *client.SubscriptionManager, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		if bytes.Compare(action.VarId(), configuration.TopologyVarUUId[:]) != 0 {
 			continue
+		} else if !txnreader.IsWriteWithValue(&action) {
+			// we choose to ignore rolls, addSubs etc etc
+			continue
 		}
 
-		// We only get passed actions which contain the real value, so
-		// we don't need to check actionType.
-		mod := action.Modified()
-		value := mod.Value()
-		refs := mod.References()
+		actionValue := action.Value()
+		var value []byte
+		var refs msgs.VarIdPos_List
+		if actionValue.Which() == msgs.ACTIONVALUE_CREATE {
+			create := actionValue.Create()
+			value = create.Value()
+			refs = create.References()
+		} else {
+			write := actionValue.Existing().Modify().Write()
+			value = write.Value()
+			refs = write.References()
+		}
+
 		if topology, err := configuration.TopologyFromCap(txn.Id, &refs, value); err != nil {
 			return err
 		} else {

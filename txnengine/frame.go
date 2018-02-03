@@ -492,32 +492,31 @@ func (fo *frameOpen) ReadLearnt(action *localAction) bool {
 	}
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
 	if actClockElem == 0 {
-		panic("About to do 0 - 1 in uint64")
+		panic(fmt.Sprintf("About to do 0 - 1 in uint64 (%v)", fo.frame))
 	}
-	actClockElem--
+	actClockElem-- // the corresponding write would be 1 less than the read.
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
-	if action.read.Compare(fo.frameTxnId) != common.EQ {
-		// The write would be one less than the read. We want to know if
-		// this read is of a write before or after our current frame
-		// write. If the clock elems are equal then the read _must_ be
-		// of a write that is after this frame write and we created this
-		// frame "early", so we should store the read. So that means we
-		// only should ignore this read if its write clock elem is < our
-		// frame write clock elem.
-		if actClockElem < reqClockElem {
-			utils.DebugLog(fo.ensureLogger(), "debug", "ReadLearnt. Ignored. Too Old.", "TxnId", txn.Id)
-			fo.maybeStartRoll()
-			return false
-		} else {
-			utils.DebugLog(fo.ensureLogger(), "debug", "ReadLearnt. Future frame.", "TxnId", txn.Id)
-			fo.learntFutureReads = append(fo.learntFutureReads, action)
-			action.frame = fo.frame
-			return true
+	// compare with action.read, not action.Id:
+	if cmp := action.read.Compare(fo.frameTxnId); cmp == common.EQ {
+		// it's a read of this frame, so it should have a matching
+		// clockElem:
+		if actClockElem != reqClockElem {
+			panic(fmt.Sprintf("%v oddness in read learnt: read is of right version, but clocks differ (action=%v != frame=%v) (%v)", fo.frame, actClockElem, reqClockElem, action))
 		}
+	} else if actClockElem < reqClockElem || (actClockElem == reqClockElem && cmp == common.LT) {
+		// The read is definitely of a txn which is before this
+		// frame. So we can ignore it.
+		utils.DebugLog(fo.ensureLogger(), "debug", "ReadLearnt. Ignored. Too Old.", "TxnId", txn.Id)
+		fo.maybeStartRoll()
+		return false
+	} else {
+		// It's a read of a future frame.
+		utils.DebugLog(fo.ensureLogger(), "debug", "ReadLearnt. Future frame.", "TxnId", txn.Id)
+		fo.learntFutureReads = append(fo.learntFutureReads, action)
+		action.frame = fo.frame
+		return true
 	}
-	if actClockElem != reqClockElem {
-		panic(fmt.Sprintf("%v oddness in read learnt: read is of right version, but clocks differ (action=%v != frame=%v) (%v)", fo.frame, actClockElem, reqClockElem, action))
-	}
+	// We only get here if action is a read of this frame.
 	if fo.reads.Get(action) == nil {
 		fo.reads.Insert(action, committed)
 		action.frame = fo.frame
@@ -552,7 +551,12 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 	}
 	actClockElem := action.outcomeClock.At(fo.v.UUId)
 	reqClockElem := fo.frameTxnClock.At(fo.v.UUId)
-	if actClockElem < reqClockElem || (actClockElem == reqClockElem && action.Id.Compare(fo.frameTxnId) == common.LT) {
+	if cmp := action.Id.Compare(fo.frameTxnId); cmp == common.EQ {
+		utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Duplicate of current frame.", "TxnId", txn.Id)
+		fo.maybeStartRoll()
+		return false
+	} else if actClockElem < reqClockElem || (actClockElem == reqClockElem && cmp == common.LT) {
+		// The action txn definitely came before our frame txn.
 		if action.IsMeta() || action.IsImmigrant() {
 			utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt; historical meta", "TxnId", txn.Id)
 			action.frame = fo.frame
@@ -565,15 +569,11 @@ func (fo *frameOpen) WriteLearnt(action *localAction) bool {
 			return false
 		}
 	}
-	if action.Id.Compare(fo.frameTxnId) == common.EQ {
-		utils.DebugLog(fo.ensureLogger(), "debug", "WriteLearnt. Duplicate of current frame.", "TxnId", txn.Id)
-		fo.maybeStartRoll()
-		return false
-	}
 	if actClockElem == reqClockElem {
-		// ok, so ourself and this txn were actually siblings, but we
-		// created this frame before we knew that. By definition, there
-		// cannot be any committed reads of us.
+		// ok, so ourself and this txn were actually siblings (and
+		// action txn came after our frame txn), but we created this
+		// frame before we knew that. By definition, there cannot be any
+		// committed reads of us.
 		if fo.reads.Len() > fo.uncommittedReads {
 			panic(fmt.Sprintf("%v (%v) Found committed reads where there should have been none for action %v (%v)", fo.frame, fo.frameTxnClock, action, action.outcomeClock))
 		}
@@ -705,9 +705,9 @@ func (fo *frameOpen) calculateWriteVoteClock() {
 
 		// Everything in written is also in clock. But the value in
 		// written can be lower than in clock because a txn may have a
-		// future read of a var with a higher clock elem.  But if the
-		// mask is > then the value in clock then it can't be the case
-		// that the value in mask is <= the value in written.
+		// future read of a var with a higher clock elem. So if the mask
+		// is > the value in clock then it can't be the case that the
+		// value in mask is <= the value in written.
 
 		if fo.mask.Len()+written.Len() > clock.Len() {
 			// mask is bigger, so loop through clock

@@ -156,17 +156,19 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 
 	seg := capn.NewBuffer(nil)
 	ctxn := cmsgs.NewClientTxn(seg)
-	ctxn.SetRetry(false)
 
 	actions := cmsgs.NewClientActionList(seg, 1)
 
 	action := actions.At(0)
 	action.SetVarId(msg.root.VarUUId[:])
-	action.SetModified()
-	mod := action.Modified()
-	mod.SetValue(msg.json)
-	mod.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
-	action.SetActionType(cmsgs.CLIENTACTIONTYPE_READWRITE)
+	value := action.Value()
+	value.SetExisting()
+	existing := value.Existing()
+	existing.SetRead(true)
+	existing.Modify().SetWrite()
+	write := existing.Modify().Write()
+	write.SetValue(msg.json)
+	write.SetReferences(cmsgs.NewClientVarIdPosList(seg, 0))
 	ctxn.SetActions(actions)
 
 	varPosMap := make(map[common.VarUUId]*types.PosCapVer)
@@ -180,7 +182,7 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 
 	go func() {
 		_, result, err := msg.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)
-		msg.EnqueueFuncAsync(func() (bool, error) { return msg.execPart2(result, err) })
+		msg.EnqueueFuncAsync(func() (bool, error) { return msg.processOutcome(result, err) })
 	}()
 	msg.backoff.Advance()
 	msg.backoff.After(func() { msg.EnqueueMsg(msg) })
@@ -188,7 +190,7 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 	return false, nil
 }
 
-func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool, error) {
+func (msg *configPublisherMsg) processOutcome(result *msgs.Outcome, err error) (bool, error) {
 	if msg.publishing != msg {
 		return false, nil
 	}
@@ -223,14 +225,16 @@ func (msg *configPublisherMsg) execPart2(result *msgs.Outcome, err error) (bool,
 		updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 		for idy, m := 0, updateActions.Len(); idy < m && !found; idy++ {
 			updateAction := updateActions.At(idy)
-			if found = bytes.Equal(msg.root.VarUUId[:], updateAction.VarId()); found {
-				if updateAction.ActionType() == msgs.ACTIONTYPE_WRITEONLY {
-					msg.vsn = common.MakeTxnId(update.TxnId())
-					value = updateAction.Modified().Value()
-				} else {
-					// must be MISSING, which I'm really not sure should ever happen!
-					msg.vsn = common.VersionZero
-				}
+			if !bytes.Equal(msg.root.VarUUId[:], updateAction.VarId()) {
+				continue
+			}
+			found = true
+			if txnreader.IsWriteWithValue(&updateAction) {
+				msg.vsn = common.MakeTxnId(update.TxnId())
+				value = updateAction.Value().Existing().Modify().Write().Value()
+				break
+			} else {
+				panic("Stats publisher got MISSING update on txn!")
 			}
 		}
 	}

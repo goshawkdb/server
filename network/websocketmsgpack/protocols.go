@@ -172,7 +172,7 @@ func (wmpc *wssMsgPackClient) Run(conn *network.Connection) error {
 		wmpc.createBeater()
 		wmpc.createReader()
 
-		wmpc.submitter = client.NewRemoteTransactionSubmitter(wmpc.self, wmpc.bootCount, wmpc.connectionManager, wmpc.Connection, wmpc.Rng, wmpc.logger, wmpc.rootsPosCapVer, metrics)
+		wmpc.submitter = client.NewRemoteTransactionSubmitter(wmpc.namespace, wmpc.connectionManager, wmpc.Connection, wmpc.Rng, wmpc.logger, wmpc.rootsPosCapVer, metrics, wmpc.sendOutcome)
 		if err := wmpc.submitter.TopologyChanged(wmpc.topology); err != nil {
 			return err
 		}
@@ -309,27 +309,16 @@ func (wmpc *wssMsgPackClient) submitTransaction(ctxn *cmsgs.ClientTxn) error {
 	seg := capn.NewBuffer(nil)
 	ctxnCapn, err := ctxn.ToCapnp(seg)
 	if err != nil { // error is non-fatal to connection
-		return wmpc.beater.SendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
+		return wmpc.beater.SendMessage(wmpc.clientTxnError(origTxnId, origTxnId, err))
 	}
-	return wmpc.submitter.SubmitRemoteClientTransaction(origTxnId, ctxnCapn, func(clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
-		switch {
-		case err != nil:
-			return wmpc.beater.SendMessage(wmpc.clientTxnError(ctxn, err, origTxnId))
-		case clientOutcome == nil: // shutdown
-			return nil
-		default:
-			msg := &cmsgs.ClientMessage{ClientTxnOutcome: &cmsgs.ClientTxnOutcome{}}
-			msg.ClientTxnOutcome.FromCapnp(*clientOutcome)
-			return wmpc.Send(msg)
-		}
-	})
+	return wmpc.submitter.SubmitRemoteClientTransaction(origTxnId, ctxnCapn, wmpc.sendOutcome)
 }
 
-func (wmpc *wssMsgPackClient) clientTxnError(ctxn *cmsgs.ClientTxn, err error, origTxnId *common.TxnId) msgp.Encodable {
+func (wmpc *wssMsgPackClient) clientTxnError(origTxnId, txnId *common.TxnId, err error) msgp.Encodable {
 	msg := &cmsgs.ClientMessage{
 		ClientTxnOutcome: &cmsgs.ClientTxnOutcome{
 			Id:      origTxnId[:],
-			FinalId: ctxn.Id,
+			FinalId: txnId[:],
 			Error:   err.Error(),
 		},
 	}
@@ -347,6 +336,19 @@ func (wmpc *wssMsgPackClient) createBeater() {
 	if wmpc.beater == nil {
 		wmpc.beater = NewWssBeater(wmpc, wmpc.Connection)
 		wmpc.beater.Start()
+	}
+}
+
+func (wmpc *wssMsgPackClient) sendOutcome(origTxnId, txnId *common.TxnId, clientOutcome *capcmsgs.ClientTxnOutcome, err error) error {
+	switch {
+	case err != nil:
+		return wmpc.beater.SendMessage(wmpc.clientTxnError(origTxnId, txnId, err))
+	case clientOutcome == nil: // shutdown
+		return nil
+	default:
+		msg := &cmsgs.ClientMessage{ClientTxnOutcome: &cmsgs.ClientTxnOutcome{}}
+		msg.ClientTxnOutcome.FromCapnp(*clientOutcome)
+		return wmpc.Send(msg)
 	}
 }
 

@@ -170,3 +170,19 @@ func IsWrite(action *msgs.Action) bool {
 		panic(fmt.Sprintf("Unexpected action value: %v", value.Which()))
 	}
 }
+
+func IsReadOnly(action *msgs.Action) bool {
+	value := action.Value()
+	meta := action.Meta()
+	return value.Which() == msgs.ACTIONVALUE_EXISTING &&
+		len(value.Existing().Read()) != 0 &&
+		value.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
+		!meta.AddSub() && len(meta.DelSub()) == 0
+}
+
+func IsWriteWithValue(action *msgs.Action) bool {
+	value := action.Value()
+	return (value.Which() == msgs.ACTIONVALUE_EXISTING &&
+		value.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_WRITE) ||
+		value.Which() == msgs.ACTIONVALUE_CREATE
+}

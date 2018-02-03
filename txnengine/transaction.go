@@ -65,11 +65,11 @@ func (action *localAction) IsRead() bool {
 }
 
 func (action *localAction) IsWrite() bool {
-	return action.write || action.roll || action.addSub || action.delSub != nil
+	return action.write || action.roll || action.create != nil || action.addSub || action.delSub != nil
 }
 
 func (action *localAction) IsNoopWrite() bool {
-	return !action.write && (action.roll || action.addSub || action.delSub != nil)
+	return !action.write && action.create == nil && (action.roll || action.addSub || action.delSub != nil)
 }
 
 func (action *localAction) IsMeta() bool {

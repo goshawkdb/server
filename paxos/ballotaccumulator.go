@@ -382,25 +382,18 @@ func (br badReads) combine(rmBal *rmBallot) {
 		vUUId := common.MakeVarUUId(action.VarId())
 		clockElem := clock.At(vUUId)
 
-		actionValue := action.Value()
-		actionMeta := action.Meta()
-		isReadOnly := actionValue.Which() == msgs.ACTIONVALUE_EXISTING &&
-			len(actionValue.Existing().Read()) != 0 &&
-			actionValue.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
-			!actionMeta.AddSub() && len(actionMeta.DelSub()) == 0
-
 		if bra, found := br[*vUUId]; found {
 			bra.combine(&action, rmBal, txnId, clockElem)
-		} else if isReadOnly {
+		} else if txnreader.IsReadOnly(&action) {
+			if clockElem == 0 {
+				panic(fmt.Sprintf("About to do 0 - 1 in uint64 (%v, %v) (%v)", vUUId, clock, txnId))
+			}
 			br[*vUUId] = &badReadAction{
 				rmBallot:  rmBal,
 				vUUId:     vUUId,
-				txnId:     common.MakeTxnId(actionValue.Existing().Read()),
+				txnId:     common.MakeTxnId(action.Value().Existing().Read()),
 				clockElem: clockElem - 1,
 				action:    &action,
-			}
-			if clockElem == 0 {
-				panic(fmt.Sprintf("Just did 0 - 1 in int64 (%v, %v) (%v)", vUUId, clock, txnId))
 			}
 		} else {
 			br[*vUUId] = &badReadAction{
@@ -417,8 +410,8 @@ func (br badReads) combine(rmBal *rmBallot) {
 type badReadAction struct {
 	*rmBallot
 	vUUId     *common.VarUUId
-	txnId     *common.TxnId
-	clockElem uint64
+	txnId     *common.TxnId // if the action is readOnly, then txnId is the read version, not the action TxnId
+	clockElem uint64        // if the action is readOnly, clockElem is 1 less than the ballot clockElem
 	action    *msgs.Action
 }
 
@@ -431,19 +424,8 @@ func (bra *badReadAction) set(action *msgs.Action, rmBal *rmBallot, txnId *commo
 
 func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
 	braAction := bra.action
-	braValue := braAction.Value()
-	braMeta := braAction.Meta()
-	braIsReadOnly := braValue.Which() == msgs.ACTIONVALUE_EXISTING &&
-		len(braValue.Existing().Read()) != 0 &&
-		braValue.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
-		!braMeta.AddSub() && len(braMeta.DelSub()) == 0
-
-	newValue := newAction.Value()
-	newMeta := newAction.Meta()
-	newIsReadOnly := newValue.Which() == msgs.ACTIONVALUE_EXISTING &&
-		len(newValue.Existing().Read()) != 0 &&
-		newValue.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_NOT &&
-		!newMeta.AddSub() && len(newMeta.DelSub()) == 0
+	braIsReadOnly := txnreader.IsReadOnly(braAction)
+	newIsReadOnly := txnreader.IsReadOnly(newAction)
 
 	switch {
 	case !braIsReadOnly && !newIsReadOnly:
@@ -455,14 +437,12 @@ func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId
 	case braIsReadOnly && newIsReadOnly:
 		clockElem--
 		// If they read the same version, we really don't care.
-		if newRead := newValue.Existing().Read(); !bytes.Equal(braValue.Existing().Read(), newRead) {
-			// They read different versions, but which version was the latter?
-			if clockElem > bra.clockElem {
-				bra.set(newAction, rmBal, common.MakeTxnId(newRead), clockElem)
-			}
+		newRead := common.MakeTxnId(newAction.Value().Existing().Read())
+		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(newRead) == common.LT) {
+			bra.set(newAction, rmBal, newRead, clockElem)
 		}
 
-	case braIsReadOnly:
+	case braIsReadOnly: // so newAction is a write
 		if bytes.Equal(bra.txnId[:], txnId[:]) {
 			// The write will obviously be in the past of the
 			// existing read, but it's better to have the write
@@ -470,17 +450,23 @@ func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId
 			// value.
 			bra.set(newAction, rmBal, txnId, clockElem)
 		} else if clockElem > bra.clockElem {
-			// The write is after than the read
+			// The write is after than the read. Note: because bra is a
+			// read, it is not possible for the corresponding write to be
+			// a sibling of newAction (the read is between). Hence the
+			// simpler test in this case.
 			bra.set(newAction, rmBal, txnId, clockElem)
 		}
 
-	default: // Existing is not a read, but new is a read.
+	default: // bra is not a read, but newAction is a read.
 		clockElem--
-		// If the read is a read of the existing write, better to keep the write
-		if newRead := newValue.Existing().Read(); !bytes.Equal(bra.txnId[:], newRead) {
-			if clockElem > bra.clockElem {
-				// The read must be of some value which was written after our existing write.
-				bra.set(newAction, rmBal, common.MakeTxnId(newRead), clockElem)
+		newRead := common.MakeTxnId(newAction.Value().Existing().Read())
+		// If the new read is a read of bra's existing write, better to keep the write
+		if !bytes.Equal(bra.txnId[:], newRead[:]) {
+			if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(newRead) == common.LT) {
+				// The read must be of some value which was written after
+				// our existing write. And the write corresponding to our
+				// newAction can be a sibling of the bra in this case.
+				bra.set(newAction, rmBal, newRead, clockElem)
 			}
 		}
 	}
@@ -513,18 +499,18 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 			newAction := actionsList.At(idy)
 			newAction.SetVarId(action.VarId())
 			newValue := newAction.Value()
-			switch actionValue := action.Value(); actionValue.Which() {
+			switch value := action.Value(); value.Which() {
 			case msgs.ACTIONVALUE_CREATE:
 				newValue.SetExisting()
 				newModify := newValue.Existing().Modify()
 				newModify.SetWrite()
 				newWrite := newModify.Write()
-				actionCreate := actionValue.Create()
-				newWrite.SetValue(actionCreate.Value())
-				newWrite.SetReferences(actionCreate.References())
+				create := value.Create()
+				newWrite.SetValue(create.Value())
+				newWrite.SetReferences(create.References())
 
 			case msgs.ACTIONVALUE_EXISTING:
-				switch actionModify := actionValue.Existing().Modify(); actionModify.Which() {
+				switch modify := value.Existing().Modify(); modify.Which() {
 				case msgs.ACTIONVALUEEXISTINGMODIFY_NOT:
 					newValue.SetMissing()
 				case msgs.ACTIONVALUEEXISTINGMODIFY_WRITE:
@@ -532,17 +518,17 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 					newModify := newValue.Existing().Modify()
 					newModify.SetWrite()
 					newWrite := newModify.Write()
-					actionWrite := actionModify.Write()
-					newWrite.SetValue(actionWrite.Value())
-					newWrite.SetReferences(actionWrite.References())
+					write := modify.Write()
+					newWrite.SetValue(write.Value())
+					newWrite.SetReferences(write.References())
 				default:
 					panic(fmt.Sprintf("Unexpected action existing modify (%v) for badread of %v at %v",
-						actionModify.Which(), action.VarId(), txnId))
+						modify.Which(), action.VarId(), txnId))
 				}
 
 			default:
 				panic(fmt.Sprintf("Unexpected action value (%v) for badread of %v at %v",
-					actionValue.Which(), action.VarId(), txnId))
+					value.Which(), action.VarId(), txnId))
 			}
 
 			clock.SetVarIdMax(bra.vUUId, bra.clockElem)
