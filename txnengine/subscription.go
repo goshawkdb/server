@@ -26,6 +26,9 @@ func NewSubscriptions(vm *VarManager) *Subscriptions {
 func NewSubscriptionsFromData(vm *VarManager, data []byte) (*Subscriptions, error) {
 	s := NewSubscriptions(vm)
 	s.data = data
+	if s.data == nil { // don't trust capnp to return a non nil empty slice!
+		s.data = []byte{}
+	}
 	if len(data) > 0 {
 		seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 		if err != nil {
