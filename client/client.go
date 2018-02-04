@@ -108,14 +108,15 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 		actionFound := false
 
 		if clientMeta.AddSub() {
-			if !c.caps.CanRead() {
+			if !create && !c.caps.CanRead() {
 				return nil, false, fmt.Errorf("Illegal addSub of %v", vUUId)
 			}
 			readOrCreateRequired = true
 			actionMeta.SetAddSub(true)
+			addsSubs = true
 		}
 		if delSub := clientMeta.DelSub(); len(delSub) != 0 {
-			if !c.caps.CanRead() {
+			if create || !c.caps.CanRead() {
 				return nil, false, fmt.Errorf("Illegal delSub of %v", vUUId)
 			}
 			readRequired = true
