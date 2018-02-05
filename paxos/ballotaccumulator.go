@@ -384,7 +384,24 @@ func (br badReads) combine(rmBal *rmBallot) {
 
 		if bra, found := br[*vUUId]; found {
 			bra.combine(&action, rmBal, txnId, clockElem)
-		} else if txnreader.IsReadOnly(&action) {
+		} else if txnreader.IsWriteWithValue(&action) {
+			// If there is a value then it is a create, or a real write
+			// (maybe with a read). But it is not a roll or a
+			// subscription change. Really, we should never see a roll
+			// anyway as they are singleton txns, and are never sent out
+			// as badreads. The subscription change we could see from a
+			// badread of a different var. In any case, writes without
+			// values (rolls and sub changes) we treat the same as pure
+			// reads because in all these cases we have no value with
+			// which to update the client.
+			br[*vUUId] = &badReadAction{
+				rmBallot:  rmBal,
+				vUUId:     vUUId,
+				txnId:     txnId,
+				clockElem: clockElem,
+				action:    &action,
+			}
+		} else {
 			if clockElem == 0 {
 				panic(fmt.Sprintf("About to do 0 - 1 in uint64 (%v, %v) (%v)", vUUId, clock, txnId))
 			}
@@ -395,14 +412,6 @@ func (br badReads) combine(rmBal *rmBallot) {
 				clockElem: clockElem - 1,
 				action:    &action,
 			}
-		} else {
-			br[*vUUId] = &badReadAction{
-				rmBallot:  rmBal,
-				vUUId:     vUUId,
-				txnId:     txnId,
-				clockElem: clockElem,
-				action:    &action,
-			}
 		}
 	}
 }
@@ -410,8 +419,8 @@ func (br badReads) combine(rmBal *rmBallot) {
 type badReadAction struct {
 	*rmBallot
 	vUUId     *common.VarUUId
-	txnId     *common.TxnId // if the action is readOnly, then txnId is the read version, not the action TxnId
-	clockElem uint64        // if the action is readOnly, clockElem is 1 less than the ballot clockElem
+	txnId     *common.TxnId // if the action has no write value, then txnId is the read version,
+	clockElem uint64        // not the action TxnId. Similarly, clockElem is 1 less than the ballot clockElem
 	action    *msgs.Action
 }
 
@@ -424,17 +433,17 @@ func (bra *badReadAction) set(action *msgs.Action, rmBal *rmBallot, txnId *commo
 
 func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
 	braAction := bra.action
-	braIsReadOnly := txnreader.IsReadOnly(braAction)
-	newIsReadOnly := txnreader.IsReadOnly(newAction)
+	braHasWriteValue := txnreader.IsWriteWithValue(braAction)
+	newHasWriteValue := txnreader.IsWriteWithValue(newAction)
 
 	switch {
-	case !braIsReadOnly && !newIsReadOnly:
+	case braHasWriteValue && newHasWriteValue:
 		// They're both writes in some way. Just order the txns
 		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
 			bra.set(newAction, rmBal, txnId, clockElem)
 		}
 
-	case braIsReadOnly && newIsReadOnly:
+	case !braHasWriteValue && !newHasWriteValue:
 		clockElem--
 		// If they read the same version, we really don't care.
 		newRead := common.MakeTxnId(newAction.Value().Existing().Read())
@@ -442,7 +451,7 @@ func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId
 			bra.set(newAction, rmBal, newRead, clockElem)
 		}
 
-	case braIsReadOnly: // so newAction is a write
+	case !braHasWriteValue: // so newAction is a write
 		if bytes.Equal(bra.txnId[:], txnId[:]) {
 			// The write will obviously be in the past of the
 			// existing read, but it's better to have the write

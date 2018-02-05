@@ -238,28 +238,19 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 				continue
 			}
 
-			// A normal update via a badread would never contain a ROLL
-			// action. But this isn't a badread - this is the committed
-			// txn, and so that really can contain rolls, addSubs,
-			// delSubs etc. It doesn't matter if we don't have the value,
-			// we just need to be a bit more careful.
+			// We must make sure we only consider writes with values
+			// otherwise we have the risk of eg receiving a roll first,
+			// then the preceding write, and filtering out the underlying
+			// write on the basis that it's not newer.
+			if !txnreader.IsWriteWithValue(&action) {
+				continue
+			}
 			clockElem := clock.At(vUUId)
-			if txnreader.IsReadOnly(&action) {
-				clockElem--
-				txnId := common.MakeTxnId(action.Value().Existing().Read())
-				if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
-					newer = true
-					vc.version = txnId
-					vc.clockElem = clockElem
-				}
-
-			} else {
-				txnId := txn.Id
-				if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
-					newer = true
-					vc.version = txnId
-					vc.clockElem = clockElem
-				}
+			txnId := txn.Id
+			if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
+				newer = true
+				vc.version = txnId
+				vc.clockElem = clockElem
 			}
 		}
 

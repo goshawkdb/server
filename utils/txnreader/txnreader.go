@@ -182,7 +182,7 @@ func IsReadOnly(action *msgs.Action) bool {
 
 func IsWriteWithValue(action *msgs.Action) bool {
 	value := action.Value()
-	return (value.Which() == msgs.ACTIONVALUE_EXISTING &&
-		value.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_WRITE) ||
-		value.Which() == msgs.ACTIONVALUE_CREATE
+	return value.Which() == msgs.ACTIONVALUE_CREATE ||
+		(value.Which() == msgs.ACTIONVALUE_EXISTING &&
+			value.Existing().Modify().Which() == msgs.ACTIONVALUEEXISTINGMODIFY_WRITE)
 }

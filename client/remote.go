@@ -338,12 +338,11 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 				clientModify := clientValue.Existing().Modify()
 				clientModify.SetWrite()
 				clientWrite := clientModify.Write()
-				switch value.Which() {
-				case msgs.ACTIONVALUE_CREATE:
+				if value.Which() == msgs.ACTIONVALUE_CREATE {
 					create := value.Create()
 					clientWrite.SetValue(create.Value())
 					c.refs = create.References().ToArray()
-				case msgs.ACTIONVALUE_EXISTING:
+				} else {
 					write := value.Existing().Modify().Write()
 					clientWrite.SetValue(write.Value())
 					c.refs = write.References().ToArray()
@@ -370,13 +369,11 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 			if c.version.IsZero() {
 				continue // no point deleting twice!
 			}
-			// in here we need to not only cope with readOnly actions,
+			// In here we need to not only cope with readOnly actions,
 			// but also rolls, addSubs, delSubs - actions with no known
-			// value.
-			if txnreader.IsReadOnly(&action) {
-				clockElem-- // because the corresponding write would be 1 before.
-				txnId = common.MakeTxnId(value.Existing().Read())
-			}
+			// value. As in ballotAccumulator, we treat all of these as reads.
+			clockElem-- // because the corresponding write would be 1 before.
+			txnId = common.MakeTxnId(value.Existing().Read())
 			if clockElem > c.clockElem || (clockElem == c.clockElem && c.version.Compare(txnId) == common.LT) {
 				clientAction := cmsgs.NewClientAction(clientSeg)
 				clientValue := clientAction.Value()
