@@ -322,9 +322,8 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 
 		// if we're subscribed to vUUId then we must be able to read it,
 		// and we must send it down even if the cache version is 0.
-		_, subscribed := sm.cache[*vUUId]
 		c, found := rts.cache.m[*vUUId]
-		if !subscribed && (!found || c.version.IsZero() || !c.caps.CanRead()) {
+		if !found || c.version.IsZero() || !c.caps.CanRead() {
 			continue
 		}
 
@@ -364,16 +363,21 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 			}
 
 		} else {
-			// we don't have a value, so the only thing we can do is
-			// delete from the client...
 			if c.version.IsZero() {
 				continue // no point deleting twice!
 			}
-			// In here we need to not only cope with readOnly actions,
-			// but also rolls, addSubs, delSubs - actions with no known
-			// value. As in ballotAccumulator, we treat all of these as reads.
-			clockElem-- // because the corresponding write would be 1 before.
-			txnId = common.MakeTxnId(value.Existing().Read())
+
+			// If it's a value-less write (roll or meta), then we don't
+			// have a value. The only thing we can do is delete from the
+			// client. But like writeWithValue, we use the real txnId and
+			// clockElem.
+			if txnreader.IsReadOnly(&action) {
+				// If it's a pure read only then we look at the read vsn,
+				// and we only issue the delete if the read vsn is beyond
+				// what we have cached:
+				clockElem-- // because the corresponding write would be 1 before.
+				txnId = common.MakeTxnId(value.Existing().Read())
+			}
 			if clockElem > c.clockElem || (clockElem == c.clockElem && c.version.Compare(txnId) == common.LT) {
 				clientAction := cmsgs.NewClientAction(clientSeg)
 				clientValue := clientAction.Value()
@@ -461,11 +465,17 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 			value := action.Value()
 			switch value.Which() {
 			case msgs.ACTIONVALUE_MISSING:
-				// In this context, MISSING means we know there was a
-				// write of vUUId by txnId (i.e. txnId is the read
-				// version, *not* the Id of some txn that read vUUId), so
-				// we have no idea what the value written was. The only
-				// safe thing we can do is remove it from the client.
+				// MISSING can come both from a pure-readonly action, and
+				// in that case, the txnId here is the read vsn. So, if
+				// that txnId is in the future of what we have cached, we
+				// know it's a read of a value that we don't have - so the
+				// consequence is to delete from the client cache.
+				//
+				// The other case is that there was a value-less write of
+				// vUUId (i.e. a roll or a meta). In this case, the txnId
+				// is the txnId of the actual transaction, and so again,
+				// if that is in the future of our cached value then we
+				// have to delete vUUId from the client cache.
 				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "MISSING", "clockElem", clockElem, "clockElemCached", c.clockElem)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 					c.version = common.VersionZero
@@ -475,6 +485,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 				}
 
 			case msgs.ACTIONVALUE_EXISTING:
+				// We have a write with a real value:
 				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "WRITEONLY", "clockElem", clockElem, "clockElemCached", c.clockElem)
 				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
 					// If the above condition fails, then the update
@@ -487,9 +498,6 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 					c.version = txnId
 					c.clockElem = clockElem
 					modify := value.Existing().Modify()
-					if modify.Which() != msgs.ACTIONVALUEEXISTINGMODIFY_WRITE {
-						panic(fmt.Sprintf("%v Expected Modify WRITE, but got %v", vUUId, modify.Which()))
-					}
 					write := modify.Write()
 					// depending on internal capnp things, Value() here can
 					// return nil instead of an empty slice in some

@@ -128,8 +128,7 @@ func (task *subscribe) SubscriptionConsumer(sm *client.SubscriptionManager, txn 
 		if bytes.Compare(action.VarId(), configuration.TopologyVarUUId[:]) != 0 {
 			continue
 		} else if !txnreader.IsWriteWithValue(&action) {
-			// we choose to ignore rolls, addSubs etc etc
-			continue
+			panic("Internal error: subscription update action of topology gave non-write action!")
 		}
 
 		actionValue := action.Value()

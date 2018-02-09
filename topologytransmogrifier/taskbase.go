@@ -467,8 +467,7 @@ func (tt *transmogrificationTask) submitTopologyTransaction(txn *msgs.Txn, subsc
 				common.MakeVarUUId(updateAction.VarId())))
 	}
 	if !txnreader.IsWriteWithValue(&updateAction) {
-		panic(
-			fmt.Sprintf("Internal error: update action from readwrite of topology gave non-write action!"))
+		panic("Internal error: update action from readwrite of topology gave non-write action!")
 	}
 	updateValue := updateAction.Value()
 	write := updateValue.Existing().Modify().Write()

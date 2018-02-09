@@ -384,24 +384,7 @@ func (br badReads) combine(rmBal *rmBallot) {
 
 		if bra, found := br[*vUUId]; found {
 			bra.combine(&action, rmBal, txnId, clockElem)
-		} else if txnreader.IsWriteWithValue(&action) {
-			// If there is a value then it is a create, or a real write
-			// (maybe with a read). But it is not a roll or a
-			// subscription change. Really, we should never see a roll
-			// anyway as they are singleton txns, and are never sent out
-			// as badreads. The subscription change we could see from a
-			// badread of a different var. In any case, writes without
-			// values (rolls and sub changes) we treat the same as pure
-			// reads because in all these cases we have no value with
-			// which to update the client.
-			br[*vUUId] = &badReadAction{
-				rmBallot:  rmBal,
-				vUUId:     vUUId,
-				txnId:     txnId,
-				clockElem: clockElem,
-				action:    &action,
-			}
-		} else {
+		} else if txnreader.IsReadOnly(&action) {
 			if clockElem == 0 {
 				panic(fmt.Sprintf("About to do 0 - 1 in uint64 (%v, %v) (%v)", vUUId, clock, txnId))
 			}
@@ -410,6 +393,18 @@ func (br badReads) combine(rmBal *rmBallot) {
 				vUUId:     vUUId,
 				txnId:     common.MakeTxnId(action.Value().Existing().Read()),
 				clockElem: clockElem - 1,
+				action:    &action,
+			}
+		} else {
+			// If it's not read only, then it will have altered the frame
+			// txnid regardless of whether the action has a value
+			// embedded within it. Therefore we treat anything which
+			// isn't a pure read-only as a write.
+			br[*vUUId] = &badReadAction{
+				rmBallot:  rmBal,
+				vUUId:     vUUId,
+				txnId:     txnId,
+				clockElem: clockElem,
 				action:    &action,
 			}
 		}
@@ -433,17 +428,11 @@ func (bra *badReadAction) set(action *msgs.Action, rmBal *rmBallot, txnId *commo
 
 func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId *common.TxnId, clockElem uint64) {
 	braAction := bra.action
-	braHasWriteValue := txnreader.IsWriteWithValue(braAction)
-	newHasWriteValue := txnreader.IsWriteWithValue(newAction)
+	braIsReadOnly := txnreader.IsReadOnly(braAction)
+	newIsReadOnly := txnreader.IsReadOnly(newAction)
 
 	switch {
-	case braHasWriteValue && newHasWriteValue:
-		// They're both writes in some way. Just order the txns
-		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
-			bra.set(newAction, rmBal, txnId, clockElem)
-		}
-
-	case !braHasWriteValue && !newHasWriteValue:
+	case braIsReadOnly && newIsReadOnly:
 		clockElem--
 		// If they read the same version, we really don't care.
 		newRead := common.MakeTxnId(newAction.Value().Existing().Read())
@@ -451,25 +440,38 @@ func (bra *badReadAction) combine(newAction *msgs.Action, rmBal *rmBallot, txnId
 			bra.set(newAction, rmBal, newRead, clockElem)
 		}
 
-	case !braHasWriteValue: // so newAction is a write
+	case !braIsReadOnly && !newIsReadOnly:
+		// They're both writes in some way. Just order the txns. This is
+		// correct for any combination of writes-with-values, and
+		// writes-without-values.
+		if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(txnId) == common.LT) {
+			bra.set(newAction, rmBal, txnId, clockElem)
+		}
+
+	case braIsReadOnly: // so newAction is a write of some sort.
+		// don't forget: bra.txnId is the read vsn
 		if bytes.Equal(bra.txnId[:], txnId[:]) {
-			// The write will obviously be in the past of the
-			// existing read, but it's better to have the write
-			// as we can update the client with the actual
-			// value.
+			// The write will obviously be in the past of the existing
+			// read, but it's better to have the write as we can update
+			// the client with the actual value. If newAction is a
+			// value-less write, either would be fine.
 			bra.set(newAction, rmBal, txnId, clockElem)
 		} else if clockElem > bra.clockElem {
 			// The write is after than the read. Note: because bra is a
 			// read, it is not possible for the corresponding write to be
 			// a sibling of newAction (the read is between). Hence the
-			// simpler test in this case.
+			// simpler test in this case. The bra read txn could be the
+			// same frame as the new write txn, but obviously, the write
+			// would still come after.
 			bra.set(newAction, rmBal, txnId, clockElem)
 		}
 
 	default: // bra is not a read, but newAction is a read.
 		clockElem--
 		newRead := common.MakeTxnId(newAction.Value().Existing().Read())
-		// If the new read is a read of bra's existing write, better to keep the write
+		// If the new read is a read of bra's existing write, better to
+		// keep the write. Similarly to above, if the write is
+		// value-less, either would be fine.
 		if !bytes.Equal(bra.txnId[:], newRead[:]) {
 			if clockElem > bra.clockElem || (clockElem == bra.clockElem && bra.txnId.Compare(newRead) == common.LT) {
 				// The read must be of some value which was written after
@@ -508,36 +510,28 @@ func (br badReads) AddToSeg(seg *capn.Segment) msgs.Update_List {
 			newAction := actionsList.At(idy)
 			newAction.SetVarId(action.VarId())
 			newValue := newAction.Value()
-			switch value := action.Value(); value.Which() {
-			case msgs.ACTIONVALUE_CREATE:
+
+			if txnreader.IsReadOnly(action) {
+				newValue.SetMissing()
+
+			} else if txnreader.IsWriteWithValue(action) {
 				newValue.SetExisting()
 				newModify := newValue.Existing().Modify()
 				newModify.SetWrite()
 				newWrite := newModify.Write()
-				create := value.Create()
-				newWrite.SetValue(create.Value())
-				newWrite.SetReferences(create.References())
-
-			case msgs.ACTIONVALUE_EXISTING:
-				switch modify := value.Existing().Modify(); modify.Which() {
-				case msgs.ACTIONVALUEEXISTINGMODIFY_NOT:
-					newValue.SetMissing()
-				case msgs.ACTIONVALUEEXISTINGMODIFY_WRITE:
-					newValue.SetExisting()
-					newModify := newValue.Existing().Modify()
-					newModify.SetWrite()
-					newWrite := newModify.Write()
-					write := modify.Write()
+				value := action.Value()
+				if value.Which() == msgs.ACTIONVALUE_CREATE {
+					create := value.Create()
+					newWrite.SetValue(create.Value())
+					newWrite.SetReferences(create.References())
+				} else {
+					write := value.Existing().Modify().Write()
 					newWrite.SetValue(write.Value())
 					newWrite.SetReferences(write.References())
-				default:
-					panic(fmt.Sprintf("Unexpected action existing modify (%v) for badread of %v at %v",
-						modify.Which(), action.VarId(), txnId))
 				}
 
-			default:
-				panic(fmt.Sprintf("Unexpected action value (%v) for badread of %v at %v",
-					value.Which(), action.VarId(), txnId))
+			} else { // value-less write
+				newValue.SetMissing()
 			}
 
 			clock.SetVarIdMax(bra.vUUId, bra.clockElem)

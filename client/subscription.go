@@ -223,10 +223,6 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 
 		utils.DebugLog(sm.logger, "debug", "Outcome known for subscription txn.", "SubId", sm.subId, "TxnId", txn.Id)
 
-		// The point of newer is that within each subscription, we can
-		// get updates out of order, so at this stage we're just
-		// correcting the order of updates within a subscription.
-		newer := false
 		actions := txn.Actions(true).Actions()
 		clock := vectorclock.VectorClockFromData(outcome.Commit(), true)
 		for idx, l := 0, actions.Len(); idx < l; idx++ {
@@ -235,20 +231,23 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 			vUUId := common.MakeVarUUId(action.VarId())
 			vc, found := sm.cache[*vUUId]
 			if !found {
+				// We only care about updating our records of things we
+				// subscribe to.
 				continue
 			}
 
-			// We must make sure we only consider writes with values
-			// otherwise we have the risk of eg receiving a roll first,
-			// then the preceding write, and filtering out the underlying
-			// write on the basis that it's not newer.
-			if !txnreader.IsWriteWithValue(&action) {
-				continue
-			}
 			clockElem := clock.At(vUUId)
 			txnId := txn.Id
+			// If it's readOnly then this subscription must be for at
+			// least two vars, X and Y, and there's been a txn which
+			// writes to one (X) and reads from the other (Y). But the
+			// read vsn of Y could nevertheless tell us that we're
+			// behind.
+			if txnreader.IsReadOnly(&action) {
+				clockElem--
+				txnId = common.MakeTxnId(action.Value().Existing().Read())
+			}
 			if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
-				newer = true
 				vc.version = txnId
 				vc.clockElem = clockElem
 			}
@@ -258,11 +257,7 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 			sm.TransactionRecord.terminate()
 		}
 
-		if newer {
-			err = sm.consumer(sm, txn, outcome)
-		} else {
-			utils.DebugLog(sm.logger, "debug", "Ignoring non-newer outcome.", "SubId", sm.subId, "TxnId", txn.Id)
-		}
+		err = sm.consumer(sm, txn, outcome)
 
 	} else if su.outcome != nil {
 		senders.NewOneShotSender(sm.logger, paxos.MakeTxnSubmissionCompleteMsg(txn.Id, sm.subId), sm.connPub, sender)
