@@ -321,15 +321,18 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 		vUUId := common.MakeVarUUId(action.VarId())
 		value := action.Value()
 
+		// semantics are dependent on whether we are subscribed to this or not.
+		_, subscribed := sm.cache[*vUUId]
 		// if we're subscribed to vUUId then we must be able to read it,
 		// and we must send it down even if the cache version is 0.
 		c, found := rts.cache.m[*vUUId]
-		if !found || !c.caps.CanRead() {
+		if !found || !c.caps.CanRead() || (!c.onClient && !subscribed) {
 			continue
 		}
 
 		txnId := txn.Id
 		clockElem := clock.At(vUUId)
+
 		if txnreader.IsWriteWithValue(&action) {
 			// We have a value! So here we go the extra mile and detect
 			// if we have an EQ with c _and_ have deleted the value from

@@ -83,54 +83,79 @@ func (s *Subscriptions) Subscribers() common.TxnIds {
 }
 
 func (s *Subscriptions) Committed(action *localAction) {
-	switch {
-	case action.IsImmigrant():
-		// TOOO merge in from action.immigrantVar.Subscriptions()
-
-	case action.addSub:
-		added, found := s.subs[*action.Id]
-		if found && added {
-			// duplicate, do nothing
-			return
-		} else if found {
-			// we learnt the remove first! Now delete the whole thing
-			delete(s.subs, *action.Id)
-		} else if sconn, found := s.vm.Servers[action.Id.RMId(s.vm.RMId)]; found && sconn.BootCount <= action.Id.BootCount() {
-			// new and it's valid
-			s.subs[*action.Id] = true
-		}
-
-	case action.delSub != nil:
-		added, found := s.subs[*action.delSub]
-		if found && added {
-			// cancelling
-			delete(s.subs, *action.Id)
-		} else if found {
-			// duplicate
-			return
-		} else {
-			// we've got a cancel first, before the add! We choose not to validate this.
-			s.subs[*action.Id] = false
+	dirty := false
+	if action.IsImmigrant() {
+		data := action.immigrantVar.Subscriptions()
+		if len(data) > 0 {
+			seg, _, err := capn.ReadFromMemoryZeroCopy(data)
+			if err != nil {
+				return
+			}
+			subsList := msgs.ReadRootSubscriptionListWrapper(seg).Subscriptions()
+			for idx, l := 0, subsList.Len(); idx < l; idx++ {
+				sub := subsList.At(idx)
+				subId := common.MakeTxnId(sub.TxnId())
+				if sub.Added() {
+					dirty = true
+					s.addSub(subId)
+				} else {
+					dirty = true
+					s.delSub(subId)
+				}
+			}
 		}
 	}
-	s.active = nil
-	s.data = nil
+
+	if action.addSub {
+		dirty = true
+		s.addSub(action.Id)
+	}
+
+	if action.delSub != nil {
+		dirty = true
+		s.delSub(action.delSub)
+	}
+
+	if dirty {
+		s.active = nil
+		s.data = nil
+	}
+}
+
+func (s *Subscriptions) addSub(subId *common.TxnId) {
+	added, found := s.subs[*subId]
+	if found && added {
+		// duplicate, do nothing
+		return
+	} else if found {
+		// we learnt the remove first! Now delete the whole thing
+		delete(s.subs, *subId)
+	} else if sconn, found := s.vm.Servers[subId.RMId(s.vm.RMId)]; found && sconn.BootCount <= subId.BootCount() {
+		// new and it's valid
+		s.subs[*subId] = true
+	}
+}
+
+func (s *Subscriptions) delSub(subId *common.TxnId) {
+	added, found := s.subs[*subId]
+	if found && added {
+		// cancelling
+		delete(s.subs, *subId)
+	} else if found {
+		// duplicate
+		return
+	} else if sconn, found := s.vm.Servers[subId.RMId(s.vm.RMId)]; found && sconn.BootCount <= subId.BootCount() {
+		s.subs[*subId] = false
+	}
 }
 
 func (s *Subscriptions) Verify() {
-	for txnId, added := range s.subs {
-		if !added {
-			continue
-		}
+	for txnId, _ := range s.subs {
 		sconn, found := s.vm.Servers[txnId.RMId(s.vm.RMId)]
-		if !found || sconn.BootCount > txnId.BootCount() {
-			s.cancelSub(txnId)
+		if !found || sconn.BootCount <= txnId.BootCount() {
+			delete(s.subs, txnId)
 		}
 	}
-}
-
-func (s *Subscriptions) cancelSub(txnId common.TxnId) {
-	// TODO
 }
 
 func (s *Subscriptions) Status(sc *status.StatusConsumer) {
