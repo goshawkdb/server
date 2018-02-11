@@ -157,7 +157,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 			case cmsgs.CLIENTACTIONVALUEEXISTINGMODIFY_ROLL:
 				if !c.caps.CanRead() {
 					return nil, false, fmt.Errorf("Illegal roll of %v (insufficient capabilities)", vUUId)
-				} else if counter < c.counter { // for completeness. In reality, not possible to fail
+				} else if counter < c.counter {
 					return nil, false, badCounter
 				}
 				actionModify.SetRoll()
@@ -165,6 +165,9 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 				actionFound = true
 
 			case cmsgs.CLIENTACTIONVALUEEXISTINGMODIFY_WRITE:
+				if !c.caps.CanWrite() {
+					return nil, false, fmt.Errorf("Illegal roll of %v (insufficient capabilities)", vUUId)
+				}
 				clientWrite := clientModify.Write()
 				actionModify.SetWrite()
 				actionWrite := actionModify.Write()
@@ -182,11 +185,15 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 
 			if clientExisting.Read() {
 				if !c.caps.CanRead() {
-					return nil, false, fmt.Errorf("Illegal read of %v", vUUId)
+					return nil, false, fmt.Errorf("Illegal read of %v (insufficient capabilities)", vUUId)
 				} else if counter < c.counter {
 					return nil, false, badCounter
 				}
-				actionExisting.SetRead(c.version[:])
+				if c.onClient {
+					actionExisting.SetRead(c.version[:])
+				} else {
+					actionExisting.SetRead(common.VersionZero[:])
+				}
 				readRequired = false
 				readOrCreateRequired = false
 				actionFound = true

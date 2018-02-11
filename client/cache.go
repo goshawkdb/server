@@ -85,6 +85,7 @@ func (c *Cache) copyReferences(dstSeg *capn.Segment, refsAcc *[]*msgs.VarIdPos, 
 type Cached struct {
 	*Cache
 	VerClock
+	onClient  bool
 	counter   uint64
 	caps      common.Capability
 	refs      []msgs.VarIdPos
