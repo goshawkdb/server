@@ -69,11 +69,15 @@ func (ts *TransactionSubmitter) Shutdown(onceEmpty func([]*SubscriptionManager))
 }
 
 func (ts *TransactionSubmitter) Status(sc *status.StatusConsumer) {
-	txnIds := make([]common.TxnId, 0, len(ts.txns))
-	for txnId := range ts.txns {
-		txnIds = append(txnIds, txnId)
+	txnIds := make([]string, 0, len(ts.txns))
+	for txnId, tr := range ts.txns {
+		str := txnId.String()
+		if tr.subManager != nil {
+			str += "(s)"
+		}
+		txnIds = append(txnIds, str)
 	}
-	sc.Emit(fmt.Sprintf("TransactionSubmitter: live TxnIds: %v", txnIds))
+	sc.Emit(fmt.Sprintf("TransactionSubmitter: live TxnIds: %s", txnIds))
 	sc.Emit(fmt.Sprintf("TransactionSubmitter: buffered Txns: %v", len(ts.bufferedSubmissions)))
 	sc.Join()
 }

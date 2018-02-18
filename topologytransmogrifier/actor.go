@@ -28,7 +28,8 @@ type TopologyTransmogrifier struct {
 	activeConnections map[common.RMId]*sconn.ServerConnection
 	migrations        map[uint32]map[common.RMId]*int32
 
-	currentTask Task
+	subscriptionMsg actor.MsgExec
+	currentTask     Task
 
 	listenPort        uint16
 	rng               *rand.Rand

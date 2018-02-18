@@ -21,6 +21,7 @@ func (task *installTargetNew) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
 		task.targetConfig != nil &&
+		active.Version < task.targetConfig.Version &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
 		task.subscribed &&

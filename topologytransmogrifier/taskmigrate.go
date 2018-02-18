@@ -18,9 +18,11 @@ func (task *migrate) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
 		task.targetConfig != nil &&
+		active.Version < task.targetConfig.Version &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
-		task.subscribed && active.NextConfiguration.InstalledOnNew &&
+		task.subscribed &&
+		active.NextConfiguration.InstalledOnNew &&
 		active.NextConfiguration.QuietRMIds[task.self] &&
 		len(active.NextConfiguration.Pending) > 0
 }

@@ -1,15 +1,12 @@
 package topologytransmogrifier
 
 import (
-	"bytes"
 	"fmt"
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
-	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	"goshawkdb.io/server/utils/binarybackoff"
-	"goshawkdb.io/server/utils/txnreader"
 	"time"
 )
 
@@ -27,8 +24,6 @@ func (task *subscribe) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) > 0 &&
 		task.targetConfig != nil &&
-		active.NextConfiguration != nil &&
-		active.NextConfiguration.Version == task.targetConfig.Version &&
 		!task.subscribed
 }
 
@@ -40,6 +35,8 @@ func (task *subscribe) Tick() (bool, error) {
 	if task.selectStage() != task {
 		return task.completed()
 	}
+
+	task.subscriptionMsg = nil
 
 	next := task.activeTopology.NextConfiguration
 	localHost, err := task.firstLocalHost(task.activeTopology.Configuration)
@@ -61,7 +58,7 @@ func (task *subscribe) Tick() (bool, error) {
 		return false, nil
 	}
 
-	task.inner.Logger.Log("msg", "Subscribing to topology.",
+	task.inner.Logger.Log("msg", "Attempting to subscribe to topology.",
 		"active", fmt.Sprint(active), "passive", fmt.Sprint(passive))
 
 	topology := task.activeTopology.Clone()
@@ -110,49 +107,13 @@ func (task *subscribe) Tick() (bool, error) {
 
 	task.runTxnMsg = &topologyTransmogrifierMsgAddSubscription{
 		transmogrificationTask: task.transmogrificationTask,
-		task:                 task,
-		backoff:              binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
-		txn:                  &txn,
-		subscriptionConsumer: task.SubscriptionConsumer,
-		target:               topology,
-		active:               active,
-		passive:              passive,
+		task:    task,
+		backoff: binarybackoff.NewBinaryBackoffEngine(task.rng, 2*time.Second, time.Duration(len(task.targetConfig.Hosts)+1)*2*time.Second),
+		txn:     &txn,
+		target:  topology,
+		active:  active,
+		passive: passive,
 	}
+	task.subscriptionMsg = task.runTxnMsg
 	return task.runTxnMsg.Exec()
-}
-
-func (task *subscribe) SubscriptionConsumer(sm *client.SubscriptionManager, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
-	actions := txn.Actions(true).Actions()
-	for idx, l := 0, actions.Len(); idx < l; idx++ {
-		action := actions.At(idx)
-		if bytes.Compare(action.VarId(), configuration.TopologyVarUUId[:]) != 0 {
-			continue
-		} else if !txnreader.IsWriteWithValue(&action) {
-			panic("Internal error: subscription update action of topology gave non-write action!")
-		}
-
-		actionValue := action.Value()
-		var value []byte
-		var refs msgs.VarIdPos_List
-		if actionValue.Which() == msgs.ACTIONVALUE_CREATE {
-			create := actionValue.Create()
-			value = create.Value()
-			refs = create.References()
-		} else {
-			write := actionValue.Existing().Modify().Write()
-			value = write.Value()
-			refs = write.References()
-		}
-
-		if topology, err := configuration.TopologyFromCap(txn.Id, &refs, value); err != nil {
-			return err
-		} else {
-			task.EnqueueMsg(topologyTransmogrifierMsgTopologyObserved{
-				TopologyTransmogrifier: task.TopologyTransmogrifier,
-				topology:               topology,
-			})
-		}
-		return nil
-	}
-	return nil
 }

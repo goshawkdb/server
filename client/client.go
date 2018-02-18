@@ -190,7 +190,7 @@ func (tr *TransactionRecord) formServerActions(counter uint64, translationCallba
 					return nil, false, badCounter
 				}
 				if c.onClient {
-					actionExisting.SetRead(c.version[:])
+					actionExisting.SetRead(c.Version[:])
 				} else {
 					actionExisting.SetRead(common.VersionZero[:])
 				}

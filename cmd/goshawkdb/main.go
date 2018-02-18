@@ -25,7 +25,6 @@ import (
 	"goshawkdb.io/server/stats"
 	"goshawkdb.io/server/topologytransmogrifier"
 	"goshawkdb.io/server/types"
-	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/status"
 	"io/ioutil"
@@ -242,17 +241,11 @@ func (s *server) start() {
 	// msg from TopologyTransmogrifier so there is still sufficient
 	// write barriers.
 	router.Dispatchers = dispatchers
-	cm.RegisterSelf()
 	s.addStatusEmitter(router)
 	s.addOnShutdown(router.ShutdownSync)
 
 	// now all our dispatchers are up, we register ourselves.
-	cm.ServerEstablished(&sconn.ServerConnection{
-		RMId:         s.self,
-		BootCount:    s.bootCount,
-		Sender:       router,
-		ShutdownSync: func() {},
-	})
+	cm.RegisterSelf()
 
 	transmogrifier, localEstablished := topologytransmogrifier.NewTopologyTransmogrifier(s.self, db, router, cm, lc, s.port, s, commandLineConfig, s.logger)
 	s.lock.Lock()

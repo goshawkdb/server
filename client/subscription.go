@@ -39,7 +39,7 @@ func NewSubscriptionManager(subId *common.TxnId, tr *TransactionRecord, consumer
 				continue
 			}
 			vUUId := common.MakeVarUUId(action.VarId())
-			cache[*vUUId] = &VerClock{version: version}
+			cache[*vUUId] = &VerClock{Version: version}
 		}
 	}
 	return &SubscriptionManager{
@@ -61,8 +61,8 @@ type SubscriptionManager struct {
 }
 
 type VerClock struct {
-	version   *common.TxnId
-	clockElem uint64
+	Version   *common.TxnId
+	ClockElem uint64
 }
 
 type subscriptionUpdate struct {
@@ -96,7 +96,7 @@ func (sm *SubscriptionManager) createUnsubscribeTxn(cache *Cache) (*cmsgs.Client
 		roots[vUUId] = &types.PosCapVer{
 			Positions:  c.positions,
 			Capability: common.ReadOnlyCapability,
-			Version:    c.version, // use the version from c, not sm.cache, as c may be more up to date!
+			Version:    c.Version, // use the version from c, not sm.cache, as c may be more up to date!
 		}
 		action := actions.At(idx)
 		idx++
@@ -148,11 +148,11 @@ func (sm *SubscriptionManager) Unsubscribe(lc localconnection.LocalConnection) e
 					continue
 				}
 				c := cache.m[*vUUId]
-				cmp := c.version.Compare(txnId)
+				cmp := c.Version.Compare(txnId)
 				clockElem := clock.At(vUUId)
-				if clockElem > c.clockElem || (clockElem == c.clockElem && cmp == common.LT) {
-					c.version = txnId
-					c.clockElem = clockElem
+				if clockElem > c.ClockElem || (clockElem == c.ClockElem && cmp == common.LT) {
+					c.Version = txnId
+					c.ClockElem = clockElem
 					// we don't care about updating refs or caps or anything like that at this point.
 				}
 			}
@@ -247,9 +247,9 @@ func (sm *SubscriptionManager) SubmissionOutcomeReceived(sender common.RMId, txn
 				clockElem--
 				txnId = common.MakeTxnId(action.Value().Existing().Read())
 			}
-			if clockElem > vc.clockElem || (clockElem == vc.clockElem && vc.version.Compare(txnId) == common.LT) {
-				vc.version = txnId
-				vc.clockElem = clockElem
+			if clockElem > vc.ClockElem || (clockElem == vc.ClockElem && vc.Version.Compare(txnId) == common.LT) {
+				vc.Version = txnId
+				vc.ClockElem = clockElem
 			}
 		}
 

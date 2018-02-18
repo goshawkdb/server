@@ -41,9 +41,8 @@ type transmogrificationTask struct {
 
 	ensureLocalTopology
 	joinCluster
-	installTargetOld
-	// migrateTopology here?
 	subscribe
+	installTargetOld
 	installTargetNew
 	quiet
 	migrate
