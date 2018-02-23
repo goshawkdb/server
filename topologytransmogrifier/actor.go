@@ -28,8 +28,8 @@ type TopologyTransmogrifier struct {
 	activeConnections map[common.RMId]*sconn.ServerConnection
 	migrations        map[uint32]map[common.RMId]*int32
 
-	subscriptionMsg actor.MsgExec
-	currentTask     Task
+	subscriber  *subscriber
+	currentTask Task
 
 	listenPort        uint16
 	rng               *rand.Rand
@@ -59,6 +59,9 @@ func NewTopologyTransmogrifier(self common.RMId, db *db.Databases, router *route
 		rng:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		shutdownSignaller: ss,
 		localEstablished:  localEstablished,
+	}
+	tt.subscriber = &subscriber{
+		TopologyTransmogrifier: tt,
 	}
 	router.Transmogrifier = tt
 	tt.currentTask = tt.newTransmogrificationTask(config)

@@ -1,6 +1,7 @@
 package topologytransmogrifier
 
 import (
+	"fmt"
 	"goshawkdb.io/common"
 	"goshawkdb.io/common/actor"
 	msgs "goshawkdb.io/server/capnp"
@@ -46,6 +47,7 @@ func (msg *topologyTransmogrifierMsgSetActiveConnections) Exec() (bool, error) {
 	for _, cd := range msg.activeConnections {
 		msg.hostToConnection[cd.Host] = cd
 	}
+	msg.subscriber.Subscribe()
 
 	return msg.maybeTick()
 }
@@ -174,8 +176,7 @@ func (msg *topologyTransmogrifierMsgCreateRoots) runTxn() {
 }
 
 type topologyTransmogrifierMsgAddSubscription struct {
-	*transmogrificationTask
-	task    *subscribe
+	*subscriber
 	backoff *binarybackoff.BinaryBackoffEngine
 	txn     *msgs.Txn
 	target  *configuration.Topology
@@ -185,7 +186,7 @@ type topologyTransmogrifierMsgAddSubscription struct {
 }
 
 func (msg *topologyTransmogrifierMsgAddSubscription) Exec() (bool, error) {
-	if msg.subscriptionMsg != msg || msg.runTxnMsg != msg || msg.currentTask != msg.task {
+	if msg.runTxnMsg != msg {
 		return false, nil
 	}
 	go msg.runTxn()
@@ -204,16 +205,18 @@ func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
 	default:
 		// either it's commit or rerun-abort-badread
 		msg.EnqueueFuncAsync(func() (bool, error) {
-			if msg.subscriptionMsg != msg || msg.runTxnMsg != msg || msg.currentTask != msg.task {
+			if msg.runTxnMsg != msg {
+				fmt.Println("Subscriber abandoned.")
 				return false, nil
-			}
-			if topologyBadRead == nil {
-				msg.runTxnMsg = nil
+			} else if topologyBadRead == nil {
+				fmt.Println("Subscriber ready.")
 				msg.subscribed = true
 				target := msg.target.Clone()
 				target.DBVersion = txnId
 				return msg.setActiveTopology(target)
 			} else {
+				msg.runTxnMsg = nil
+				fmt.Println("Subscriber badread", topologyBadRead.DBVersion)
 				return msg.setActiveTopology(topologyBadRead)
 			}
 		})
@@ -222,6 +225,7 @@ func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
 
 func (msg *topologyTransmogrifierMsgAddSubscription) SubscriptionConsumer(sm *client.SubscriptionManager, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	// here we are in the localConnection thread
+	msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id)
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -230,15 +234,20 @@ func (msg *topologyTransmogrifierMsgAddSubscription) SubscriptionConsumer(sm *cl
 			continue
 		}
 		if value := action.Value(); value.Which() != msgs.ACTIONVALUE_EXISTING {
+			msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id, "action", "not existing")
 			continue
 		} else if modify := value.Existing().Modify(); modify.Which() != msgs.ACTIONVALUEEXISTINGMODIFY_WRITE {
+			msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id, "action", "not write")
 			continue
 		} else {
 			txnId := txn.Id
 			clock := vectorclock.VectorClockFromData(outcome.Commit(), false)
 			clockElem := clock.At(vUUId)
 			cmp := msg.Version.Compare(txnId)
+			msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id, "clockOld", msg.ClockElem, "clockNew", clockElem, "versionOld", msg.Version, "versionNew", txnId)
 			if clockElem > msg.ClockElem || (clockElem == msg.ClockElem && cmp == common.LT) {
+				msg.ClockElem = clockElem
+				msg.Version = txnId
 				write := modify.Write()
 				value := write.Value()
 				refs := write.References()
@@ -246,17 +255,18 @@ func (msg *topologyTransmogrifierMsgAddSubscription) SubscriptionConsumer(sm *cl
 				msg.EnqueueFuncAsync(func() (bool, error) {
 					if err != nil {
 						return false, err
-					} else if msg.subscriptionMsg != msg {
+					} else if msg.runTxnMsg != msg {
 						// TODO: unsubscribe
+						msg.inner.Logger.Log("msg", "Subscriber unsubscribe?!")
 						return false, nil
 					} else {
+						msg.inner.Logger.Log("msg", "Received new topology from subscription.", "topology", topology)
 						return msg.setActiveTopology(topology)
 					}
 				})
 			}
+			break
 		}
-
-		break
 	}
 
 	return nil

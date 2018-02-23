@@ -1,12 +1,16 @@
 package topologytransmogrifier
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"goshawkdb.io/common"
+	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
+	"goshawkdb.io/server/utils/txnreader"
 )
 
 func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
@@ -36,6 +40,7 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 			// DBVersion comparison: during join, we go from blank to
 			// blank-with-bits without going via the DB so the DBVersion
 			// doesn't change in that case.
+			tt.subscriber.Subscribe()
 			return false, nil
 		}
 	}
@@ -44,6 +49,7 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 		return false, errors.New("We have been removed from the cluster. Shutting down.")
 	}
 	tt.activeTopology = topology
+	tt.subscriber.Subscribe()
 
 	if tt.currentTask == nil {
 		if next := topology.NextConfiguration; next == nil {
@@ -139,4 +145,117 @@ func (tt *TopologyTransmogrifier) setTarget(targetConfig *configuration.Configur
 	utils.DebugLog(tt.inner.Logger, "debug", "Creating new task.")
 	tt.currentTask = tt.newTransmogrificationTask(targetConfig)
 	return nil
+}
+
+// NB filters out empty RMIds so no need to pre-filter.
+func (tt *TopologyTransmogrifier) formActivePassive(activeCandidates, extraPassives common.RMIds) (active, passive common.RMIds) {
+	active, passive = []common.RMId{}, []common.RMId{}
+	for _, rmId := range activeCandidates {
+		if rmId == common.RMIdEmpty {
+			continue
+		} else if _, found := tt.activeConnections[rmId]; found {
+			active = append(active, rmId)
+		} else {
+			passive = append(passive, rmId)
+		}
+	}
+
+	// Be careful with this maths. The topology object is on every
+	// node, so we must use a majority of nodes. So if we have 6 nodes,
+	// then we must use 4 as actives. So we're essentially treating
+	// this as if it's a cluster of 7 with one failure.
+	fInc := ((len(active) + len(passive)) >> 1) + 1
+	if len(active) < fInc {
+		tt.inner.Logger.Log("msg", "Can not make progress at this time due to too many failures.",
+			"failures", fmt.Sprint(passive))
+		return nil, nil
+	}
+	active, passive = active[:fInc], append(active[fInc:], passive...)
+	return active, append(passive, extraPassives...)
+}
+
+func (tt *TopologyTransmogrifier) firstLocalHost(config *configuration.Configuration) (localHost string, err error) {
+	for config != nil && err == nil {
+		localHost, _, err = config.LocalRemoteHosts(tt.listenPort)
+		if err == nil && len(localHost) > 0 {
+			return localHost, err
+		}
+		if config.NextConfiguration == nil {
+			break
+		} else {
+			err = nil
+			config = config.NextConfiguration.Configuration
+		}
+	}
+	return "", err
+}
+
+func (tt *TopologyTransmogrifier) allHostsBarLocalHost(localHost string, next *configuration.NextConfiguration) []string {
+	remoteHosts := make([]string, len(next.AllHosts))
+	copy(remoteHosts, next.AllHosts)
+	for idx, host := range remoteHosts {
+		if host == localHost {
+			remoteHosts = append(remoteHosts[:idx], remoteHosts[idx+1:]...)
+			break
+		}
+	}
+	return remoteHosts
+}
+
+func (tt *TopologyTransmogrifier) isInRMs(rmIds common.RMIds) bool {
+	for _, rmId := range rmIds {
+		if rmId == tt.self {
+			return true
+		}
+	}
+	return false
+}
+
+func (tt *TopologyTransmogrifier) submitTopologyTransaction(txn *msgs.Txn, subscriptionConsumer client.SubscriptionConsumer, active, passive common.RMIds) (*configuration.Topology, *common.TxnId, bool, error) {
+	// in general, we do backoff locally, so don't pass backoff through here
+	utils.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
+	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, subscriptionConsumer, nil, active...)
+	if result == nil || err != nil {
+		return nil, nil, false, err
+	}
+	txnId := txnReader.Id
+	if result.Which() == msgs.OUTCOME_COMMIT {
+		utils.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
+		return nil, txnId, false, nil
+	}
+	abort := result.Abort()
+	utils.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
+	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
+		return nil, txnId, true, nil
+	}
+	abortUpdates := abort.Rerun()
+	if abortUpdates.Len() != 1 {
+		panic(
+			fmt.Sprintf("Internal error: readwrite of topology gave %v updates (1 expected)",
+				abortUpdates.Len()))
+	}
+	update := abortUpdates.At(0)
+	dbversion := common.MakeTxnId(update.TxnId())
+
+	updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
+	if updateActions.Len() != 1 {
+		panic(
+			fmt.Sprintf("Internal error: readwrite of topology gave update with %v actions instead of 1!",
+				updateActions.Len()))
+	}
+	updateAction := updateActions.At(0)
+	if !bytes.Equal(updateAction.VarId(), configuration.TopologyVarUUId[:]) {
+		panic(
+			fmt.Sprintf("Internal error: update action from readwrite of topology is not for topology! %v",
+				common.MakeVarUUId(updateAction.VarId())))
+	}
+	if !txnreader.IsWriteWithValue(&updateAction) {
+		panic("Internal error: update action from readwrite of topology gave non-write action!")
+	}
+	updateValue := updateAction.Value()
+	write := updateValue.Existing().Modify().Write()
+	value := write.Value()
+	refs := write.References()
+	topologyBadRead, err := configuration.TopologyFromCap(dbversion, &refs, value)
+	return topologyBadRead, txnId, false, err
 }

@@ -21,7 +21,6 @@ func (task *migrate) isValid() bool {
 		active.Version < task.targetConfig.Version &&
 		active.NextConfiguration != nil &&
 		active.NextConfiguration.Version == task.targetConfig.Version &&
-		task.subscribed &&
 		active.NextConfiguration.InstalledOnNew &&
 		active.NextConfiguration.QuietRMIds[task.self] &&
 		len(active.NextConfiguration.Pending) > 0
