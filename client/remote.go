@@ -71,8 +71,8 @@ func NewRemoteTransactionSubmitter(namespace []byte, connPub sconn.ServerConnect
 }
 
 func (rts *RemoteTransactionSubmitter) TopologyChanged(topology *configuration.Topology) error {
-	utils.DebugLog(rts.logger, "debug", "RTS Topology Changed.", "topology", topology, "blank", topology.IsBlank())
-	if !topology.IsBlank() {
+	utils.DebugLog(rts.logger, "debug", "RTS Topology Changed.", "topology", topology)
+	if topology != nil {
 		rts.cache.SetResolver(ch.NewResolver(topology.RMs, topology.TwoFInc))
 	}
 	return rts.TransactionSubmitter.TopologyChanged(topology)
@@ -240,7 +240,7 @@ func (rts *RemoteTransactionSubmitter) submitRemoteClientTransaction(origTxnId, 
 		return cont(origTxnId, txnId, nil, fmt.Errorf("Illegal txnId %v", txnId))
 	}
 
-	if rts.topology.IsBlank() {
+	if rts.topology == nil {
 		rts.bufferedSubmissions = append(rts.bufferedSubmissions, func() {
 			rts.submitRemoteClientTransaction(origTxnId, txnId, txn, cont, forceSubmission)
 		})
@@ -456,7 +456,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 			if !found {
 				c, found = rts.cache.m[*vUUId]
 				if !found || !c.onClient {
-					utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "found", found, "onClient", c.onClient)
+					utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "found", found)
 					continue
 				}
 			}
@@ -539,7 +539,7 @@ func (rts *RemoteTransactionSubmitter) expandRefs(c *Cached) {
 		} else {
 			pos := common.Positions(ref.Positions())
 			rts.cache.AddCached(vUUId, &Cached{
-				VerClock:  VerClock{Version: common.VersionZero},
+				VerClock:  types.VerClock{Version: common.VersionZero},
 				caps:      caps,
 				positions: &pos,
 			})

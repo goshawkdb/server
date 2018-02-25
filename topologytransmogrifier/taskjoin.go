@@ -2,6 +2,7 @@ package topologytransmogrifier
 
 import (
 	"goshawkdb.io/common"
+	"goshawkdb.io/server/configuration"
 )
 
 // joinCluster
@@ -11,6 +12,7 @@ import (
 
 type joinCluster struct {
 	*transmogrificationTask
+	base *configuration.Topology
 }
 
 func (task *joinCluster) init(base *transmogrificationTask) {
@@ -20,7 +22,7 @@ func (task *joinCluster) init(base *transmogrificationTask) {
 func (task *joinCluster) isValid() bool {
 	active := task.activeTopology
 	return active != nil && len(active.ClusterId) == 0 &&
-		task.targetConfig != nil
+		task.targetConfig != nil && task.base == nil
 }
 
 func (task *joinCluster) announce() {
@@ -71,17 +73,15 @@ func (task *joinCluster) Tick() (bool, error) {
 			allRMIds[idx] = cd.RMId
 		}
 
-		activeClone = task.activeTopology.Clone()
-		activeClone.ClusterId = targetClone.ClusterId
 		activeClone.Hosts = targetClone.Hosts
 		activeClone.F = targetClone.F
 		activeClone.MaxRMCount = targetClone.MaxRMCount
 		activeClone.RMs = allRMIds
+
 		// we have to do this to correct the value of TwoFInc which is
 		// used e.g. by localConnection.
 		activeClone.SetConfiguration(activeClone.Configuration)
-
-		return task.setActiveTopology(activeClone)
+		task.base = activeClone
 
 	} else {
 		// If we're not allJoining then we need the previous config
@@ -89,7 +89,12 @@ func (task *joinCluster) Tick() (bool, error) {
 		// learns of the change. The shareGoalWithAll() call above will
 		// ensure this happens.
 
+		task.base = activeClone
 		task.inner.Logger.Log("msg", "Requesting help from existing cluster members for topology change.")
-		return false, nil
 	}
+	return task.completed()
+}
+
+func (task *joinCluster) baseTopology() *configuration.Topology {
+	return task.base
 }

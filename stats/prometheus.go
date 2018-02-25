@@ -118,7 +118,7 @@ func (pl *PrometheusListener) putTopology(topology *configuration.Topology) {
 	pl.topology = topology
 	pl.topologyLock.Unlock()
 
-	if topology.IsBlank() {
+	if topology == nil {
 		return
 	}
 

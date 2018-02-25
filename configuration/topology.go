@@ -5,18 +5,21 @@ import (
 	capn "github.com/glycerine/go-capnproto"
 	"goshawkdb.io/common"
 	msgs "goshawkdb.io/server/capnp"
+	"goshawkdb.io/server/types"
 )
 
 var (
 	TopologyVarUUId = common.MakeVarUUId([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
-	VersionOne      = common.MakeTxnId([]byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) // RMId 0 cannot exist so everything else is safe
+	// RMId 0 cannot exist so everything else is safe
+	VersionOne = common.MakeTxnId([]byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+	VersionTwo = common.MakeTxnId([]byte{0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
 )
 
 type Topology struct {
 	*Configuration
 	FInc         uint8
 	TwoFInc      uint16
-	DBVersion    *common.TxnId
+	VerClock     types.VerClock
 	RootVarUUIds Roots
 }
 
@@ -43,16 +46,15 @@ func BlankTopology() *Topology {
 		Configuration: BlankConfiguration(),
 		FInc:          0,
 		TwoFInc:       0,
-		DBVersion:     VersionOne,
 	}
 }
 
-func NewTopology(txnId *common.TxnId, rootsCap *msgs.VarIdPos_List, config *Configuration) *Topology {
+func NewTopology(vc types.VerClock, rootsCap *msgs.VarIdPos_List, config *Configuration) *Topology {
 	t := &Topology{
 		Configuration: config,
 		FInc:          config.F + 1,
 		TwoFInc:       (2 * uint16(config.F)) + 1,
-		DBVersion:     txnId,
+		VerClock:      vc,
 	}
 	if rootsCap != nil {
 		if rootsCap.Len() < len(config.Roots) {
@@ -76,7 +78,7 @@ func (t *Topology) Clone() *Topology {
 		Configuration: t.Configuration.Clone(),
 		FInc:          t.FInc,
 		TwoFInc:       t.TwoFInc,
-		DBVersion:     t.DBVersion,
+		VerClock:      t.VerClock,
 		RootVarUUIds:  make([]Root, len(t.RootVarUUIds)),
 	}
 	copy(c.RootVarUUIds, t.RootVarUUIds)
@@ -89,24 +91,26 @@ func (t *Topology) SetConfiguration(config *Configuration) {
 	t.TwoFInc = (2 * uint16(config.F)) + 1
 }
 
-func TopologyFromCap(txnId *common.TxnId, roots *msgs.VarIdPos_List, data []byte) (*Topology, error) {
+func TopologyFromCap(vc types.VerClock, roots *msgs.VarIdPos_List, data []byte) (*Topology, error) {
 	seg, _, err := capn.ReadFromMemoryZeroCopy(data)
 	if err != nil {
 		return nil, err
 	}
 	configCap := msgs.ReadRootConfiguration(seg)
 	config := ConfigurationFromCap(configCap)
-	return NewTopology(txnId, roots, config), nil
+	return NewTopology(vc, roots, config), nil
 }
 
 func (t *Topology) String() string {
 	if t == nil {
 		return "nil"
 	}
-	return fmt.Sprintf("Topology{%v, F+1: %v, 2F+1: %v, DBVersion: %v, RootVarUUIds: %v}",
-		t.Configuration, t.FInc, t.TwoFInc, t.DBVersion, t.RootVarUUIds)
+	return fmt.Sprintf("Topology{%v, F+1: %v, 2F+1: %v, VC: %v, RootVarUUIds: %v}",
+		t.Configuration, t.FInc, t.TwoFInc, t.VerClock, t.RootVarUUIds)
 }
 
+/*
 func (t *Topology) IsBlank() bool {
-	return t == nil || t.MaxRMCount == 0 || t.RMs.NonEmptyLen() < int(t.TwoFInc)
+	return t == nil || VersionOne.Compare(t.DBVersion) == common.EQ
 }
+*/

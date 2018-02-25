@@ -1,4 +1,4 @@
-package server
+package server // import "goshawkdb.io/server"
 
 import (
 	"time"

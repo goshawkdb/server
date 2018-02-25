@@ -40,7 +40,7 @@ func (ts *TransactionSubmitter) SubmitLocalServerTransaction(txnId *common.TxnId
 }
 
 func (ts *TransactionSubmitter) SubmitLocalClientTransaction(txnId *common.TxnId, txn *cmsgs.ClientTxn, isTopologyTxn bool, roots map[common.VarUUId]*types.PosCapVer, translationCallback loco.TranslationCallback, cont LocalTxnCompletionContinuation) error {
-	if ts.topology.IsBlank() {
+	if ts.topology == nil {
 		ts.bufferedSubmissions = append(ts.bufferedSubmissions, func() {
 			ts.SubmitLocalClientTransaction(txnId, txn, isTopologyTxn, roots, translationCallback, cont)
 		})

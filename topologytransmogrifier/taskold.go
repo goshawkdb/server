@@ -27,10 +27,13 @@ func (task *installTargetOld) init(base *transmogrificationTask) {
 }
 
 func (task *installTargetOld) isValid() bool {
+	base := task.joinCluster.baseTopology()
 	active := task.activeTopology
-	return active != nil && len(active.ClusterId) > 0 &&
+	return base != nil && len(base.ClusterId) > 0 &&
 		task.targetConfig != nil &&
-		active.Version < task.targetConfig.Version &&
+		base.Version < task.targetConfig.Version &&
+		(base.NextConfiguration == nil || base.NextConfiguration.Version < task.targetConfig.Version) &&
+		active != nil && active.Version < task.targetConfig.Version &&
 		(active.NextConfiguration == nil || active.NextConfiguration.Version < task.targetConfig.Version)
 }
 
@@ -43,7 +46,9 @@ func (task *installTargetOld) Tick() (bool, error) {
 		return task.completed()
 	}
 
-	if !task.isInRMs(task.activeTopology.RMs) {
+	base := task.joinCluster.baseTopology()
+
+	if !task.isInRMs(base.RMs) {
 		task.ensureShareGoalWithAll()
 		task.inner.Logger.Log("msg", "Awaiting existing cluster members.")
 		// this step must be performed by the existing RMs
@@ -81,20 +86,21 @@ func (task *installTargetOld) installTargetOld(targetTopology *configuration.Top
 	// We use all the nodes in the old cluster as potential
 	// acceptors. We will require a majority of them are alive. And add
 	// on all new (if there are any) as passives
-	active, passive := task.formActivePassive(task.activeTopology.RMs, targetTopology.NextConfiguration.NewRMIds)
+	base := task.joinCluster.baseTopology()
+	active, passive := task.formActivePassive(base.RMs, targetTopology.NextConfiguration.NewRMIds)
 	if active == nil {
 		return false, nil
 	}
 
-	twoFInc := uint16(task.activeTopology.RMs.NonEmptyLen())
+	twoFInc := uint16(base.RMs.NonEmptyLen())
 	txn := task.createTopologyTransaction(task.activeTopology, targetTopology, twoFInc, active, passive)
 	task.runTopologyTransaction(txn, active, passive, targetTopology)
 	return false, nil
 }
 
 func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology, int, bool, error) {
-	active := task.activeTopology
-	localHost, err := task.firstLocalHost(active.Configuration)
+	base := task.joinCluster.baseTopology()
+	localHost, err := task.firstLocalHost(base.Configuration)
 	if err != nil {
 		terminate, err := task.fatal(err)
 		return nil, 0, terminate, err
@@ -112,12 +118,12 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		make(map[string]common.RMId),
 		make(map[string]*sconn.ServerConnection)
 
-	allRemoteHosts := make([]string, 0, len(active.Hosts)+len(task.targetConfig.Hosts))
+	allRemoteHosts := make([]string, 0, len(base.Hosts)+len(task.targetConfig.Hosts))
 
 	// 1. Start by assuming all old hosts have been removed
-	rmIdsOld := active.RMs.NonEmpty()
+	rmIdsOld := base.RMs.NonEmpty()
 	// rely on hosts and rms being in the same order.
-	hostsOld := active.Hosts
+	hostsOld := base.Hosts
 	for idx, host := range hostsOld {
 		hostsRemoved[host] = rmIdsOld[idx]
 		if host != localHost {
@@ -143,7 +149,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// uses a client transaction which means we have to make sure a
 	// non-blank topology has made it into localConnection before we
 	// try to create roots. Hence using the callback mechanism here.
-	task.installTopology(active, map[topo.TopologyChangeSubscriberType]func() (bool, error){
+	task.installTopology(base, map[topo.TopologyChangeSubscriberType]func() (bool, error){
 		topo.ConnectionSubscriber: func() (bool, error) {
 			if task.currentTask == task && task.onTopologyInstalled != nil {
 				return task.onTopologyInstalled()
@@ -155,7 +161,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 
 	// the -1 is because allRemoteHosts will not include localHost
 	hostsAddedList := allRemoteHosts[len(hostsRemoved)-1:]
-	allAddedFound, clusterUUId, err := task.verifyClusterUUIds(active.ClusterUUId, hostsAddedList)
+	allAddedFound, clusterUUId, err := task.verifyClusterUUIds(base.ClusterUUId, hostsAddedList)
 	if err != nil {
 		terminate, err := task.error(err)
 		return nil, 0, terminate, err
@@ -205,7 +211,7 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	hostsNew := make([]string, 0, len(allRemoteHosts)+1)
 	rmIdsNew := make([]common.RMId, 0, len(allRemoteHosts)+1)
 	rmIdsLost := make([]common.RMId, 0, len(hostsRemoved))
-	for _, rmIdOld := range active.RMs { // need the gaps!
+	for _, rmIdOld := range base.RMs { // need the gaps!
 		rmIdNew := rmIdsTranslation[rmIdOld]
 		switch {
 		case rmIdNew == common.RMIdEmpty && len(connsAddedCopy) > 0: // removal of old, and we have conn added
@@ -251,10 +257,10 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// the hosts in the cmdline config.
 	nextConfig.Hosts = hostsNew
 
-	activeCloned := active.Clone()
+	baseCloned := base.Clone()
 	// Pointer semantics, so we need to copy into our new set
 	removed := make(map[common.RMId]types.EmptyStruct)
-	for rmId := range activeCloned.RMsRemoved {
+	for rmId := range baseCloned.RMsRemoved {
 		removed[rmId] = types.EmptyStructVal
 	}
 	for _, rmId := range rmIdsLost {
@@ -266,11 +272,11 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	for idx, cd := range connsAdded {
 		rmIdsAdded[idx] = cd.RMId
 	}
-	conds := calculateMigrationConditions(rmIdsAdded, rmIdsLost, rmIdsSurvived, task.activeTopology.Configuration, nextConfig)
+	conds := calculateMigrationConditions(rmIdsAdded, rmIdsLost, rmIdsSurvived, base.Configuration, nextConfig)
 
 	// now figure out which roots have survived and how many new ones
 	// we need to create.
-	oldNamesList := active.Roots
+	oldNamesList := base.Roots
 	oldNamesCount := len(oldNamesList)
 	oldNames := make(map[string]uint32, oldNamesCount)
 	for idx, name := range oldNamesList {
@@ -288,9 +294,9 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 		}
 	}
 
-	activeCloned.RootVarUUIds = activeCloned.RootVarUUIds[:oldNamesCount]
+	baseCloned.RootVarUUIds = baseCloned.RootVarUUIds[:oldNamesCount]
 
-	activeCloned.NextConfiguration = &configuration.NextConfiguration{
+	baseCloned.NextConfiguration = &configuration.NextConfiguration{
 		Configuration:  nextConfig,
 		AllHosts:       append(allRemoteHosts, localHost),
 		NewRMIds:       rmIdsAdded,
@@ -304,10 +310,10 @@ func (task *installTargetOld) calculateTargetTopology() (*configuration.Topology
 	// to one with a non-nil next. Therefore, we must ensure the
 	// ClusterUUId is non-0 and consistent down the chain. Of course,
 	// the txn will ensure only one such rewrite will win.
-	activeCloned.EnsureClusterUUId(clusterUUId)
-	utils.DebugLog(task.inner.Logger, "debug", "Set cluster uuid.", "uuid", activeCloned.ClusterUUId)
+	baseCloned.EnsureClusterUUId(clusterUUId)
+	utils.DebugLog(task.inner.Logger, "debug", "Set cluster uuid.", "uuid", baseCloned.ClusterUUId)
 
-	return activeCloned, rootsRequired, false, nil
+	return baseCloned, rootsRequired, false, nil
 }
 
 func calculateMigrationConditions(added, lost, survived []common.RMId, from, to *configuration.Configuration) configuration.Conds {

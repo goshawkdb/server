@@ -8,9 +8,11 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/types"
 	topo "goshawkdb.io/server/types/topology"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/txnreader"
+	"goshawkdb.io/server/utils/vectorclock"
 )
 
 func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
@@ -22,8 +24,14 @@ func (tt *TopologyTransmogrifier) maybeTick() (bool, error) {
 }
 
 func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topology) (bool, error) {
-	utils.DebugLog(tt.inner.Logger, "debug", "SetActiveTopology.", "topology", topology)
+	//utils.DebugLog(tt.inner.Logger, "debug", "SetActiveTopology.", "topology", topology)
+	tt.inner.Logger.Log("debug", "SetActiveTopology.", "activeTopology", tt.activeTopology, "topology", topology)
 	if tt.activeTopology != nil {
+		if !tt.activeTopology.VerClock.Before(topology.VerClock) {
+			// topology is either eq or before activeTopology. So ignore it.
+			tt.inner.Logger.Log("debug", "SetActiveTopology ignored: too old.")
+			return false, nil
+		}
 		switch {
 		case tt.activeTopology.ClusterId != topology.ClusterId && len(tt.activeTopology.ClusterId) > 0:
 			return false, fmt.Errorf("Topology: Fatal: config with ClusterId change from '%s' to '%s'.",
@@ -32,15 +40,6 @@ func (tt *TopologyTransmogrifier) setActiveTopology(topology *configuration.Topo
 		case topology.Version < tt.activeTopology.Version:
 			tt.inner.Logger.Log("msg", "Ignoring config with version less than active version.",
 				"goalVersion", topology.Version, "activeVersion", tt.activeTopology.Version)
-			return false, nil
-
-		case tt.activeTopology.DBVersion.Compare(topology.DBVersion) == common.EQ &&
-			tt.activeTopology.Configuration.Equal(topology.Configuration):
-			// silently ignore it. Don't simplify this to just the
-			// DBVersion comparison: during join, we go from blank to
-			// blank-with-bits without going via the DB so the DBVersion
-			// doesn't change in that case.
-			tt.subscriber.Subscribe()
 			return false, nil
 		}
 	}
@@ -211,7 +210,7 @@ func (tt *TopologyTransmogrifier) isInRMs(rmIds common.RMIds) bool {
 	return false
 }
 
-func (tt *TopologyTransmogrifier) submitTopologyTransaction(txn *msgs.Txn, subscriptionConsumer client.SubscriptionConsumer, active, passive common.RMIds) (*configuration.Topology, *common.TxnId, bool, error) {
+func (tt *TopologyTransmogrifier) submitTopologyTransaction(txn *msgs.Txn, subscriptionConsumer client.SubscriptionConsumer, active, passive common.RMIds) (*configuration.Topology, *types.VerClock, bool, error) {
 	// in general, we do backoff locally, so don't pass backoff through here
 	utils.DebugLog(tt.inner.Logger, "debug", "Running transaction.", "active", active, "passive", passive)
 	txnReader, result, err := tt.localConnection.RunTransaction(txn, nil, subscriptionConsumer, nil, active...)
@@ -220,13 +219,14 @@ func (tt *TopologyTransmogrifier) submitTopologyTransaction(txn *msgs.Txn, subsc
 	}
 	txnId := txnReader.Id
 	if result.Which() == msgs.OUTCOME_COMMIT {
+		clockElem := vectorclock.VectorClockFromData(result.Commit(), true).At(configuration.TopologyVarUUId)
 		utils.DebugLog(tt.inner.Logger, "debug", "Txn Committed.", "TxnId", txnId)
-		return nil, txnId, false, nil
+		return nil, &types.VerClock{ClockElem: clockElem, Version: txnId}, false, nil
 	}
 	abort := result.Abort()
 	utils.DebugLog(tt.inner.Logger, "debug", "Txn Aborted.", "TxnId", txnId)
 	if abort.Which() == msgs.OUTCOMEABORT_RESUBMIT {
-		return nil, txnId, true, nil
+		return nil, nil, true, nil
 	}
 	abortUpdates := abort.Rerun()
 	if abortUpdates.Len() != 1 {
@@ -235,7 +235,9 @@ func (tt *TopologyTransmogrifier) submitTopologyTransaction(txn *msgs.Txn, subsc
 				abortUpdates.Len()))
 	}
 	update := abortUpdates.At(0)
-	dbversion := common.MakeTxnId(update.TxnId())
+	version := common.MakeTxnId(update.TxnId())
+	clockElem := vectorclock.VectorClockFromData(update.Clock(), true).At(configuration.TopologyVarUUId)
+	vc := types.VerClock{ClockElem: clockElem, Version: version}
 
 	updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 	if updateActions.Len() != 1 {
@@ -256,6 +258,7 @@ func (tt *TopologyTransmogrifier) submitTopologyTransaction(txn *msgs.Txn, subsc
 	write := updateValue.Existing().Modify().Write()
 	value := write.Value()
 	refs := write.References()
-	topologyBadRead, err := configuration.TopologyFromCap(dbversion, &refs, value)
-	return topologyBadRead, txnId, false, err
+	topologyBadRead, err := configuration.TopologyFromCap(vc, &refs, value)
+	utils.DebugLog(tt.inner.Logger, "debug", "submitTopologyTransaction, badread.", "vc", vc, "value", value, "topology", topologyBadRead)
+	return topologyBadRead, nil, false, err
 }

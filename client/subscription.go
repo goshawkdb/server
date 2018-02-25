@@ -19,7 +19,7 @@ type SubscriptionConsumer func(sm *SubscriptionManager, txn *txnreader.TxnReader
 
 func NewSubscriptionManager(subId *common.TxnId, tr *TransactionRecord, consumer SubscriptionConsumer) *SubscriptionManager {
 	actions := txnreader.TxnActionsFromData(tr.server.Actions(), true).Actions()
-	cache := make(map[common.VarUUId]*VerClock, actions.Len())
+	cache := make(map[common.VarUUId]*types.VerClock, actions.Len())
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
 		meta := action.Meta()
@@ -39,7 +39,7 @@ func NewSubscriptionManager(subId *common.TxnId, tr *TransactionRecord, consumer
 				continue
 			}
 			vUUId := common.MakeVarUUId(action.VarId())
-			cache[*vUUId] = &VerClock{Version: version}
+			cache[*vUUId] = &types.VerClock{Version: version}
 		}
 	}
 	return &SubscriptionManager{
@@ -56,13 +56,8 @@ type SubscriptionManager struct {
 	subId       *common.TxnId
 	consumer    SubscriptionConsumer
 	incomplete  map[common.TxnId]*subscriptionUpdate
-	cache       map[common.VarUUId]*VerClock
+	cache       map[common.VarUUId]*types.VerClock
 	terminating bool
-}
-
-type VerClock struct {
-	Version   *common.TxnId
-	ClockElem uint64
 }
 
 type subscriptionUpdate struct {

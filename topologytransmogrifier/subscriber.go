@@ -29,7 +29,7 @@ func (s *subscriber) Subscribe() (bool, error) {
 	// attempting subscriber).
 
 	topology := s.activeTopology
-	if topology == nil || topology.IsBlank() {
+	if topology == nil {
 		return false, nil
 	}
 	active, passive := s.topologyRMIds(topology)
@@ -38,17 +38,15 @@ func (s *subscriber) Subscribe() (bool, error) {
 	all = append(all, passive...)
 	all.Sort()
 
-	if rmsEq := all.Equal(s.rms); s.subscribed {
-		if rmsEq {
-			return false, nil
-		}
-	} else if s.runTxnMsg != nil { // not subscribed, but we're trying...
-		if rmsEq && s.readVsn.Compare(topology.DBVersion) == common.EQ {
+	if rmsEq := all.Equal(s.rms); s.subscribed && rmsEq {
+		return false, nil
+	} else if !s.subscribed && s.runTxnMsg != nil { // not subscribed, but we're trying...
+		if rmsEq && s.readVsn.Compare(topology.VerClock.Version) == common.EQ {
 			return false, nil
 		}
 	}
 
-	fmt.Println("Subscriber", s.readVsn, topology.DBVersion, s.subscribed, s.rms, all)
+	fmt.Println("Subscriber", s.readVsn, topology.VerClock, s.subscribed, s.rms, all)
 
 	active, passive = s.formActivePassive(active, passive)
 	if active == nil {
@@ -60,7 +58,7 @@ func (s *subscriber) Subscribe() (bool, error) {
 	txn := s.createSubscribeTxn(topology, active, passive, twoFInc)
 
 	s.subscribed = false
-	s.readVsn = topology.DBVersion
+	s.readVsn = topology.VerClock.Version
 	s.rms = all
 	s.runTxnMsg = &topologyTransmogrifierMsgAddSubscription{
 		subscriber: s,
@@ -95,7 +93,7 @@ func (s *subscriber) createSubscribeTxn(topology *configuration.Topology, active
 	action.SetVarId(configuration.TopologyVarUUId[:])
 	value := action.Value()
 	value.SetExisting()
-	value.Existing().SetRead(topology.DBVersion[:])
+	value.Existing().SetRead(topology.VerClock.Version[:])
 	value.Existing().Modify().SetNot()
 	meta := action.Meta()
 	meta.SetAddSub(true)

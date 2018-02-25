@@ -178,7 +178,7 @@ func (msg *configPublisherMsg) Exec() (bool, error) {
 		Version:    msg.vsn,
 	}
 
-	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "config", string(msg.json), "readVersion", msg.vsn)
+	utils.DebugLog(msg.inner.Logger, "debug", "Publishing Config.", "configuration", string(msg.json), "readVersion", msg.vsn)
 
 	go func() {
 		_, result, err := msg.localConnection.RunClientTransaction(&ctxn, false, varPosMap, nil)

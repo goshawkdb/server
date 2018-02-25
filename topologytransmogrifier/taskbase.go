@@ -11,11 +11,13 @@ import (
 	cmsgs "goshawkdb.io/common/capnp"
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/binarybackoff"
 	"goshawkdb.io/server/utils/senders"
 	"goshawkdb.io/server/utils/txnreader"
+	"goshawkdb.io/server/utils/vectorclock"
 	"time"
 )
 
@@ -207,6 +209,7 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 	if write == nil && read != nil {
 		panic("Topology transaction with nil write and non-nil read not supported")
 	}
+	utils.DebugLog(tt.inner.Logger, "debug", "createTopologyTransaction", "read", read, "write", write)
 
 	seg := capn.NewBuffer(nil)
 	txn := msgs.NewRootTxn(seg)
@@ -245,7 +248,7 @@ func (tt *transmogrificationTask) createTopologyTransaction(read, write *configu
 	default: // modification
 		value.SetExisting()
 		existing := value.Existing()
-		existing.SetRead(read.DBVersion[:])
+		existing.SetRead(read.VerClock.Version[:])
 		existing.Modify().SetWrite()
 		modWrite := existing.Modify().Write()
 		modWrite.SetValue(write.Serialize())
@@ -320,7 +323,12 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 			return nil, fmt.Errorf("Internal error: read of topology version 0 gave multiple updates")
 		}
 		update := abortUpdates.At(0)
-		dbversion := common.MakeTxnId(update.TxnId())
+		clockElem := vectorclock.VectorClockFromData(update.Clock(), true).At(configuration.TopologyVarUUId)
+		version := common.MakeTxnId(update.TxnId())
+		vc := types.VerClock{
+			ClockElem: clockElem,
+			Version:   version,
+		}
 		updateActions := txnreader.TxnActionsFromData(update.Actions(), true).Actions()
 		if updateActions.Len() != 1 {
 			return nil, fmt.Errorf("Internal error: read of topology version 0 didn't give 1 update action: %v", updateActions.Len())
@@ -336,14 +344,14 @@ func (tt *transmogrificationTask) getTopologyFromLocalDatabase() (*configuration
 		write := updateValue.Existing().Modify().Write()
 		value := write.Value()
 		refs := write.References()
-		return configuration.TopologyFromCap(dbversion, &refs, value)
+		return configuration.TopologyFromCap(vc, &refs, value)
 	}
 }
 
 func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology, error) {
 	topology := configuration.BlankTopology()
 	txn := tt.createTopologyTransaction(nil, topology, 1, []common.RMId{tt.self}, nil)
-	txnId := topology.DBVersion
+	txnId := configuration.VersionOne
 	txn.SetId(txnId[:])
 	// in general, we do backoff locally, so don't pass backoff through here
 	_, result, err := tt.localConnection.RunTransaction(txn, txnId, nil, nil, tt.self)
@@ -354,6 +362,11 @@ func (tt *transmogrificationTask) createTopologyZero() (*configuration.Topology,
 		return nil, nil // shutting down
 	}
 	if result.Which() == msgs.OUTCOME_COMMIT {
+		topology = topology.Clone()
+		topology.VerClock = types.VerClock{
+			ClockElem: vectorclock.VectorClockFromData(result.Commit(), true).At(configuration.TopologyVarUUId),
+			Version:   txnId,
+		}
 		return topology, nil
 	} else {
 		return nil, fmt.Errorf("Internal error: unable to write initial topology to local data store")
@@ -380,8 +393,8 @@ func (tt *transmogrificationTask) attemptCreateRoots(rootCount int) (bool, confi
 		root.VarUUId = vUUId
 	}
 	ctxn.SetActions(actions)
-	txnReader, result, err := tt.localConnection.RunClientTransaction(&ctxn, false, nil, nil)
-	utils.DebugLog(tt.inner.Logger, "debug", "Created root.", "result", result, "error", err)
+	txnReader, result, err := tt.localConnection.RunClientTransaction(&ctxn, true, nil, nil)
+	utils.DebugLog(tt.inner.Logger, "debug", "Created roots.", "error", err)
 	if err != nil {
 		return false, nil, err
 	}

@@ -7,6 +7,7 @@ import (
 	msgs "goshawkdb.io/server/capnp"
 	"goshawkdb.io/server/client"
 	"goshawkdb.io/server/configuration"
+	"goshawkdb.io/server/types"
 	sconn "goshawkdb.io/server/types/connections/server"
 	"goshawkdb.io/server/utils"
 	"goshawkdb.io/server/utils/binarybackoff"
@@ -20,7 +21,7 @@ type topologyTransmogrifierMsgRequestConfigChange struct {
 }
 
 func (msg topologyTransmogrifierMsgRequestConfigChange) Exec() (bool, error) {
-	utils.DebugLog(msg.inner.Logger, "debug", "Topology change request.", "config", msg.config)
+	utils.DebugLog(msg.inner.Logger, "debug", "Topology change request.", "configuration", msg.config)
 	nonFatalErr := msg.setTarget(msg.config)
 	// because this is definitely not the cmd-line config, an error here is non-fatal
 	if nonFatalErr != nil {
@@ -77,16 +78,6 @@ func (tt *TopologyTransmogrifier) ConnectionEstablished(conn *sconn.ServerConnec
 	}
 }
 
-type topologyTransmogrifierMsgTopologyObserved struct {
-	*TopologyTransmogrifier
-	topology *configuration.Topology
-}
-
-func (msg topologyTransmogrifierMsgTopologyObserved) Exec() (bool, error) {
-	utils.DebugLog(msg.inner.Logger, "debug", "New topology observed.", "topology", msg.topology)
-	return msg.setActiveTopology(msg.topology)
-}
-
 type topologyTransmogrifierMsgRunTransaction struct {
 	*transmogrificationTask
 	task    Task
@@ -108,27 +99,21 @@ func (msg *topologyTransmogrifierMsgRunTransaction) Exec() (bool, error) {
 }
 
 func (msg *topologyTransmogrifierMsgRunTransaction) runTxn() {
-	topologyBadRead, txnId, resubmit, err := msg.submitTopologyTransaction(msg.txn, nil, msg.active, msg.passive)
+	topologyBadRead, vc, resubmit, err := msg.submitTopologyTransaction(msg.txn, nil, msg.active, msg.passive)
 	switch {
 	case err != nil:
 		msg.EnqueueFuncAsync(func() (bool, error) { return false, err })
 	case resubmit:
 		// do nothing - just rely on the backoff to resubmit the txn
 	default:
-		// either it's commit or rerun-abort-badread
 		msg.EnqueueFuncAsync(func() (bool, error) {
 			if msg.currentTask == msg.task && msg.runTxnMsg == msg {
 				msg.runTxnMsg = nil
 			}
-			// Basically, we don't really care about the potential for
-			// calls to setActiveTopology to be "out of order" wrt the
-			// real topology. This is because the worst that will happen
-			// is that another txn will be run against an old topology,
-			// which will fail with badRead, so eventually everything
-			// should sort itself out.
 			if topologyBadRead == nil { // it committed
+				utils.DebugLog(msg.inner.Logger, "debug", "Committed.", "TxnId", vc.Version)
 				target := msg.target.Clone()
-				target.DBVersion = txnId
+				target.VerClock = *vc
 				return msg.setActiveTopology(target)
 			} else {
 				return msg.setActiveTopology(topologyBadRead)
@@ -182,7 +167,6 @@ type topologyTransmogrifierMsgAddSubscription struct {
 	target  *configuration.Topology
 	active  common.RMIds
 	passive common.RMIds
-	client.VerClock
 }
 
 func (msg *topologyTransmogrifierMsgAddSubscription) Exec() (bool, error) {
@@ -196,7 +180,7 @@ func (msg *topologyTransmogrifierMsgAddSubscription) Exec() (bool, error) {
 }
 
 func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
-	topologyBadRead, txnId, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.SubscriptionConsumer, msg.active, msg.passive)
+	topologyBadRead, vc, resubmit, err := msg.submitTopologyTransaction(msg.txn, msg.SubscriptionConsumer, msg.active, msg.passive)
 	switch {
 	case err != nil:
 		msg.EnqueueFuncAsync(func() (bool, error) { return false, err })
@@ -212,11 +196,11 @@ func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
 				fmt.Println("Subscriber ready.")
 				msg.subscribed = true
 				target := msg.target.Clone()
-				target.DBVersion = txnId
+				target.VerClock = *vc
 				return msg.setActiveTopology(target)
 			} else {
 				msg.runTxnMsg = nil
-				fmt.Println("Subscriber badread", topologyBadRead.DBVersion)
+				fmt.Println("Subscriber badread", topologyBadRead.VerClock)
 				return msg.setActiveTopology(topologyBadRead)
 			}
 		})
@@ -225,7 +209,7 @@ func (msg *topologyTransmogrifierMsgAddSubscription) runTxn() {
 
 func (msg *topologyTransmogrifierMsgAddSubscription) SubscriptionConsumer(sm *client.SubscriptionManager, txn *txnreader.TxnReader, outcome *msgs.Outcome) error {
 	// here we are in the localConnection thread
-	msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id)
+	msg.inner.Logger.Log("msg", "Subscriber update received.", "SubId", sm.Id, "TxnId", txn.Id)
 	actions := txn.Actions(true).Actions()
 	for idx, l := 0, actions.Len(); idx < l; idx++ {
 		action := actions.At(idx)
@@ -234,37 +218,36 @@ func (msg *topologyTransmogrifierMsgAddSubscription) SubscriptionConsumer(sm *cl
 			continue
 		}
 		if value := action.Value(); value.Which() != msgs.ACTIONVALUE_EXISTING {
-			msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id, "action", "not existing")
+			msg.inner.Logger.Log("msg", "Subscriber update received.", "SubId", sm.Id, "TxnId", txn.Id, "action", "not existing")
 			continue
 		} else if modify := value.Existing().Modify(); modify.Which() != msgs.ACTIONVALUEEXISTINGMODIFY_WRITE {
-			msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id, "action", "not write")
+			msg.inner.Logger.Log("msg", "Subscriber update received.", "SubId", sm.Id, "TxnId", txn.Id, "action", "not write")
 			continue
 		} else {
-			txnId := txn.Id
-			clock := vectorclock.VectorClockFromData(outcome.Commit(), false)
-			clockElem := clock.At(vUUId)
-			cmp := msg.Version.Compare(txnId)
-			msg.inner.Logger.Log("msg", "Subscriber update received.", "subId", sm.Id, "txnId", txn.Id, "clockOld", msg.ClockElem, "clockNew", clockElem, "versionOld", msg.Version, "versionNew", txnId)
-			if clockElem > msg.ClockElem || (clockElem == msg.ClockElem && cmp == common.LT) {
-				msg.ClockElem = clockElem
-				msg.Version = txnId
+			msg.EnqueueFuncAsync(func() (bool, error) {
+				if msg.runTxnMsg != msg {
+					// TODO: unsubscribe
+					msg.inner.Logger.Log("msg", "Subscriber unsubscribe?!")
+					return false, nil
+				}
+
+				clockElem := vectorclock.VectorClockFromData(outcome.Commit(), true).At(vUUId)
+				msg.inner.Logger.Log("msg", "Subscriber update received.", "SubId", sm.Id, "TxnId", txn.Id)
 				write := modify.Write()
 				value := write.Value()
 				refs := write.References()
-				topology, err := configuration.TopologyFromCap(txnId, &refs, value)
-				msg.EnqueueFuncAsync(func() (bool, error) {
-					if err != nil {
-						return false, err
-					} else if msg.runTxnMsg != msg {
-						// TODO: unsubscribe
-						msg.inner.Logger.Log("msg", "Subscriber unsubscribe?!")
-						return false, nil
-					} else {
-						msg.inner.Logger.Log("msg", "Received new topology from subscription.", "topology", topology)
-						return msg.setActiveTopology(topology)
-					}
-				})
-			}
+				vc := types.VerClock{
+					ClockElem: clockElem,
+					Version:   txn.Id,
+				}
+				topology, err := configuration.TopologyFromCap(vc, &refs, value)
+				if err != nil {
+					return false, err
+				} else {
+					msg.inner.Logger.Log("msg", "Received new topology from subscription.", "topology", topology)
+					return msg.setActiveTopology(topology)
+				}
+			})
 			break
 		}
 	}

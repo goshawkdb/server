@@ -93,8 +93,8 @@ func (ts *TransactionSubmitter) SubmissionOutcomeReceived(sender common.RMId, su
 }
 
 func (ts *TransactionSubmitter) TopologyChanged(topology *configuration.Topology) error {
-	utils.DebugLog(ts.logger, "debug", "TS Topology Changed.", "topology", topology, "blank", topology.IsBlank())
-	if topology.IsBlank() {
+	utils.DebugLog(ts.logger, "debug", "TS Topology Changed.", "topology", topology)
+	if topology == nil {
 		// topology is needed for client txns. As we're booting up, we
 		// just don't care.
 		return nil
@@ -127,7 +127,7 @@ func (ts *TransactionSubmitter) calculateDisabledHashcodes() error {
 	utils.DebugLog(ts.logger, "debug", "TS disabled hash codes.", "disabledHashCodes", ts.disabledHashCodes)
 	// need to wait until we've updated disabledHashCodes before
 	// starting up any buffered txns.
-	if !ts.topology.IsBlank() && len(ts.bufferedSubmissions) != 0 {
+	if ts.topology != nil && len(ts.bufferedSubmissions) != 0 {
 		funs := ts.bufferedSubmissions
 		ts.bufferedSubmissions = nil
 		for _, fun := range funs {
