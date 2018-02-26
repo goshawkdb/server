@@ -265,7 +265,6 @@ func (tr *TransactionRecord) SubmissionOutcomeReceived(sender common.RMId, subId
 	} else {
 		return tr.subManager.SubmissionOutcomeReceived(sender, txn, outcome)
 	}
-	return nil
 }
 
 func (tr *TransactionRecord) terminate() {

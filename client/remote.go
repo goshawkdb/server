@@ -356,6 +356,7 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 					c.refs = write.References().ToArray()
 				}
 
+				c.onClient = true
 				c.Version = txnId
 				c.ClockElem = clockElem
 				c.counter = counter
@@ -397,6 +398,7 @@ func (rts *RemoteTransactionSubmitter) SubscriptionConsumer(sm *SubscriptionMana
 				c.Version = common.VersionZero
 				c.ClockElem = 0
 				c.refs = nil
+				c.onClient = false
 			}
 		}
 	}
@@ -449,13 +451,16 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 			action := actions.At(idy)
 			vUUId := common.MakeVarUUId(action.VarId())
 			clockElem := clock.At(vUUId)
-			c, found := tr.objs[*vUUId]
+			c, inTxn := tr.objs[*vUUId]
 			// If the elem is mentioned in objs and we can read the obj
 			// then this must go down to the client even if version is
 			// zero.
-			if !found {
+			if !inTxn {
+				found := false
 				c, found = rts.cache.m[*vUUId]
 				if !found || !c.onClient {
+					// So, if it's not in the txn, then we will only issue
+					// updates for it if it's already on the client.
 					utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "found", found)
 					continue
 				}
@@ -483,22 +488,23 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 				// is the txnId of the actual transaction, and so again,
 				// if that is in the future of our cached value then we
 				// have to delete vUUId from the client cache.
-				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "MISSING", "clockElem", clockElem, "clockElemCached", c.ClockElem)
+				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "MISSING", "clockElem", clockElem, "clockElemCached", c.ClockElem, "onClient", c.onClient)
 				if clockElem > c.ClockElem || (clockElem == c.ClockElem && cmp == common.LT) {
-					c.onClient = false
 					c.Version = txnId
 					c.ClockElem = clockElem
-					c.refs = nil
-					results[*vUUId] = &valueCached{c: c}
+					if c.onClient {
+						c.onClient = false
+						c.refs = nil
+						results[*vUUId] = &valueCached{c: c}
+					}
 				}
 
 			case msgs.ACTIONVALUE_EXISTING:
 				// We have a write with a real value:
-				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "WRITEONLY", "clockElem", clockElem, "clockElemCached", c.ClockElem)
-				// If the client doesn't have a value (!c.onClient) then
-				// we never get here, so we don't need to worry about an
-				// EQ match with !c.onClient in here.
-				if clockElem > c.ClockElem || (clockElem == c.ClockElem && cmp == common.LT) {
+				utils.DebugLog(rts.logger, "TxnId", txnId, "VarUUId", vUUId, "action", "WRITEONLY", "clockElem", clockElem, "clockElemCached", c.ClockElem, "onClient", c.onClient)
+				if clockElem > c.ClockElem ||
+					(clockElem == c.ClockElem &&
+						((cmp == common.LT) || (cmp == common.EQ && !c.onClient))) {
 					// If the above condition fails, then the update
 					// must pre-date our current knowledge of vUUId. So
 					// we're not going to send it to the client in which
@@ -506,6 +512,7 @@ func (rts *RemoteTransactionSubmitter) filterUpdates(updates *msgs.Update_List, 
 					// refs can't widen: we already know everything the
 					// client knows and we're not extending that. So
 					// it's safe to totally ignore it.
+					c.onClient = true
 					c.Version = txnId
 					c.ClockElem = clockElem
 					modify := value.Existing().Modify()

@@ -302,7 +302,7 @@ func (msg *connectionManagerMsgClientEstablished) Exec() (bool, error) {
 		}
 		msg.lock.Unlock()
 		msg.servers = msg.cloneRMToServer()
-		msg.clientTxnMetrics = msg.clientTxnMetrics
+		msg.clientTxnMetrics = msg.ConnectionManager.clientTxnMetrics
 	}
 	return false, nil
 }

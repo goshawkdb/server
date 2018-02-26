@@ -51,8 +51,10 @@ func (task *ensureLocalTopology) Tick() (bool, error) {
 		return task.setActiveTopology(topology)
 
 	} else {
-		// In all other cases, we can rely on the subscriber, through
-		// either badreads, or just subscribing, finding the topology
-		return false, nil
+		// Similarly, the subscriber will only start trying to subscribe
+		// if we tell it there's a topology on disk that can be
+		// subscribed to!
+
+		return task.setActiveTopology(topology)
 	}
 }
